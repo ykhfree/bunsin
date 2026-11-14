@@ -2,10 +2,12 @@
 //! of the selected profile. The fields are the user's draft. Only Save sends them.
 //! A typed token goes from its masked field into the command, and nowhere else.
 
-use crate::bridge::{ConnectionResult, UiCommand, UiState};
+use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
 use crate::shell::{Shell, labelled};
-use bunsin_api::{ConnectorConnection, ConnectorUpdate, LlmUpdate, TokenChange, TokenSource, ToolsReport};
-use bunsin_core::settings::{McpConfig, Wire, default_timeout_secs};
+use bunsin_api::{
+    ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange, TokenSource, ToolsReport,
+};
+use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, McpConfig, Wire, default_timeout_secs};
 use bunsin_core::tool::pin;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
@@ -44,6 +46,35 @@ pub struct ConnectionsForm {
     llm_message: Option<&'static str>,
     /// The window's own message about the last connector save that it did not send.
     connector_message: Option<&'static str>,
+    /// The LLM endpoint the LLM draft was made from. None if the server had none.
+    llm_base: Option<LlmConnection>,
+    /// True after the server refused an LLM save because the endpoint changed since the form loaded it.
+    llm_conflict: bool,
+    /// True if the last LLM save removed the stored token. "Save anyway" does the same.
+    llm_remove_token: bool,
+    /// The connector the connector draft was made from, with its name. Edit sets it.
+    connector_base: Option<(String, ConnectorConnection)>,
+    /// The connector whose save the server refused because it changed since the form loaded it.
+    connector_conflict: Option<String>,
+    /// True if the last connector save removed the stored token. "Save anyway" does the same.
+    connector_remove_token: bool,
+}
+
+/// The API format, address and model that the LLM form shows for `llm`.
+/// Without an endpoint the form offers the Claude API, so the owner only enters the token.
+fn llm_fields(llm: Option<&LlmConnection>) -> (Wire, &str, &str) {
+    match llm {
+        Some(llm) => (llm.wire, &llm.base_url, &llm.model),
+        None => (Wire::AnthropicMessages, ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL),
+    }
+}
+
+/// The address of a connector that the form can edit.
+fn http_url(connector: &ConnectorConnection) -> Option<&str> {
+    match &connector.mcp {
+        McpConfig::Http { url } => Some(url),
+        McpConfig::Stdio { .. } => None,
+    }
 }
 
 fn text(input: &Entity<InputState>, cx: &App) -> String {
@@ -112,56 +143,118 @@ impl ConnectionsForm {
             token: token(window, cx),
             llm_message: None,
             connector_message: None,
+            llm_base: None,
+            llm_conflict: false,
+            llm_remove_token: false,
+            connector_base: None,
+            connector_conflict: None,
+            connector_remove_token: false,
         }
     }
 
-    /// Takes a new state from the server. The drafts stay, unless another profile is
-    /// selected or a save just succeeded. Then the saved form is loaded or emptied.
+    /// Takes a new state from the server. A draft that the user changed stays. The form
+    /// loads the server's connections if another profile is selected or a save just succeeded.
+    /// A draft that the user did not change follows the server.
     pub fn receive(&mut self, state: &UiState, window: &mut Window, cx: &mut App) {
         let new = state.connection_commands != self.commands_seen;
         self.commands_seen = state.connection_commands;
         let result = state.connection_result.as_ref().filter(|_| new);
         if self.profile != state.selected {
-            // Every draft goes, typed tokens too.
+            // Every draft and base goes, typed tokens too.
             self.profile = None;
             self.llm_message = None;
-            self.connector_message = None;
-            for input in [&self.llm_token, &self.name, &self.address, &self.token] {
-                set(input, "", window, cx);
-            }
+            self.llm_conflict = false;
+            set(&self.llm_token, "", window, cx);
+            self.load_connector("", None, window, cx);
+        }
+        match result {
+            Some(ConnectionResult::LlmSaved(Err(SaveError::Conflict))) => self.llm_conflict = true,
+            Some(ConnectionResult::ConnectorSaved {
+                name,
+                result: Err(SaveError::Conflict),
+            }) => self.connector_conflict = Some(name.clone()),
+            _ => {}
         }
         let llm_saved = matches!(result, Some(ConnectionResult::LlmSaved(Ok(()))));
         if llm_saved {
             // The token is on the server now, even if the reload after the save failed.
             set(&self.llm_token, "", window, cx);
         }
-        if (self.profile.is_none() || llm_saved)
-            && let (Some(profile), Some(connections)) = (&state.selected, &state.connections)
-        {
-            self.profile = Some(profile.clone());
-            let llm = connections.llm.as_ref();
-            self.wire = llm.map_or(Wire::AnthropicMessages, |llm| llm.wire);
-            set(&self.llm_address, llm.map_or("", |llm| &llm.base_url), window, cx);
-            set(&self.llm_model, llm.map_or("", |llm| &llm.model), window, cx);
-        }
         if matches!(result, Some(ConnectionResult::ConnectorSaved { result: Ok(()), .. })) {
-            for input in [&self.name, &self.address, &self.token] {
-                set(input, "", window, cx);
+            // The form is empty for the next connector.
+            self.load_connector("", None, window, cx);
+        }
+        let (Some(profile), Some(connections)) = (&state.selected, &state.connections) else {
+            return;
+        };
+        let llm = connections.llm.as_ref();
+        if self.profile.is_none() || llm_saved || (self.llm_base.as_ref() != llm && self.llm_untouched(cx)) {
+            self.load_llm(llm, window, cx);
+        }
+        self.profile = Some(profile.clone());
+        if let Some((name, base)) = &self.connector_base {
+            let server = connections.connectors.get(name);
+            if server != Some(base) && self.connector_untouched(cx) {
+                let name = name.clone();
+                self.load_connector(&name, server, window, cx);
             }
         }
     }
 
-    /// Fills the connector form with a saved connector, so the user can change it.
-    fn edit(&mut self, name: &str, url: &str, window: &mut Window, cx: &mut App) {
-        set(&self.name, name, window, cx);
-        set(&self.address, url, window, cx);
+    /// Shows the server's LLM endpoint, or the defaults if there is none, and makes it the base.
+    fn load_llm(&mut self, llm: Option<&LlmConnection>, window: &mut Window, cx: &mut App) {
+        let (wire, address, model) = llm_fields(llm);
+        self.wire = wire;
+        set(&self.llm_address, address, window, cx);
+        set(&self.llm_model, model, window, cx);
+        set(&self.llm_token, "", window, cx);
+        self.llm_base = llm.cloned();
+        self.llm_conflict = false;
+    }
+
+    /// True if the LLM fields show the base and the token field is empty.
+    fn llm_untouched(&self, cx: &App) -> bool {
+        let (wire, address, model) = llm_fields(self.llm_base.as_ref());
+        self.wire == wire
+            && text(&self.llm_address, cx) == address
+            && text(&self.llm_model, cx) == model
+            && text(&self.llm_token, cx).is_empty()
+    }
+
+    /// Shows connector `name` as the server has it, so the user can change it, and makes it the base.
+    /// A connector that the form cannot edit, or none, empties the form.
+    fn load_connector(
+        &mut self,
+        name: &str,
+        connector: Option<&ConnectorConnection>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let url = connector.and_then(http_url);
+        set(&self.name, if url.is_some() { name } else { "" }, window, cx);
+        set(&self.address, url.unwrap_or_default(), window, cx);
         set(&self.token, "", window, cx);
+        self.connector_base = connector
+            .filter(|_| url.is_some())
+            .map(|c| (name.to_owned(), c.clone()));
         self.connector_message = None;
+        self.connector_conflict = None;
+    }
+
+    /// True if the connector fields show the base and the token field is empty.
+    fn connector_untouched(&self, cx: &App) -> bool {
+        self.connector_base.as_ref().is_some_and(|(name, base)| {
+            text(&self.name, cx) == *name
+                && http_url(base) == Some(text(&self.address, cx).as_str())
+                && text(&self.token, cx).is_empty()
+        })
     }
 }
 
 impl Shell {
-    fn save_llm(&mut self, remove_token: bool, cx: &mut Context<Self>) {
+    /// Sends the LLM draft. The server refuses it if its endpoint is no longer the base,
+    /// unless `anyway` is true.
+    fn save_llm(&mut self, remove_token: bool, anyway: bool, cx: &mut Context<Self>) {
         let form = &mut self.connections;
         let Some(profile) = form.profile.clone() else {
             return;
@@ -176,18 +269,34 @@ impl Shell {
             None => default_timeout_secs(),
         };
         form.llm_message = None;
+        form.llm_conflict = false;
+        form.llm_remove_token = remove_token;
+        let expected = if anyway {
+            Expected::Unchecked
+        } else {
+            Expected::Value(form.llm_base.clone())
+        };
         let update = LlmUpdate {
             wire: form.wire,
             base_url: text(&form.llm_address, cx),
             model: text(&form.llm_model, cx),
             timeout_secs,
             token,
-            expected: bunsin_api::Expected::Unchecked,
+            expected,
         };
         self.send(UiCommand::SaveLlm { profile, update });
     }
 
-    fn save_connector(&mut self, remove_token: bool, cx: &mut Context<Self>) {
+    /// Drops the LLM draft and shows the server's endpoint.
+    fn load_server_llm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(connections) = &self.state.connections {
+            self.connections.load_llm(connections.llm.as_ref(), window, cx);
+        }
+    }
+
+    /// Sends the connector draft. The server refuses it if the connector is no longer the base,
+    /// unless `anyway` is true.
+    fn save_connector(&mut self, remove_token: bool, anyway: bool, cx: &mut Context<Self>) {
         let form = &mut self.connections;
         let Some(profile) = form.profile.clone() else {
             return;
@@ -209,12 +318,30 @@ impl Shell {
             return;
         };
         form.connector_message = None;
+        form.connector_conflict = None;
+        form.connector_remove_token = remove_token;
+        let expected = if anyway {
+            Expected::Unchecked
+        } else {
+            // The base belongs to one name. Under another name the draft is a new connector.
+            let base = form.connector_base.as_ref().filter(|(base, _)| *base == name);
+            Expected::Value(base.map(|(_, connector)| connector.clone()))
+        };
         let update = ConnectorUpdate {
             url: text(&form.address, cx),
             token,
-            expected: bunsin_api::Expected::Unchecked,
+            expected,
         };
         self.send(UiCommand::SaveConnector { profile, name, update });
+    }
+
+    /// Drops the connector draft and shows the server's connector of the same name.
+    fn load_server_connector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(connections) = &self.state.connections {
+            let name = text(&self.connections.name, cx);
+            self.connections
+                .load_connector(&name, connections.connectors.get(&name), window, cx);
+        }
     }
 
     /// One saved connector with its controls, and the result of Check or Approve if it was for this one.
@@ -247,7 +374,7 @@ impl Shell {
                 row = row
                     .child(labelled("address", url.clone()))
                     .child(labelled("token", token_text(connector.token)));
-                let (edit_name, url) = (name.to_owned(), url.clone());
+                let (edit_name, edited) = (name.to_owned(), connector.clone());
                 let remove = UiCommand::RemoveConnector {
                     profile: profile.to_owned(),
                     name: name.to_owned(),
@@ -257,7 +384,7 @@ impl Shell {
                         Button::new("edit")
                             .label("Edit")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.connections.edit(&edit_name, &url, window, cx);
+                                this.connections.load_connector(&edit_name, Some(&edited), window, cx);
                                 cx.notify();
                             })),
                     )
@@ -332,7 +459,7 @@ impl Shell {
             None => true,
         };
         let llm_result = match &self.state.connection_result {
-            Some(ConnectionResult::LlmSaved(Err(error))) => error.clone(),
+            Some(ConnectionResult::LlmSaved(Err(SaveError::Failed(error)))) => error.clone(),
             // "Saved" describes the form only while it equals the server's settings.
             Some(ConnectionResult::LlmSaved(Ok(()))) if !llm_changed => "Saved".to_owned(),
             _ => String::new(),
@@ -364,21 +491,29 @@ impl Shell {
                 Button::new("save-llm")
                     .label("Save")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_llm(false, cx);
+                        this.save_llm(false, false, cx);
                         cx.notify();
                     })),
             );
         if llm_token == TokenSource::Stored {
             llm_section = llm_section.child(Button::new("remove-llm-token").label("Remove stored token").on_click(
                 cx.listener(|this, _, _, cx| {
-                    this.save_llm(true, cx);
+                    this.save_llm(true, false, cx);
                     cx.notify();
                 }),
             ));
         }
         let llm_section = llm_section
             .child(labelled("llm-message", form.llm_message.unwrap_or_default()))
-            .child(labelled("llm-result", llm_result));
+            .child(labelled("llm-result", llm_result))
+            .children(form.llm_conflict.then(|| {
+                Self::conflict_warning(
+                    "llm",
+                    Self::load_server_llm,
+                    |this, cx| this.save_llm(this.connections.llm_remove_token, true, cx),
+                    cx,
+                )
+            }));
 
         // The saved connectors, each in its own ID scope.
         let rows: Vec<_> = server
@@ -392,10 +527,11 @@ impl Shell {
         let connector_result = match &self.state.connection_result {
             Some(ConnectionResult::ConnectorSaved { name, result: Ok(()) }) => format!("Saved: {name}"),
             Some(ConnectionResult::ConnectorRemoved { name, result: Ok(()) }) => format!("Removed: {name}"),
-            Some(
-                ConnectionResult::ConnectorSaved { result: Err(error), .. }
-                | ConnectionResult::ConnectorRemoved { result: Err(error), .. },
-            ) => error.clone(),
+            Some(ConnectionResult::ConnectorSaved {
+                result: Err(SaveError::Failed(error)),
+                ..
+            })
+            | Some(ConnectionResult::ConnectorRemoved { result: Err(error), .. }) => error.clone(),
             _ => String::new(),
         };
         let mut connector_form = div()
@@ -417,7 +553,7 @@ impl Shell {
                 Button::new("save-connector")
                     .label("Save connector")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_connector(false, cx);
+                        this.save_connector(false, false, cx);
                         cx.notify();
                     })),
             );
@@ -426,7 +562,7 @@ impl Shell {
                 Button::new("remove-connector-token")
                     .label("Remove stored token")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_connector(true, cx);
+                        this.save_connector(true, false, cx);
                         cx.notify();
                     })),
             );
@@ -436,7 +572,18 @@ impl Shell {
                 "connector-message",
                 form.connector_message.unwrap_or_default(),
             ))
-            .child(labelled("connector-result", connector_result));
+            .child(labelled("connector-result", connector_result))
+            // The warning belongs to the connector named in the form.
+            .children(
+                (form.connector_conflict.as_ref() == Some(&text(&form.name, cx))).then(|| {
+                    Self::conflict_warning(
+                        "connector",
+                        Self::load_server_connector,
+                        |this, cx| this.save_connector(this.connections.connector_remove_token, true, cx),
+                        cx,
+                    )
+                }),
+            );
 
         section
             .child(llm_section)

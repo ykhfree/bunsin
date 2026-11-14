@@ -4,7 +4,8 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    ApiResult, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, ProfileSnapshot, ToolsReport,
+    ApiError, ApiResult, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PrivacyUpdate, ProfileSnapshot,
+    ToolsReport,
 };
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
@@ -22,7 +23,7 @@ pub enum UiCommand {
     SetKillSwitch(bool),
     SavePrivacy {
         profile: String,
-        privacy: PrivacyConfig,
+        update: PrivacyUpdate,
     },
     /// Saves the LLM endpoint. A typed token travels only in this command.
     SaveLlm {
@@ -52,13 +53,23 @@ pub enum UiCommand {
     },
 }
 
-/// What the last connection command did. An error is the text to show.
+/// Why a save did nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SaveError {
+    /// The server holds another value than the one the form loaded.
+    Conflict,
+    /// Any other failure, as the text to show.
+    Failed(String),
+}
+
+/// What the last connection command did. A save keeps a conflict apart from other failures.
+/// Every other error is the text to show.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionResult {
-    LlmSaved(Result<(), String>),
+    LlmSaved(Result<(), SaveError>),
     ConnectorSaved {
         name: String,
-        result: Result<(), String>,
+        result: Result<(), SaveError>,
     },
     ConnectorRemoved {
         name: String,
@@ -83,7 +94,7 @@ pub struct UiState {
     /// The privacy settings of the selected profile, as the server has them.
     pub privacy: Option<PrivacyConfig>,
     /// The result of the last command, if it was `SavePrivacy`. A failed save is shown here, not in `error`.
-    pub privacy_result: Option<Result<(), String>>,
+    pub privacy_result: Option<Result<(), SaveError>>,
     /// How many `SavePrivacy` commands the bridge has run. It changes once per save.
     pub privacy_saves: u64,
     /// The LLM endpoint and the connectors of the selected profile, as the server has them.
@@ -99,17 +110,36 @@ pub struct UiState {
     pub connected: bool,
 }
 
+/// Refuses a command for `profile` if that profile is not the selected one.
+fn check_selected(selected: Option<&str>, profile: &str) -> Result<(), String> {
+    match selected {
+        None => Err("no profile is selected".to_owned()),
+        Some(selected) if selected != profile => Err("another profile is selected now, so nothing was done".to_owned()),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Runs `call` if `profile` is still the selected profile. The call does nothing until it is awaited.
 async fn for_profile<T>(
     selected: Option<&str>,
     profile: &str,
     call: impl Future<Output = ApiResult<T>>,
 ) -> Result<T, String> {
-    match selected {
-        None => Err("no profile is selected".to_owned()),
-        Some(selected) if selected != profile => Err("another profile is selected now, so nothing was done".to_owned()),
-        Some(_) => call.await.map_err(|e| e.to_string()),
-    }
+    check_selected(selected, profile)?;
+    call.await.map_err(|e| e.to_string())
+}
+
+/// Like `for_profile`, for a save. A conflict is kept apart from the other failures.
+async fn save_for(
+    selected: Option<&str>,
+    profile: &str,
+    call: impl Future<Output = ApiResult<()>>,
+) -> Result<(), SaveError> {
+    check_selected(selected, profile).map_err(SaveError::Failed)?;
+    call.await.map_err(|error| match error {
+        ApiError::Conflict(_) => SaveError::Conflict,
+        error => SaveError::Failed(error.to_string()),
+    })
 }
 
 /// Runs one command, then reloads the state from the engine.
@@ -125,24 +155,19 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.selected = Some(id);
             Ok(())
         }
-        (UiCommand::SavePrivacy { profile, privacy }, _) => {
-            let result = for_profile(
-                selected,
-                &profile,
-                api.set_privacy(&profile, bunsin_api::PrivacyUpdate::unchecked(privacy)),
-            )
-            .await;
+        (UiCommand::SavePrivacy { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_privacy(&profile, update)).await;
             state.privacy_result = Some(result);
             state.privacy_saves += 1;
             Ok(())
         }
         (UiCommand::SaveLlm { profile, update }, _) => {
-            let result = for_profile(selected, &profile, api.set_llm(&profile, update)).await;
+            let result = save_for(selected, &profile, api.set_llm(&profile, update)).await;
             state.connection_result = Some(ConnectionResult::LlmSaved(result));
             Ok(())
         }
         (UiCommand::SaveConnector { profile, name, update }, _) => {
-            let result = for_profile(selected, &profile, api.set_connector(&profile, &name, update)).await;
+            let result = save_for(selected, &profile, api.set_connector(&profile, &name, update)).await;
             state.connection_result = Some(ConnectionResult::ConnectorSaved { name, result });
             Ok(())
         }

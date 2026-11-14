@@ -106,6 +106,38 @@ pub async fn rig() -> Rig {
     }
 }
 
+/// Lets `kim`'s agent search Slack. Then hands `kim` an event that the agent answers
+/// after one search: a pending post with ID 2 that is based on that read.
+#[allow(dead_code)]
+pub async fn ingest_event_with_a_read(rig: &Rig) {
+    let tools = vec![tool("post", "Post a message"), tool("search", "Search messages")];
+    rig.slack.set_tools(tools.clone());
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.approved_tools.insert("slack".into(), tools);
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    rig.slack
+        .set_result("search", json!({"messages": [{"text": "The deploy moved to Friday."}]}));
+    let call = |tool: &str, args: serde_json::Value| {
+        json!({
+            "kind": "tool_call", "rationale": "Lee asked for the date", "summary": null,
+            "tool": tool, "args_json": args.to_string()
+        })
+        .to_string()
+    };
+    rig.llm
+        .reply(&call("slack/search", json!({"query": "deploy date"})), 10)
+        .reply(&call("slack/post", json!({"channel": "C1", "text": "Friday."})), 10);
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e-read".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "when is the deploy now?".into(),
+    };
+    rig.engine.ingest("kim", event).await.unwrap();
+}
+
 /// Hands `kim` a second event that ends as a pending post with ID 2.
 #[allow(dead_code)]
 pub async fn ingest_second_event(rig: &Rig) {

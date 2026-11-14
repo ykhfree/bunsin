@@ -3,6 +3,7 @@ use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
 use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem, ReadNote};
 use bunsin_core::sha256_hex;
+use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiSource, WikiSummary, WikiText};
 use rusqlite::{Connection, OptionalExtension, Row};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,24 @@ CREATE TABLE IF NOT EXISTS secrets (
     origin TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS wiki_pages (
+    slug TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    body TEXT NOT NULL,
+    sources TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    author TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wiki_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    page TEXT,
+    inbox_id INTEGER,
+    at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at INTEGER NOT NULL,
@@ -77,6 +96,59 @@ pub struct SealedSecret {
     /// The scheme, host and port the secret was entered for.
     pub origin: String,
 }
+
+/// What a change to a page did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WikiWrite {
+    Stored(WikiPage),
+    /// The page is not at the revision the change was written against. Nothing was stored.
+    RevisionMismatch {
+        current: u64,
+    },
+    /// The inbox item of the change is not pending any more. Nothing was stored.
+    ItemHandled,
+}
+
+fn author_name(author: WikiAuthor) -> &'static str {
+    match author {
+        WikiAuthor::Agent => "agent",
+        WikiAuthor::Owner => "owner",
+    }
+}
+
+type PageRow = (String, String, String, String, String, i64, i64, String);
+
+fn page_from_row(row: &Row<'_>) -> rusqlite::Result<PageRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn page(raw: PageRow) -> Result<WikiPage> {
+    let (slug, title, summary, body, sources, revision, updated_at, author) = raw;
+    Ok(WikiPage {
+        slug,
+        text: WikiText { title, summary, body },
+        sources: serde_json::from_str(&sources)?,
+        // SQLite stores signed integers. A revision is never negative.
+        revision: revision as u64,
+        updated_at,
+        author: if author == "owner" {
+            WikiAuthor::Owner
+        } else {
+            WikiAuthor::Agent
+        },
+    })
+}
+
+const PAGE_COLUMNS: &str = "slug, title, summary, body, sources, revision, updated_at, author";
 
 /// What `begin_event` found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +367,162 @@ impl ProfileStore {
         let mut statement = db.prepare("SELECT key FROM secrets ORDER BY key")?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- wiki ---
+
+    /// One line per page, in slug order.
+    pub fn wiki_index(&self) -> Result<Vec<WikiSummary>> {
+        let db = self.db();
+        let mut statement =
+            db.prepare("SELECT slug, title, summary, revision, updated_at FROM wiki_pages ORDER BY slug")?;
+        let rows = statement.query_map([], |row| {
+            Ok(WikiSummary {
+                slug: row.get(0)?,
+                title: row.get(1)?,
+                summary: row.get(2)?,
+                revision: row.get::<_, i64>(3)? as u64,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn wiki_page(&self, slug: &str) -> Result<Option<WikiPage>> {
+        let raw = self
+            .db()
+            .query_row(
+                &format!("SELECT {PAGE_COLUMNS} FROM wiki_pages WHERE slug = ?1"),
+                [slug],
+                page_from_row,
+            )
+            .optional()?;
+        raw.map(page).transpose()
+    }
+
+    /// Stores a page if it is at `base_revision` (0 means "the page does not exist").
+    ///
+    /// With `inbox_id`, the inbox item moves from pending to executed in the same
+    /// transaction, so an approved change is applied exactly once. Every stored change
+    /// also writes a history row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_wiki_page(
+        &self,
+        slug: &str,
+        text: &WikiText,
+        sources: &[WikiSource],
+        author: WikiAuthor,
+        base_revision: u64,
+        inbox_id: Option<i64>,
+        now: i64,
+    ) -> Result<WikiWrite> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        if let Some(id) = inbox_id {
+            let moved = tx.execute(
+                "UPDATE inbox SET state = 'executed', updated_at = ?1 WHERE id = ?2 AND state = 'pending'",
+                (now, id),
+            )?;
+            if moved != 1 {
+                return Ok(WikiWrite::ItemHandled);
+            }
+        }
+        let current = tx
+            .query_row("SELECT revision FROM wiki_pages WHERE slug = ?1", [slug], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+            .unwrap_or(0) as u64;
+        if current != base_revision {
+            // Dropping the transaction undoes the inbox move.
+            return Ok(WikiWrite::RevisionMismatch { current });
+        }
+        let stored = WikiPage {
+            slug: slug.to_owned(),
+            text: text.clone(),
+            sources: sources.to_vec(),
+            revision: current + 1,
+            updated_at: now,
+            author,
+        };
+        tx.execute(
+            "INSERT INTO wiki_pages (slug, title, summary, body, sources, revision, updated_at, author)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (slug) DO UPDATE SET title = excluded.title, summary = excluded.summary,
+                 body = excluded.body, sources = excluded.sources, revision = excluded.revision,
+                 updated_at = excluded.updated_at, author = excluded.author",
+            (
+                slug,
+                &text.title,
+                &text.summary,
+                &text.body,
+                serde_json::to_string(sources)?,
+                stored.revision as i64,
+                now,
+                author_name(author),
+            ),
+        )?;
+        tx.execute(
+            "INSERT INTO wiki_revisions (slug, revision, page, inbox_id, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                slug,
+                stored.revision as i64,
+                serde_json::to_string(&stored)?,
+                inbox_id,
+                now,
+            ),
+        )?;
+        tx.commit()?;
+        Ok(WikiWrite::Stored(stored))
+    }
+
+    /// Deletes a page. The history keeps its earlier revisions and a row for the deletion.
+    /// Returns false if there was no such page.
+    pub fn delete_wiki_page(&self, slug: &str, now: i64) -> Result<bool> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let revision: Option<i64> = tx
+            .query_row("SELECT revision FROM wiki_pages WHERE slug = ?1", [slug], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(revision) = revision else { return Ok(false) };
+        tx.execute("DELETE FROM wiki_pages WHERE slug = ?1", [slug])?;
+        tx.execute(
+            "INSERT INTO wiki_revisions (slug, revision, page, inbox_id, at) VALUES (?1, ?2, NULL, NULL, ?3)",
+            (slug, revision + 1, now),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The stored revisions of a page, oldest first. A deletion is `None`.
+    pub fn wiki_history(&self, slug: &str) -> Result<Vec<Option<WikiPage>>> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT page FROM wiki_revisions WHERE slug = ?1 ORDER BY id")?;
+        let rows = statement
+            .query_map([slug], |row| row.get::<_, Option<String>>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|text| text.map(|t| Ok(serde_json::from_str(&t)?)).transpose())
+            .collect()
+    }
+
+    /// True if a pending inbox item proposes a change to this page.
+    pub fn has_pending_wiki_change(&self, slug: &str) -> Result<bool> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT body FROM inbox WHERE state = 'pending'")?;
+        let bodies = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for body in bodies {
+            if let InboxBody::WikiChange { slug: pending, .. } = serde_json::from_str(&body)?
+                && pending == slug
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     // --- inbox ---
@@ -811,5 +1039,188 @@ mod tests {
             .unwrap();
         assert_eq!(s.inbox_item(item.id).unwrap().basis, basis);
         assert_eq!(s.list_inbox(1).unwrap()[0].basis, basis);
+    }
+
+    fn wiki_text(body: &str) -> WikiText {
+        WikiText {
+            title: "Deploy schedule".into(),
+            summary: "When we deploy".into(),
+            body: body.into(),
+        }
+    }
+
+    fn source() -> Vec<WikiSource> {
+        vec![WikiSource {
+            origin: "slack/search".into(),
+            detail: "{\"query\":\"deploy\"}".into(),
+        }]
+    }
+
+    fn stored(write: WikiWrite) -> WikiPage {
+        match write {
+            WikiWrite::Stored(page) => page,
+            other => panic!("expected a stored page, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_page_is_created_changed_listed_and_keeps_its_history() {
+        let (_dir, s) = store();
+        let first = stored(
+            s.write_wiki_page(
+                "deploy",
+                &wiki_text("Fridays."),
+                &source(),
+                WikiAuthor::Agent,
+                0,
+                None,
+                10,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            (first.revision, first.updated_at, first.author),
+            (1, 10, WikiAuthor::Agent)
+        );
+        let second = stored(
+            s.write_wiki_page("deploy", &wiki_text("Thursdays."), &[], WikiAuthor::Owner, 1, None, 20)
+                .unwrap(),
+        );
+        assert_eq!((second.revision, second.author), (2, WikiAuthor::Owner));
+        assert_eq!(s.wiki_page("deploy").unwrap(), Some(second.clone()));
+        assert_eq!(s.wiki_page("missing").unwrap(), None);
+
+        stored(
+            s.write_wiki_page("alpha", &wiki_text("x"), &[], WikiAuthor::Owner, 0, None, 30)
+                .unwrap(),
+        );
+        let index = s.wiki_index().unwrap();
+        assert_eq!(
+            index.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            ["alpha", "deploy"]
+        );
+        assert_eq!((index[1].revision, index[1].updated_at), (2, 20));
+
+        assert_eq!(s.wiki_history("deploy").unwrap(), [Some(first), Some(second)]);
+    }
+
+    #[test]
+    fn a_change_written_against_an_old_revision_is_refused() {
+        let (_dir, s) = store();
+        stored(
+            s.write_wiki_page("deploy", &wiki_text("v1"), &[], WikiAuthor::Agent, 0, None, 1)
+                .unwrap(),
+        );
+        stored(
+            s.write_wiki_page("deploy", &wiki_text("v2"), &[], WikiAuthor::Owner, 1, None, 2)
+                .unwrap(),
+        );
+        // A change that was written when the page was at revision 1.
+        let stale = s
+            .write_wiki_page("deploy", &wiki_text("stale"), &[], WikiAuthor::Agent, 1, None, 3)
+            .unwrap();
+        assert_eq!(stale, WikiWrite::RevisionMismatch { current: 2 });
+        // Two proposals for a new page: the second does not replace the first.
+        let again = s
+            .write_wiki_page("deploy", &wiki_text("new"), &[], WikiAuthor::Agent, 0, None, 4)
+            .unwrap();
+        assert_eq!(again, WikiWrite::RevisionMismatch { current: 2 });
+        assert_eq!(s.wiki_page("deploy").unwrap().unwrap().text.body, "v2");
+    }
+
+    #[test]
+    fn approving_a_page_change_stores_it_once_together_with_the_inbox_move() {
+        let (_dir, s) = store();
+        let body = InboxBody::WikiChange {
+            slug: "deploy".into(),
+            text: wiki_text("Fridays."),
+            sources: source(),
+            base_revision: 0,
+            previous: None,
+        };
+        let item = s
+            .add_inbox_item("k1", &body, "learned from a search", &[], ApprovalState::Pending, 1)
+            .unwrap();
+        assert!(s.has_pending_wiki_change("deploy").unwrap());
+        assert!(!s.has_pending_wiki_change("other").unwrap());
+
+        let page = stored(
+            s.write_wiki_page(
+                "deploy",
+                &wiki_text("Fridays."),
+                &source(),
+                WikiAuthor::Agent,
+                0,
+                Some(item.id),
+                5,
+            )
+            .unwrap(),
+        );
+        assert_eq!(page.revision, 1);
+        assert_eq!(s.inbox_item(item.id).unwrap().state, ApprovalState::Executed);
+        assert!(!s.has_pending_wiki_change("deploy").unwrap());
+
+        // A second approval of the same item stores nothing.
+        let again = s
+            .write_wiki_page(
+                "deploy",
+                &wiki_text("Fridays."),
+                &source(),
+                WikiAuthor::Agent,
+                1,
+                Some(item.id),
+                6,
+            )
+            .unwrap();
+        assert_eq!(again, WikiWrite::ItemHandled);
+        assert_eq!(s.wiki_page("deploy").unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn a_refused_page_change_leaves_its_inbox_item_pending() {
+        let (_dir, s) = store();
+        stored(
+            s.write_wiki_page("deploy", &wiki_text("v1"), &[], WikiAuthor::Owner, 0, None, 1)
+                .unwrap(),
+        );
+        let body = InboxBody::WikiChange {
+            slug: "deploy".into(),
+            text: wiki_text("x"),
+            sources: vec![],
+            base_revision: 0,
+            previous: None,
+        };
+        let item = s
+            .add_inbox_item("k1", &body, "r", &[], ApprovalState::Pending, 2)
+            .unwrap();
+        let result = s
+            .write_wiki_page("deploy", &wiki_text("x"), &[], WikiAuthor::Agent, 0, Some(item.id), 3)
+            .unwrap();
+        assert_eq!(result, WikiWrite::RevisionMismatch { current: 1 });
+        // The inbox move was undone with the refused write.
+        assert_eq!(s.inbox_item(item.id).unwrap().state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn a_deleted_page_is_gone_but_its_history_stays() {
+        let (_dir, s) = store();
+        let page = stored(
+            s.write_wiki_page("deploy", &wiki_text("v1"), &[], WikiAuthor::Owner, 0, None, 1)
+                .unwrap(),
+        );
+        assert!(s.delete_wiki_page("deploy", 2).unwrap());
+        assert!(!s.delete_wiki_page("deploy", 3).unwrap());
+        assert_eq!(s.wiki_page("deploy").unwrap(), None);
+        assert!(s.wiki_index().unwrap().is_empty());
+        assert_eq!(s.wiki_history("deploy").unwrap(), [Some(page), None]);
+        // The page can be created again.
+        assert_eq!(
+            stored(
+                s.write_wiki_page("deploy", &wiki_text("v2"), &[], WikiAuthor::Owner, 0, None, 4)
+                    .unwrap()
+            )
+            .revision,
+            1
+        );
     }
 }

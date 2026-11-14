@@ -11,6 +11,7 @@ use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, ProfileInfo};
 use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
+use bunsin_core::wiki::{WikiPage, WikiSummary, WikiText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -240,6 +241,17 @@ pub struct ConnectorUpdate {
     pub expected: Expected<Option<ConnectorConnection>>,
 }
 
+/// The owner's new text for a page of the agent's notes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiPageUpdate {
+    #[serde(flatten)]
+    pub text: WikiText,
+    /// The revision the owner edited. `Some(0)` means "the page must not exist yet".
+    /// `None` saves without a check.
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+}
+
 /// The tools a connector lists now, compared with the approved ones.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolsReport {
@@ -331,6 +343,17 @@ pub trait EngineApi: Send + Sync {
     ) -> BoxFuture<'a, ApiResult<()>>;
     /// Removes a connector and its stored token.
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// The agent's notes: one line per page.
+    fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
+    fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>>;
+    /// Stores the owner's text for a page. The owner's text replaces the agent's.
+    fn set_wiki_page<'a>(
+        &'a self,
+        profile: &'a str,
+        slug: &'a str,
+        update: WikiPageUpdate,
+    ) -> BoxFuture<'a, ApiResult<WikiPage>>;
+    fn delete_wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<()>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
 }

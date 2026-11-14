@@ -1,7 +1,9 @@
 mod common;
 
-use bunsin_api::{Connections, ConnectorUpdate, EngineApi, LlmUpdate, TokenChange, TokenSource};
-use bunsin_app::bridge::{ConnectionResult, UiCommand, UiState, apply, refresh, spawn_bridge};
+use bunsin_api::{
+    Connections, ConnectorUpdate, EngineApi, Expected, LlmUpdate, PrivacyUpdate, TokenChange, TokenSource,
+};
+use bunsin_app::bridge::{ConnectionResult, SaveError, UiCommand, UiState, apply, refresh, spawn_bridge};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use bunsin_core::settings::Wire;
@@ -37,7 +39,15 @@ fn with_pattern(label: &str, pattern: &str) -> PrivacyConfig {
 fn save(profile: &str, privacy: PrivacyConfig) -> UiCommand {
     UiCommand::SavePrivacy {
         profile: profile.into(),
-        privacy,
+        update: PrivacyUpdate::unchecked(privacy),
+    }
+}
+
+/// The text of a failed save. Panics on a success or a conflict.
+fn failure(result: &Option<Result<(), SaveError>>) -> String {
+    match result {
+        Some(Err(SaveError::Failed(error))) => error.clone(),
+        other => panic!("expected a failure, got {other:?}"),
     }
 }
 
@@ -280,10 +290,7 @@ async fn a_refused_save_shows_the_server_error_and_changes_nothing() {
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     apply(&*rig.engine, &mut state, save("kim", with_pattern("bad", "(unclosed"))).await;
-    let error = match &state.privacy_result {
-        Some(Err(error)) => error.clone(),
-        other => panic!("expected an error, got {other:?}"),
-    };
+    let error = failure(&state.privacy_result);
     assert!(
         error.contains("the pattern of `bad` is not a valid regular expression"),
         "{error}"
@@ -301,11 +308,8 @@ async fn save_privacy_for_a_profile_that_is_no_longer_selected_is_refused() {
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
     apply(&*rig.engine, &mut state, save("kim", with_pattern("kim", "KIM"))).await;
-    assert!(
-        matches!(&state.privacy_result, Some(Err(e)) if e.contains("another profile is selected")),
-        "{:?}",
-        state.privacy_result
-    );
+    let error = failure(&state.privacy_result);
+    assert!(error.contains("another profile is selected"), "{error}");
     for profile in ["kim", "lee"] {
         assert_eq!(rig.engine.privacy(profile).await.unwrap(), PrivacyConfig::default());
     }
@@ -317,7 +321,7 @@ async fn save_privacy_without_any_profile_reports_an_error() {
     let engine = empty_engine(&dir);
     let mut state = UiState::default();
     apply(&engine, &mut state, save("kim", PrivacyConfig::default())).await;
-    assert_eq!(state.privacy_result, Some(Err("no profile is selected".to_owned())));
+    assert_eq!(failure(&state.privacy_result), "no profile is selected");
     assert_eq!(state.privacy_saves, 1);
     assert_eq!(state.error, None);
     assert_eq!(state.privacy, None);
@@ -378,8 +382,11 @@ fn connection_commands(profile: &str) -> Vec<UiCommand> {
 fn error_of(result: &Option<ConnectionResult>) -> String {
     match result {
         Some(
-            ConnectionResult::LlmSaved(Err(error))
-            | ConnectionResult::ConnectorSaved { result: Err(error), .. }
+            ConnectionResult::LlmSaved(Err(SaveError::Failed(error)))
+            | ConnectionResult::ConnectorSaved {
+                result: Err(SaveError::Failed(error)),
+                ..
+            }
             | ConnectionResult::ConnectorRemoved { result: Err(error), .. }
             | ConnectionResult::Checked { result: Err(error), .. }
             | ConnectionResult::ToolsApproved { result: Err(error), .. },
@@ -641,4 +648,119 @@ async fn connection_commands_without_any_profile_report_an_error() {
     }
     assert_eq!(state.connection_commands, 5);
     assert_eq!(state.connections, None);
+}
+
+#[tokio::test]
+async fn a_privacy_save_against_a_changed_server_is_a_conflict_not_an_error() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let loaded = state.privacy.clone().unwrap();
+    let outside = with_pattern("outside", "OUT");
+    rig.engine
+        .set_privacy("kim", PrivacyUpdate::unchecked(outside.clone()))
+        .await
+        .unwrap();
+
+    let mine = with_pattern("mine", "MINE");
+    let checked = |expected| UiCommand::SavePrivacy {
+        profile: "kim".into(),
+        update: PrivacyUpdate {
+            privacy: mine.clone(),
+            expected,
+        },
+    };
+    apply(&*rig.engine, &mut state, checked(Expected::Value(loaded))).await;
+    assert_eq!(state.privacy_result, Some(Err(SaveError::Conflict)));
+    assert_eq!(state.error, None);
+    assert_eq!(state.privacy_saves, 1);
+    assert_eq!(state.privacy, Some(outside.clone()));
+    assert_eq!(rig.engine.privacy("kim").await.unwrap(), outside);
+
+    // A save that expects the server's value now goes through.
+    apply(&*rig.engine, &mut state, checked(Expected::Value(outside))).await;
+    assert_eq!(state.privacy_result, Some(Ok(())));
+    assert_eq!(rig.engine.privacy("kim").await.unwrap(), mine);
+}
+
+#[tokio::test]
+async fn an_llm_save_against_a_changed_server_is_a_conflict_not_an_error() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    // The form loaded "no endpoint". Another client saves one.
+    rig.engine
+        .set_llm("kim", llm("https://outside.example", TokenChange::Keep))
+        .await
+        .unwrap();
+    let save = UiCommand::SaveLlm {
+        profile: "kim".into(),
+        update: LlmUpdate {
+            expected: Expected::Value(None),
+            ..llm("https://mine.example", TokenChange::Set(TOKEN.into()))
+        },
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    assert_eq!(
+        state.connection_result,
+        Some(ConnectionResult::LlmSaved(Err(SaveError::Conflict)))
+    );
+    assert_eq!(state.error, None);
+    let kept = rig.engine.connections("kim").await.unwrap().llm.unwrap();
+    assert_eq!(
+        (kept.base_url.as_str(), kept.token),
+        ("https://outside.example", TokenSource::None)
+    );
+    assert!(!format!("{state:?}").contains(TOKEN));
+
+    // A failure that is not a conflict stays a failure with its text.
+    let save = UiCommand::SaveLlm {
+        profile: "kim".into(),
+        update: llm("http://plain.example", TokenChange::Keep),
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    assert!(error_of(&state.connection_result).contains("must start with https://"));
+}
+
+#[tokio::test]
+async fn a_connector_save_against_a_changed_server_is_a_conflict_not_an_error() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    // Two drafts of a new connector `jira`. The other client saves first.
+    rig.engine
+        .set_connector(
+            "kim",
+            "jira",
+            ConnectorUpdate {
+                expected: Expected::Value(None),
+                ..connector("https://first.example/jira", TokenChange::Keep)
+            },
+        )
+        .await
+        .unwrap();
+    let save = UiCommand::SaveConnector {
+        profile: "kim".into(),
+        name: "jira".into(),
+        update: ConnectorUpdate {
+            expected: Expected::Value(None),
+            ..connector("https://second.example/jira", TokenChange::Keep)
+        },
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    assert_eq!(
+        state.connection_result,
+        Some(ConnectionResult::ConnectorSaved {
+            name: "jira".into(),
+            result: Err(SaveError::Conflict),
+        })
+    );
+    assert_eq!(state.error, None);
+    let jira = &state.connections.as_ref().unwrap().connectors["jira"];
+    assert_eq!(
+        jira.mcp,
+        bunsin_core::settings::McpConfig::Http {
+            url: "https://first.example/jira".into()
+        }
+    );
 }

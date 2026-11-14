@@ -222,6 +222,11 @@ async fn a_token_reaches_only_its_own_profile() {
         panic!("expected a pending item")
     };
 
+    rig.engine
+        .set_wiki_page("lee", "team", note("Lee leads."))
+        .await
+        .unwrap();
+
     // The list shows the caller's own profile and nothing about others.
     let listed: Vec<String> = kim.list_profiles().await.unwrap().into_iter().map(|p| p.id).collect();
     assert_eq!(listed, ["kim"]);
@@ -253,6 +258,14 @@ async fn a_token_reaches_only_its_own_profile() {
             .await,
         );
         refused(kim.test_poll(other, 0).await.map(|_| ()));
+        refused(kim.wiki_index(other).await.map(|_| ()));
+        refused(kim.wiki_page(other, "team").await.map(|_| ()));
+        refused(
+            kim.set_wiki_page(other, "team", note("Mallory leads."))
+                .await
+                .map(|_| ()),
+        );
+        refused(kim.delete_wiki_page(other, "team").await);
         refused(kim.connections(other).await.map(|_| ()));
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
@@ -283,6 +296,10 @@ async fn a_token_reaches_only_its_own_profile() {
         );
     }
     // Nothing changed in lee's profile.
+    assert_eq!(
+        rig.engine.wiki_page("lee", "team").await.unwrap().text.body,
+        "Lee leads."
+    );
     assert_eq!(rig.engine.privacy("lee").await.unwrap(), PrivacyConfig::default());
     let lee = rig.engine.snapshot("lee").await.unwrap();
     assert!(!lee.kill_switch);
@@ -647,4 +664,45 @@ async fn a_conflict_keeps_its_kind_across_the_network() {
         .unwrap_err();
     assert!(matches!(error, ApiError::Conflict(_)), "{error:?}");
     assert_eq!(kim.privacy("kim").await.unwrap(), other);
+}
+
+fn note(body: &str) -> bunsin_api::WikiPageUpdate {
+    bunsin_api::WikiPageUpdate {
+        text: bunsin_core::wiki::WikiText {
+            title: "Team".into(),
+            summary: "Who leads".into(),
+            body: body.into(),
+        },
+        expected_revision: None,
+    }
+}
+
+#[tokio::test]
+async fn the_notes_are_read_and_written_through_the_server() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    assert!(kim.wiki_index("kim").await.unwrap().is_empty());
+    let page = kim.set_wiki_page("kim", "team", note("Kim leads.")).await.unwrap();
+    assert_eq!(page.revision, 1);
+    assert_eq!(kim.wiki_page("kim", "team").await.unwrap(), page);
+    assert_eq!(kim.wiki_index("kim").await.unwrap()[0].slug, "team");
+
+    // An edit from an old revision keeps its error kind across the network.
+    let mut stale = note("Stale.");
+    stale.expected_revision = Some(0);
+    assert!(matches!(
+        kim.set_wiki_page("kim", "team", stale).await,
+        Err(ApiError::Conflict(_))
+    ));
+    assert!(matches!(
+        kim.wiki_page("kim", "missing").await,
+        Err(ApiError::NotFound(_))
+    ));
+    assert!(matches!(
+        kim.set_wiki_page("kim", "Bad Slug", note("x")).await,
+        Err(ApiError::Invalid(_))
+    ));
+
+    kim.delete_wiki_page("kim", "team").await.unwrap();
+    assert!(kim.wiki_index("kim").await.unwrap().is_empty());
 }

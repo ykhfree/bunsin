@@ -13,11 +13,12 @@ use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
     ApiError, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PollPreview, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
+use bunsin_core::wiki::{WikiPage, WikiSummary};
 use bunsin_engine::Engine;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -245,6 +246,43 @@ async fn delete_connector(
     Ok(Json(engine.remove_connector(&profile, &name).await?))
 }
 
+async fn wiki_index(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<WikiSummary>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.wiki_index(&profile).await?))
+}
+
+async fn get_wiki_page(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, slug)): Path<(String, String)>,
+) -> Reply<WikiPage> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.wiki_page(&profile, &slug).await?))
+}
+
+async fn put_wiki_page(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, slug)): Path<(String, String)>,
+    Json(update): Json<WikiPageUpdate>,
+) -> Reply<WikiPage> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_wiki_page(&profile, &slug, update).await?))
+}
+
+async fn delete_wiki_page(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, slug)): Path<(String, String)>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.delete_wiki_page(&profile, &slug).await?))
+}
+
 pub fn router(engine: Arc<Engine>) -> Router {
     let profile = |rest: &str| format!("{PROFILES}/{{profile}}/{rest}");
     Router::new()
@@ -260,6 +298,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("connectors/{connector}/tools/approve"), post(approve_tools))
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("polls/{index}/test"), post(test_poll))
+        .route(&profile("wiki"), get(wiki_index))
+        .route(
+            &profile("wiki/{slug}"),
+            get(get_wiki_page).put(put_wiki_page).delete(delete_wiki_page),
+        )
         .route(&profile("connections"), get(get_connections))
         .route(&profile("connections/llm"), put(put_llm))
         .route(

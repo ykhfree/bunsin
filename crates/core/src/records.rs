@@ -1,6 +1,7 @@
 //! Rows that the store keeps and the UI shows.
 
 use crate::approval::ApprovalState;
+use crate::wiki::{WikiSource, WikiText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -18,6 +19,16 @@ pub enum InboxBody {
     ToolCall { tool: String, args: Map<String, Value> },
     /// An event the user must handle.
     Escalation { summary: String },
+    /// A change to a page of the agent's notes. Approving it stores the page.
+    WikiChange {
+        slug: String,
+        text: WikiText,
+        sources: Vec<WikiSource>,
+        /// The revision of the page the change was written against. 0 for a new page.
+        base_revision: u64,
+        /// The text the change replaces, for a comparison. `None` for a new page.
+        previous: Option<WikiText>,
+    },
 }
 
 /// One read the agent made before it wrote a proposal.

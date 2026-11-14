@@ -3,13 +3,14 @@
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
     ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
 use bunsin_core::tool::PinSet;
+use bunsin_core::wiki::{WikiPage, WikiSummary};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, Url};
 use serde::Serialize;
@@ -290,6 +291,40 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connections/connectors/{name}"));
             self.send_only(Method::DELETE, &path, NO_BODY).await
+        })
+    }
+
+    fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "wiki"), NO_BODY).await })
+    }
+
+    fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>> {
+        Box::pin(async move {
+            self.call(Method::GET, &profile_path(profile, &format!("wiki/{slug}")), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_wiki_page<'a>(
+        &'a self,
+        profile: &'a str,
+        slug: &'a str,
+        update: WikiPageUpdate,
+    ) -> BoxFuture<'a, ApiResult<WikiPage>> {
+        Box::pin(async move {
+            self.call(
+                Method::PUT,
+                &profile_path(profile, &format!("wiki/{slug}")),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn delete_wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::DELETE, &profile_path(profile, &format!("wiki/{slug}")), NO_BODY)
+                .await
         })
     }
 }

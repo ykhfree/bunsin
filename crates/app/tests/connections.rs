@@ -2,10 +2,10 @@
 
 mod common;
 
-use bunsin_api::{ConnectorUpdate, EngineApi, LlmUpdate, TokenChange, TokenSource};
+use bunsin_api::{ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, TokenSource};
 use bunsin_app::bridge::ConnectionResult;
 use bunsin_app::shell::Shell;
-use bunsin_core::settings::{ConnectorSection, McpConfig, Wire};
+use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ConnectorSection, McpConfig, Wire};
 use bunsin_testkit::tool;
 use common::window::{REFRESH, label, on_screen, open_settings, runtime, screen_texts, value, wait_until};
 use gpui_kit::test::TestWindowExt;
@@ -83,6 +83,37 @@ fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
     }
 }
 
+const CONFLICT: &str = "The settings changed on the server since this form loaded them. Nothing was saved.";
+
+/// Fails if form `form` shows the conflict warning or its controls.
+fn assert_no_conflict(window: &Window, form: &str) {
+    for part in ["conflict", "load", "save-anyway"] {
+        let id = SharedString::from(format!("{form}-{part}"));
+        assert!(window.try_find(id.clone()).is_none(), "{id}");
+    }
+}
+
+/// Saves connector `name` for kim from outside the window and waits until a refresh shows it.
+fn set_connector_from_outside(
+    cx: &mut TestAppContext,
+    rt: &tokio::runtime::Runtime,
+    rig: &common::Rig,
+    shell: &Entity<Shell>,
+    name: &'static str,
+    url: &str,
+) {
+    rt.block_on(rig.engine.set_connector("kim", name, connector(url, TokenChange::Keep)))
+        .unwrap();
+    let shown = McpConfig::Http { url: url.into() };
+    wait_until(cx, shell, "the outside change", |s| {
+        s.state
+            .connections
+            .as_ref()
+            .and_then(|c| c.connectors.get(name))
+            .is_some_and(|c| c.mcp == shown)
+    });
+}
+
 /// Which API format the radio group shows as chosen: 0 Anthropic, 1 OpenAI.
 fn wire_checked(window: &mut Window) -> (Option<bool>, Option<bool>) {
     let group = window.within("llm-wire");
@@ -95,8 +126,9 @@ fn the_section_shows_the_server_connections_of_the_selected_profile(cx: &mut Tes
     let rig = rt.block_on(common::rig());
     let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, _| {
-        assert_eq!(value(window, "llm-address"), "");
-        assert_eq!(value(window, "llm-model"), "");
+        // No endpoint is saved, so the form offers the Claude API.
+        assert_eq!(value(window, "llm-address"), ANTHROPIC_BASE_URL);
+        assert_eq!(value(window, "llm-model"), ANTHROPIC_DEFAULT_MODEL);
         assert_eq!(label(window, "llm-token-state"), "no token");
         assert_eq!(wire_checked(window), (Some(true), Some(false)));
         assert!(window.try_find("remove-llm-token").is_none());
@@ -183,6 +215,7 @@ fn saving_the_llm_endpoint_stores_the_token_on_the_server_only(cx: &mut TestAppC
     on_screen(cx, window, |window, _| {
         let result = label(window, "llm-result");
         assert!(result.contains("enter the token again"), "{result}");
+        assert_no_conflict(window, "llm");
         assert_eq!(value(window, "llm-address"), "https://other.example/v1");
         assert_eq!(value(window, "llm-model"), "gpt-test");
     });
@@ -385,6 +418,7 @@ fn a_bad_name_and_a_refused_address_show_the_server_error_and_keep_the_draft(cx:
             result.contains("an address inside the server's own network"),
             "{result}"
         );
+        assert_no_conflict(window, "connector");
         assert_eq!(value(window, "connector-name"), "jira");
         assert_eq!(value(window, "connector-address"), "https://localhost/mcp");
         assert_eq!(label(window, "connector-count"), "Connectors: 0");
@@ -490,10 +524,29 @@ fn a_refresh_does_not_overwrite_the_connection_drafts(cx: &mut TestAppContext) {
         assert_eq!(wire_checked(window), (Some(false), Some(true)));
         assert_eq!(value(window, "connector-name"), "typed");
         assert_eq!(value(window, "connector-address"), "https://typed.example/mcp");
-        // The token field still holds the typed token: the save stores it.
         window.click("save-llm", cx);
     });
+    // The form was made from "no endpoint". The server has one now, so the save is refused.
     wait_for_commands(cx, &shell, 1);
+    let server = rt.block_on(rig.engine.connections("kim")).unwrap().llm.unwrap();
+    assert_eq!(
+        (server.base_url.as_str(), server.token),
+        ("https://server.example", TokenSource::None)
+    );
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "llm-conflict"), CONFLICT);
+        assert_eq!(label(window, "llm-result"), "");
+        assert_eq!(value(window, "llm-address"), "https://typed.example/v1");
+        assert_eq!(value(window, "llm-model"), "typed-model");
+        assert_not_on_screen(window, TOKEN, "https://typed.example/v1");
+        // The token field still holds the typed token: "Save anyway" stores it.
+        window.click("llm-save-anyway", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    on_screen(cx, window, |window, _| {
+        assert_no_conflict(window, "llm");
+        assert_eq!(label(window, "llm-result"), "Saved");
+    });
     let saved = rt.block_on(rig.engine.connections("kim")).unwrap().llm.unwrap();
     assert_eq!(
         (saved.base_url.as_str(), saved.model.as_str(), saved.wire, saved.token),
@@ -601,7 +654,9 @@ fn another_profile_discards_the_drafts_and_saves_only_to_itself(cx: &mut TestApp
         s.state.selected.as_deref() == Some("lee") && s.state.connections.is_some()
     });
     on_screen(cx, window, |window, cx| {
-        for id in ["llm-address", "llm-model", "connector-name", "connector-address"] {
+        assert_eq!(value(window, "llm-address"), ANTHROPIC_BASE_URL);
+        assert_eq!(value(window, "llm-model"), ANTHROPIC_DEFAULT_MODEL);
+        for id in ["connector-name", "connector-address"] {
             assert_eq!(value(window, id), "", "{id}");
         }
         // Save without typing a token. A token left over from kim would be stored for lee.
@@ -666,4 +721,239 @@ fn a_stdio_connector_is_listed_read_only(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
     let connectors = rt.block_on(rig.engine.connections("kim")).unwrap().connectors;
     assert_eq!(connectors["local"].mcp, stdio);
+}
+
+#[gpui_kit::test]
+fn with_no_endpoint_a_token_alone_saves_the_claude_api(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(wire_checked(window), (Some(true), Some(false)));
+        assert_eq!(value(window, "llm-address"), ANTHROPIC_BASE_URL);
+        assert_eq!(value(window, "llm-model"), ANTHROPIC_DEFAULT_MODEL);
+        fill(window, cx, "llm-token", TOKEN);
+        window.click("save-llm", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let saved = rt.block_on(rig.engine.connections("kim")).unwrap().llm.unwrap();
+    assert_eq!(
+        (saved.wire, saved.base_url.as_str(), saved.model.as_str(), saved.token),
+        (
+            Wire::AnthropicMessages,
+            ANTHROPIC_BASE_URL,
+            ANTHROPIC_DEFAULT_MODEL,
+            TokenSource::Stored
+        )
+    );
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "llm-result"), "Saved");
+        assert_not_on_screen(window, TOKEN, ANTHROPIC_BASE_URL);
+    });
+}
+
+#[gpui_kit::test]
+fn unchanged_connection_forms_follow_the_server(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    add_jira(&rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    // The prefilled LLM form and an edited-then-untouched connector form.
+    on_screen(cx, window, |window, cx| click_row(window, cx, "jira", "edit"));
+
+    let other = llm(
+        Wire::OpenAiChat,
+        "https://server.example/v1",
+        "server-model",
+        TokenChange::Keep,
+    );
+    rt.block_on(rig.engine.set_llm("kim", other)).unwrap();
+    wait_until(cx, &shell, "the outside endpoint", |s| {
+        s.state.connections.as_ref().is_some_and(|c| c.llm.is_some())
+    });
+    set_connector_from_outside(cx, &rt, &rig, &shell, "jira", "https://mcp.example/jira/moved");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(value(window, "llm-address"), "https://server.example/v1");
+        assert_eq!(value(window, "llm-model"), "server-model");
+        assert_eq!(wire_checked(window), (Some(false), Some(true)));
+        assert_eq!(value(window, "connector-name"), "jira");
+        assert_eq!(value(window, "connector-address"), "https://mcp.example/jira/moved");
+        assert_no_conflict(window, "llm");
+        assert_no_conflict(window, "connector");
+        // The followed values are the new bases: saving them is not a conflict.
+        fill(window, cx, "llm-model", "my-model");
+        window.click("save-llm", cx);
+        fill(window, cx, "connector-address", "https://mcp.example/jira/mine");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    let saved = rt.block_on(rig.engine.connections("kim")).unwrap();
+    assert_eq!(saved.llm.unwrap().model, "my-model");
+    assert_eq!(
+        saved.connectors["jira"].mcp,
+        McpConfig::Http {
+            url: "https://mcp.example/jira/mine".into()
+        }
+    );
+}
+
+/// Saves connector `jira` for kim before a window opens.
+fn add_jira(rt: &tokio::runtime::Runtime, rig: &common::Rig) {
+    let jira = connector("https://mcp.example/jira", TokenChange::Keep);
+    rt.block_on(rig.engine.set_connector("kim", "jira", jira)).unwrap();
+}
+
+#[gpui_kit::test]
+fn a_connector_save_over_an_outside_change_warns_and_save_anyway_overwrites(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    add_jira(&rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        click_row(window, cx, "jira", "edit");
+        fill(window, cx, "connector-address", "https://mcp.example/jira/mine");
+    });
+    set_connector_from_outside(cx, &rt, &rig, &shell, "jira", "https://mcp.example/jira/outside");
+    on_screen(cx, window, |window, cx| {
+        // The edited draft did not follow the server.
+        assert_eq!(value(window, "connector-address"), "https://mcp.example/jira/mine");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let jira = || {
+        rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"]
+            .mcp
+            .clone()
+    };
+    let url = |url: &str| McpConfig::Http { url: url.into() };
+    assert_eq!(jira(), url("https://mcp.example/jira/outside"));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-conflict"), CONFLICT);
+        assert_eq!(label(window, "connector-result"), "");
+        assert_eq!(value(window, "connector-name"), "jira");
+        assert_eq!(value(window, "connector-address"), "https://mcp.example/jira/mine");
+        // The warning belongs to `jira`. Under another name it is not shown.
+        fill(window, cx, "connector-name", "wiki");
+        assert_no_conflict(window, "connector");
+        fill(window, cx, "connector-name", "jira");
+        window.click("connector-save-anyway", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    assert_eq!(jira(), url("https://mcp.example/jira/mine"));
+    on_screen(cx, window, |window, _| {
+        assert_no_conflict(window, "connector");
+        assert_eq!(label(window, "connector-result"), "Saved: jira");
+    });
+}
+
+#[gpui_kit::test]
+fn a_second_new_connector_with_the_same_name_warns_and_load_shows_the_first(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "wiki");
+        fill(window, cx, "connector-address", "https://mcp.example/wiki/mine");
+        fill(window, cx, "connector-token", SLACK_TOKEN);
+    });
+    // Another client adds a new connector with the same name first.
+    let first = ConnectorUpdate {
+        expected: Expected::Value(None),
+        ..connector("https://mcp.example/wiki/first", TokenChange::Keep)
+    };
+    rt.block_on(rig.engine.set_connector("kim", "wiki", first)).unwrap();
+    wait_until(cx, &shell, "the outside connector", |s| {
+        s.state
+            .connections
+            .as_ref()
+            .is_some_and(|c| c.connectors.contains_key("wiki"))
+    });
+    on_screen(cx, window, |window, cx| window.click("save-connector", cx));
+    wait_for_commands(cx, &shell, 1);
+    let wiki = rt.block_on(rig.engine.connections("kim")).unwrap().connectors["wiki"].clone();
+    assert_eq!(
+        (wiki.mcp, wiki.token),
+        (
+            McpConfig::Http {
+                url: "https://mcp.example/wiki/first".into()
+            },
+            TokenSource::None
+        )
+    );
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-conflict"), CONFLICT);
+        assert_eq!(value(window, "connector-address"), "https://mcp.example/wiki/mine");
+        assert_not_on_screen(window, SLACK_TOKEN, "https://mcp.example/wiki/mine");
+        window.click("connector-load", cx);
+        assert_no_conflict(window, "connector");
+        assert_eq!(value(window, "connector-name"), "wiki");
+        assert_eq!(value(window, "connector-address"), "https://mcp.example/wiki/first");
+        // Load dropped the typed token too. A save now changes nothing.
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    let wiki = rt.block_on(rig.engine.connections("kim")).unwrap().connectors["wiki"].clone();
+    assert_eq!(wiki.token, TokenSource::None);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "connector-result"), "Saved: wiki");
+    });
+}
+
+#[gpui_kit::test]
+fn save_anyway_after_a_refused_token_removal_removes_the_token(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let endpoint = |model: &str, token| llm(Wire::AnthropicMessages, "https://llm.example", model, token);
+    rt.block_on(
+        rig.engine
+            .set_llm("kim", endpoint("m1", TokenChange::Set(TOKEN.into()))),
+    )
+    .unwrap();
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| fill(window, cx, "llm-model", "my-model"));
+    rt.block_on(rig.engine.set_llm("kim", endpoint("outside-model", TokenChange::Keep)))
+        .unwrap();
+    wait_until(cx, &shell, "the outside change", |s| {
+        s.state
+            .connections
+            .as_ref()
+            .and_then(|c| c.llm.as_ref())
+            .is_some_and(|llm| llm.model == "outside-model")
+    });
+    on_screen(cx, window, |window, cx| window.click("remove-llm-token", cx));
+    wait_for_commands(cx, &shell, 1);
+    let server = || rt.block_on(rig.engine.connections("kim")).unwrap().llm.unwrap();
+    assert_eq!(
+        (server().model.as_str(), server().token),
+        ("outside-model", TokenSource::Stored)
+    );
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "llm-conflict"), CONFLICT);
+        window.click("llm-save-anyway", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    // "Save anyway" repeats the refused save: the token goes, and the typed model is saved.
+    assert_eq!(
+        (server().model.as_str(), server().token),
+        ("my-model", TokenSource::None)
+    );
+}
+
+#[gpui_kit::test]
+fn a_saved_endpoint_is_shown_not_the_defaults(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let saved = llm(
+        Wire::AnthropicMessages,
+        "https://gateway.example",
+        "saved-model",
+        TokenChange::Keep,
+    );
+    rt.block_on(rig.engine.set_llm("kim", saved)).unwrap();
+    let (window, _shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(value(window, "llm-address"), "https://gateway.example");
+        assert_eq!(value(window, "llm-model"), "saved-model");
+        assert_eq!(label(window, "llm-token-state"), "no token");
+    });
 }

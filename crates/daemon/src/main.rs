@@ -3,7 +3,9 @@
 //! Operator commands (`serve`, `profile-add`, `token-*`) work on the data directory
 //! of this machine. All other commands talk to a running server over HTTPS.
 
-use bunsin_api::{ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource};
+use bunsin_api::{
+    ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource, WikiPageUpdate,
+};
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
@@ -252,6 +254,48 @@ enum Command {
         profile: String,
         name: String,
     },
+    /// List the pages of the agent's notes.
+    WikiList {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Print one page of the notes with its sources.
+    WikiShow {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        slug: String,
+    },
+    /// Write a page of the notes yourself. The body is read from a file.
+    WikiSet {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        slug: String,
+        #[arg(long)]
+        title: String,
+        /// One line for the index.
+        #[arg(long)]
+        summary: String,
+        /// A markdown file with the body of the page.
+        #[arg(long)]
+        body_file: PathBuf,
+    },
+    /// Delete a page of the notes.
+    WikiDelete {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        slug: String,
+    },
+    /// Write the notes as markdown files into a folder: `index.md` and one file per page.
+    WikiExport {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        dir: PathBuf,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -261,6 +305,21 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
+}
+
+/// A page as a markdown file.
+fn page_markdown(page: &bunsin_core::wiki::WikiPage) -> String {
+    let mut text = format!(
+        "# {}\n\n{}\n\n{}\n\n## Sources\n\n",
+        page.text.title, page.text.summary, page.text.body
+    );
+    if page.sources.is_empty() {
+        text.push_str("- written by the owner\n");
+    }
+    for source in &page.sources {
+        text.push_str(&format!("- {}: {}\n", source.origin, source.detail));
+    }
+    text
 }
 
 fn json<T: serde::Serialize>(value: &T) -> String {
@@ -415,6 +474,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         format!("{tool} {}", serde_json::Value::Object(args.clone()))
                     }
                     InboxBody::Escalation { summary } => format!("escalation: {summary}"),
+                    InboxBody::WikiChange { slug, text, .. } => format!("note `{slug}`: {}", text.summary),
                 };
                 println!("  #{} [{}] {what}", item.id, item.state.as_str());
             }
@@ -580,6 +640,63 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .await
                 .map_err(text)?;
             println!("connector {name} of {profile} removed");
+        }
+        Command::WikiList { remote, profile } => {
+            for page in connect(&remote)?.wiki_index(&profile).await.map_err(text)? {
+                println!("{}\t{}\t{}", page.slug, page.title, page.summary);
+            }
+        }
+        Command::WikiShow { remote, profile, slug } => {
+            let page = connect(&remote)?.wiki_page(&profile, &slug).await.map_err(text)?;
+            println!("{}", page_markdown(&page));
+        }
+        Command::WikiSet {
+            remote,
+            profile,
+            slug,
+            title,
+            summary,
+            body_file,
+        } => {
+            let body =
+                std::fs::read_to_string(&body_file).map_err(|e| format!("cannot read {}: {e}", body_file.display()))?;
+            let update = WikiPageUpdate {
+                text: bunsin_core::wiki::WikiText { title, summary, body },
+                expected_revision: None,
+            };
+            let page = connect(&remote)?
+                .set_wiki_page(&profile, &slug, update)
+                .await
+                .map_err(text)?;
+            println!("page {} saved at revision {}", page.slug, page.revision);
+        }
+        Command::WikiDelete { remote, profile, slug } => {
+            connect(&remote)?
+                .delete_wiki_page(&profile, &slug)
+                .await
+                .map_err(text)?;
+            println!("page {slug} deleted");
+        }
+        Command::WikiExport { remote, profile, dir } => {
+            let engine = connect(&remote)?;
+            let index = engine.wiki_index(&profile).await.map_err(text)?;
+            let pages_dir = dir.join("pages");
+            std::fs::create_dir_all(&pages_dir).map_err(|e| format!("cannot create {}: {e}", pages_dir.display()))?;
+            let mut lines = vec!["# Notes".to_owned(), String::new()];
+            for entry in &index {
+                let page = engine.wiki_page(&profile, &entry.slug).await.map_err(text)?;
+                let path = pages_dir.join(format!("{}.md", page.slug));
+                std::fs::write(&path, page_markdown(&page))
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                lines.push(format!(
+                    "- [{}](pages/{}.md): {}",
+                    entry.title, entry.slug, entry.summary
+                ));
+            }
+            let path = dir.join("index.md");
+            std::fs::write(&path, lines.join("\n") + "\n")
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("{} page(s) written to {}", index.len(), dir.display());
         }
         Command::PollTest { remote, profile, index } => {
             let preview = connect(&remote)?.test_poll(&profile, index).await.map_err(text)?;

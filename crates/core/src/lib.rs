@@ -13,6 +13,7 @@ pub mod proposal;
 pub mod records;
 pub mod settings;
 pub mod tool;
+pub mod wiki;
 
 use sha2::{Digest, Sha256};
 

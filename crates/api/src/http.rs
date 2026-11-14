@@ -23,6 +23,10 @@
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
 //! | DELETE | `/v1/profiles/{p}/connections/connectors/{c}` | | |
+//! | GET | `/v1/profiles/{p}/wiki` | | `[WikiSummary]` |
+//! | GET | `/v1/profiles/{p}/wiki/{slug}` | | `WikiPage` |
+//! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
+//! | DELETE | `/v1/profiles/{p}/wiki/{slug}` | | |
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 

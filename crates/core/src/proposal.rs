@@ -41,6 +41,8 @@ pub enum ProposalError {
     BadToolId,
     #[error("`args_json` is not a JSON object: {0}")]
     BadArgs(String),
+    #[error("{0}")]
+    BadWikiUpdates(String),
 }
 
 /// The flat object the LLM returns. Every field is present; unused ones are null.
@@ -54,6 +56,8 @@ struct Raw {
     /// The tool arguments: a JSON object encoded as a string.
     /// A free-form object cannot be part of a strict reply schema, so it travels as text.
     args_json: Option<String>,
+    /// Page changes for the agent's notes. Missing in replies from before notes existed.
+    wiki_updates: Option<Vec<crate::wiki::WikiUpdate>>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -69,7 +73,7 @@ pub fn proposal_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "rationale", "summary", "tool", "args_json"],
+        "required": ["kind", "rationale", "summary", "tool", "args_json", "wiki_updates"],
         "properties": {
             "kind": {"type": "string", "enum": ["ignore", "escalate", "tool_call"]},
             "rationale": {"type": "string"},
@@ -78,14 +82,50 @@ pub fn proposal_schema() -> Value {
             "args_json": {
                 "type": ["string", "null"],
                 "description": "The tool arguments: one JSON object, encoded as a string."
+            },
+            "wiki_updates": {
+                "type": ["array", "null"],
+                "description": "Durable facts to keep in your notes, as whole pages. Null if there is nothing to keep.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["slug", "title", "summary", "body"],
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "body": {"type": "string"}
+                    }
+                }
             }
         }
     })
 }
 
+/// A checked reply: what to do, and what to keep in the notes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reply {
+    pub proposal: Proposal,
+    pub wiki_updates: Vec<crate::wiki::WikiUpdate>,
+}
+
 /// Parses and checks an LLM reply. A reply that fails here never reaches the policy check.
+pub fn parse_reply(reply: &str) -> Result<Reply, ProposalError> {
+    let mut raw: Raw = serde_json::from_str(reply.trim()).map_err(|e| ProposalError::Json(e.to_string()))?;
+    let wiki_updates = raw.wiki_updates.take().unwrap_or_default();
+    crate::wiki::check_updates(&wiki_updates).map_err(ProposalError::BadWikiUpdates)?;
+    Ok(Reply {
+        proposal: checked_proposal(raw)?,
+        wiki_updates,
+    })
+}
+
+/// Like `parse_reply`, without the page changes.
 pub fn parse_proposal(reply: &str) -> Result<Proposal, ProposalError> {
-    let raw: Raw = serde_json::from_str(reply.trim()).map_err(|e| ProposalError::Json(e.to_string()))?;
+    parse_reply(reply).map(|reply| reply.proposal)
+}
+
+fn checked_proposal(raw: Raw) -> Result<Proposal, ProposalError> {
     if raw.rationale.trim().is_empty() {
         return Err(ProposalError::EmptyRationale);
     }
@@ -255,5 +295,41 @@ mod tests {
         assert_eq!(required, properties);
         // A reply with all schema fields parses.
         assert!(parse_proposal(&reply("ignore", Value::Null, Value::Null, Value::Null)).is_ok());
+    }
+
+    #[test]
+    fn page_changes_come_with_any_kind_of_reply_and_are_checked() {
+        let with_updates = |updates: Value| {
+            json!({"kind": "ignore", "rationale": "r", "summary": null, "tool": null, "args_json": null, "wiki_updates": updates})
+                .to_string()
+        };
+        let page = json!({"slug": "deploy", "title": "Deploy", "summary": "When we deploy", "body": "Fridays."});
+        let reply = parse_reply(&with_updates(json!([page]))).unwrap();
+        assert_eq!(reply.proposal, Proposal::Ignore { rationale: "r".into() });
+        assert_eq!(reply.wiki_updates[0].slug, "deploy");
+
+        // Null, an empty list and a missing field all mean "nothing to keep".
+        assert!(parse_reply(&with_updates(Value::Null)).unwrap().wiki_updates.is_empty());
+        assert!(parse_reply(&with_updates(json!([]))).unwrap().wiki_updates.is_empty());
+        let old_reply = json!({"kind": "ignore", "rationale": "r", "summary": null, "tool": null, "args_json": null});
+        assert!(parse_reply(&old_reply.to_string()).unwrap().wiki_updates.is_empty());
+
+        let bad_slug = json!({"slug": "Deploy Plan", "title": "T", "summary": "S", "body": "B"});
+        assert!(matches!(
+            parse_reply(&with_updates(json!([bad_slug]))),
+            Err(ProposalError::BadWikiUpdates(_))
+        ));
+        let extra = json!({"slug": "a", "title": "T", "summary": "S", "body": "B", "author": "owner"});
+        assert!(matches!(
+            parse_reply(&with_updates(json!([extra]))),
+            Err(ProposalError::Json(_))
+        ));
+        let many: Vec<Value> = (0..4)
+            .map(|i| json!({"slug": format!("p{i}"), "title": "T", "summary": "S", "body": "B"}))
+            .collect();
+        assert!(matches!(
+            parse_reply(&with_updates(json!(many))),
+            Err(ProposalError::BadWikiUpdates(_))
+        ));
     }
 }

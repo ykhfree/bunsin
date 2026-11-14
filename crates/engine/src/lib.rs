@@ -3,6 +3,7 @@
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
 mod connections;
+mod notes;
 mod polling;
 mod secrets;
 
@@ -10,7 +11,7 @@ pub use secrets::{ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmUpdate, Outcome, PollPreview,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -20,12 +21,13 @@ use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
-use bunsin_core::proposal::{Proposal, parse_proposal, split_tool_id};
+use bunsin_core::proposal::{Proposal, parse_reply, split_tool_id};
 use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
+use bunsin_core::wiki::{WIKI_READ_TOOL, WikiPage, WikiSummary, WikiUpdate, index_text, page_text};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -45,6 +47,10 @@ enum Proposed {
     Ready {
         proposal: Proposal,
         reads: Vec<ReadNote>,
+        /// The page changes the final reply asks for.
+        wiki_updates: Vec<WikiUpdate>,
+        /// The pages of the notes that were read in this event.
+        pages_read: BTreeSet<String>,
     },
     /// No proposal this time. Another try can work, for example after a rate limit.
     Retry(String),
@@ -385,7 +391,19 @@ impl Engine {
             redactor,
         } = ctx;
         let corrections = store.recent_corrections(CORRECTIONS_IN_PROMPT).map_err(store_error)?;
-        let tools = Self::tool_hints(config);
+        let mut tools = Self::tool_hints(config);
+        // Replay gets no notes: they hold facts from after the replayed event.
+        let notes_index = match allow_reads {
+            true => Some(index_text(&store.wiki_index().map_err(store_error)?, self.now())),
+            false => None,
+        };
+        if allow_reads {
+            tools.push(ToolHint {
+                tool_id: WIKI_READ_TOOL.to_owned(),
+                description: "Read one page of your notes.".to_owned(),
+                input_schema: json!({"type": "object", "required": ["slug"], "properties": {"slug": {"type": "string"}}}),
+            });
+        }
         let mut counts = RedactionCounts::new();
         let mut request: CompletionRequest = assemble(
             &ContextInput {
@@ -397,12 +415,14 @@ impl Engine {
                 event,
                 max_output_tokens: config.max_output_tokens,
                 redactor,
+                notes_index: notes_index.as_deref(),
             },
             &mut counts,
         );
 
         let mut replies = Vec::new();
         let mut reads: Vec<ReadNote> = Vec::new();
+        let mut pages_read: BTreeSet<String> = BTreeSet::new();
         let mut used_tokens = 0;
         let mut repaired = false;
         loop {
@@ -433,10 +453,11 @@ impl Engine {
                 }
                 StopReason::End => {}
             }
-            let parsed = match parse_proposal(&response.content).map_err(|e| e.to_string()) {
+            let parsed = match parse_reply(&response.content).map_err(|e| e.to_string()) {
                 // A placeholder stands for removed text. Sending it to other people makes no sense.
-                Ok(Proposal::ToolCall { args, .. })
-                    if Value::Object(args.clone()).to_string().contains(PLACEHOLDER_PREFIX) =>
+                Ok(reply)
+                    if matches!(&reply.proposal, Proposal::ToolCall { args, .. }
+                        if Value::Object(args.clone()).to_string().contains(PLACEHOLDER_PREFIX)) =>
                 {
                     Err(
                         "the tool arguments contain a [REDACTED:...] placeholder; the removed value is not known. \
@@ -446,8 +467,8 @@ impl Engine {
                 }
                 other => other,
             };
-            let proposal = match parsed {
-                Ok(proposal) => proposal,
+            let (proposal, wiki_updates) = match parsed {
+                Ok(reply) => (reply.proposal, reply.wiki_updates),
                 Err(error) if repaired => {
                     let reason = format!("the proposal is invalid after one repair: {error}");
                     return Ok((Proposed::Retry(reason), replies));
@@ -469,18 +490,33 @@ impl Engine {
             };
 
             // A proposal other than an allowed read ends the loop.
-            let Proposal::ToolCall { tool, args, .. } = &proposal else {
-                return Ok((Proposed::Ready { proposal, reads }, replies));
+            let ready = |proposal, reads, pages_read| Proposed::Ready {
+                proposal,
+                reads,
+                wiki_updates,
+                pages_read,
             };
+            let Proposal::ToolCall { tool, args, .. } = &proposal else {
+                return Ok((ready(proposal, reads, pages_read), replies));
+            };
+            // The built-in notes tool is handled here. It is not in the permission table.
+            let reads_notes = tool == WIKI_READ_TOOL;
             let is_read = config
                 .policy
                 .rules
                 .get(tool)
                 .is_some_and(|rule| rule.class == ToolClass::Read);
-            if !allow_reads || !is_read || self.decide(ctx, tool).await? != Decision::Execute {
-                return Ok((Proposed::Ready { proposal, reads }, replies));
+            let allowed =
+                allow_reads && (reads_notes || (is_read && self.decide(ctx, tool).await? == Decision::Execute));
+            if !allowed {
+                return Ok((ready(proposal, reads, pages_read), replies));
             }
-            if reads.len() >= MAX_READS_PER_EVENT {
+            // The limit counts the reads of the notes and of connectors separately.
+            let same_kind = reads
+                .iter()
+                .filter(|read| (read.tool == WIKI_READ_TOOL) == reads_notes)
+                .count();
+            if same_kind >= MAX_READS_PER_EVENT {
                 let reason = format!("the agent asked for more than {MAX_READS_PER_EVENT} reads");
                 return Ok((Proposed::Stop(reason), replies));
             }
@@ -495,25 +531,43 @@ impl Engine {
                 ));
             }
 
-            let result = match split_tool_id(tool) {
-                Some((connector, name)) => match runtime.connector(connector) {
-                    Ok(connector) => connector.call_tool(name, args.clone()).await.map_err(|e| e.to_string()),
-                    Err(error) => Err(error),
-                },
-                None => Err(format!("`{tool}` is not a tool ID")),
+            let (text, ok) = if reads_notes {
+                let slug = args.get("slug").and_then(Value::as_str).unwrap_or_default();
+                match store.wiki_page(slug).map_err(store_error)? {
+                    Some(page) => {
+                        pages_read.insert(slug.to_owned());
+                        (
+                            redactor.redact(&page_text(&page, self.now()), &mut RedactionCounts::new()),
+                            true,
+                        )
+                    }
+                    None => (format!("Your notes have no page `{slug}`."), false),
+                }
+            } else {
+                let result = match split_tool_id(tool) {
+                    Some((connector, name)) => match runtime.connector(connector) {
+                        Ok(connector) => connector.call_tool(name, args.clone()).await.map_err(|e| e.to_string()),
+                        Err(error) => Err(error),
+                    },
+                    None => Err(format!("`{tool}` is not a tool ID")),
+                };
+                // A failed read goes back to the LLM as data. It can then choose another step.
+                let text = match &result {
+                    Ok(value) => Self::result_text(redactor, value),
+                    Err(error) => {
+                        format!(
+                            "The tool call failed: {}",
+                            redactor.redact(error, &mut RedactionCounts::new())
+                        )
+                    }
+                };
+                store
+                    .put_artifact("read_result", text.as_bytes(), self.now(), Some(key), None)
+                    .map_err(store_error)?;
+                (text, result.is_ok())
             };
-            // A failed read goes back to the LLM as data. It can then choose another step.
-            let text = match &result {
-                Ok(value) => Self::result_text(redactor, value),
-                Err(error) => format!(
-                    "The tool call failed: {}",
-                    redactor.redact(error, &mut RedactionCounts::new())
-                ),
-            };
-            store
-                .put_artifact("read_result", text.as_bytes(), self.now(), Some(key), None)
-                .map_err(store_error)?;
-            let detail = json!({"tool": tool, "args": Self::result_text(redactor, &Value::Object(args.clone())), "ok": result.is_ok()});
+            let detail =
+                json!({"tool": tool, "args": Self::result_text(redactor, &Value::Object(args.clone())), "ok": ok});
             self.audit(store, "read", Some(key), detail)?;
             reads.push(note);
 
@@ -719,12 +773,23 @@ impl Engine {
         let ctx = self.ctx(profile).await?;
         let (proposed, replies) = self.propose(&ctx, event, key, true).await?;
         for reply in &replies {
+            // The LLM can write personal data that it made up or was told in the owner's
+            // principles. The stored copy of its reply passes the filter like other text.
+            let stored = ctx.redactor.redact(reply, &mut RedactionCounts::new());
             store
-                .put_artifact("llm_reply", reply.as_bytes(), self.now(), Some(key), None)
+                .put_artifact("llm_reply", stored.as_bytes(), self.now(), Some(key), None)
                 .map_err(store_error)?;
         }
         let (proposal, reads) = match proposed {
-            Proposed::Ready { proposal, reads } => (proposal, reads),
+            Proposed::Ready {
+                proposal,
+                reads,
+                wiki_updates,
+                pages_read,
+            } => {
+                self.file_wiki_changes(&ctx, key, event, &reads, &pages_read, wiki_updates)?;
+                (proposal, reads)
+            }
             Proposed::Retry(error) => {
                 self.audit(store, "proposal_failed", Some(key), json!({"error": error}))?;
                 return Ok(Outcome::Failed { error });
@@ -773,8 +838,12 @@ impl Engine {
     async fn approve_item(&self, profile: &str, inbox_id: i64, edit: Option<Edit>) -> ApiResult<Outcome> {
         let store = self.store(profile)?;
         let mut item = store.inbox_item(inbox_id).map_err(store_error)?;
-        let InboxBody::ToolCall { tool: tool_id, args } = item.body.clone() else {
-            return Err(ApiError::NotAllowed("an escalation cannot be approved".into()));
+        let (tool_id, args) = match item.body.clone() {
+            InboxBody::ToolCall { tool, args } => (tool, args),
+            InboxBody::WikiChange { .. } => return self.approve_wiki_change(&store, &item, edit.is_some()),
+            InboxBody::Escalation { .. } => {
+                return Err(ApiError::NotAllowed("an escalation cannot be approved".into()));
+            }
         };
         if item.state != ApprovalState::Pending {
             return Err(ApiError::NotAllowed(format!(
@@ -883,8 +952,9 @@ impl Engine {
         // Replay runs no tool. A search made today would find the real reply and spoil the comparison.
         let (proposed, replies) = self.propose(&ctx, &event, &key, false).await?;
         for reply in &replies {
+            let stored = ctx.redactor.redact(reply, &mut RedactionCounts::new());
             store
-                .put_artifact("replay_reply", reply.as_bytes(), self.now(), Some(&key), None)
+                .put_artifact("replay_reply", stored.as_bytes(), self.now(), Some(&key), None)
                 .map_err(store_error)?;
         }
         let (proposal, error) = match proposed {
@@ -1067,5 +1137,26 @@ impl EngineApi for Engine {
 
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.delete_connector(profile, name) })
+    }
+
+    fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
+        Box::pin(async move { self.store(profile)?.wiki_index().map_err(store_error) })
+    }
+
+    fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>> {
+        Box::pin(async move { self.read_wiki_page(profile, slug) })
+    }
+
+    fn set_wiki_page<'a>(
+        &'a self,
+        profile: &'a str,
+        slug: &'a str,
+        update: WikiPageUpdate,
+    ) -> BoxFuture<'a, ApiResult<WikiPage>> {
+        Box::pin(async move { self.write_owner_page(profile, slug, update) })
+    }
+
+    fn delete_wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.delete_owner_page(profile, slug) })
     }
 }

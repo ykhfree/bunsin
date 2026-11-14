@@ -2,13 +2,13 @@
 
 mod common;
 
-use bunsin_api::EngineApi;
+use bunsin_api::{EngineApi, PrivacyUpdate};
 use bunsin_app::shell::Shell;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use common::window::{REFRESH, label, on_screen, open, open_settings, runtime, value, wait_until};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{App, AppContext, Entity, TestAppContext, Window};
+use gpui_kit::{AnyWindowHandle, App, AppContext, Entity, ScrollDelta, TestAppContext, Window, point, px};
 
 /// Types a label and a pattern into the Add fields. Does not press Add.
 fn type_pattern(window: &mut Window, cx: &mut App, label: &str, pattern: &str) {
@@ -277,6 +277,10 @@ fn a_refused_pattern_shows_the_server_error_and_keeps_the_form(cx: &mut TestAppC
         assert_eq!(label(window, "pattern-label-0"), "bad");
         assert_eq!(label(window, "pattern-regex-0"), "(unclosed");
         assert_eq!(window.find("privacy-phone").checked(), Some(false));
+        // A refusal that is not a conflict offers no "Save anyway".
+        for id in ["privacy-conflict", "privacy-load", "privacy-save-anyway"] {
+            assert!(window.try_find(id).is_none(), "{id}");
+        }
     });
     assert_eq!(
         rt.block_on(rig.engine.privacy("kim")).unwrap(),
@@ -471,5 +475,195 @@ fn save_is_refused_while_the_add_fields_hold_text(cx: &mut TestAppContext) {
     on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "privacy-message"), "");
         assert_eq!(label(window, "privacy-result"), "Saved");
+    });
+}
+
+/// The privacy settings that another client saves in the conflict tests.
+fn outside() -> PrivacyConfig {
+    PrivacyConfig {
+        card_number: false,
+        custom: vec![pattern("outside", "OUT-[0-9]+")],
+        ..PrivacyConfig::default()
+    }
+}
+
+/// Saves `privacy` for kim from outside the window and waits until a refresh shows it.
+fn change_privacy_from_outside(
+    cx: &mut TestAppContext,
+    rt: &tokio::runtime::Runtime,
+    rig: &common::Rig,
+    shell: &Entity<Shell>,
+    privacy: PrivacyConfig,
+) {
+    rt.block_on(rig.engine.set_privacy("kim", PrivacyUpdate::unchecked(privacy.clone())))
+        .unwrap();
+    wait_until(cx, shell, "the outside change", |s| {
+        s.state.privacy.as_ref() == Some(&privacy)
+    });
+}
+
+/// Opens the form, turns phone filtering off, lets another client save `outside()`, and saves.
+/// The server refuses the save. Returns the window with the warning on screen.
+fn refused_privacy_save(
+    cx: &mut TestAppContext,
+    rt: &tokio::runtime::Runtime,
+    rig: &common::Rig,
+) -> (AnyWindowHandle, Entity<Shell>) {
+    let (window, shell) = open_settings(cx, rt, rig);
+    on_screen(cx, window, |window, cx| window.click("privacy-phone", cx));
+    change_privacy_from_outside(cx, rt, rig, &shell, outside());
+    on_screen(cx, window, |window, cx| {
+        // The edited draft did not follow the server.
+        assert_eq!(label(window, "pattern-count"), "Custom patterns: 0");
+        assert_eq!(label(window, "privacy-changes"), "Not saved");
+        assert!(window.try_find("privacy-conflict").is_none());
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "privacy-conflict"), CONFLICT);
+        assert!(window.try_find("privacy-load").is_some());
+        assert!(window.try_find("privacy-save-anyway").is_some());
+        // The conflict is not a plain error line.
+        assert_eq!(label(window, "privacy-result"), "");
+        // The draft stays in the form.
+        assert_eq!(window.find("privacy-phone").checked(), Some(false));
+        assert_eq!(window.find("privacy-card-number").checked(), Some(true));
+        assert_eq!(label(window, "pattern-count"), "Custom patterns: 0");
+    });
+    assert_eq!(shell.read_with(cx, |s, _| s.state.error.clone()), None);
+    assert_eq!(rt.block_on(rig.engine.privacy("kim")).unwrap(), outside());
+    (window, shell)
+}
+
+const CONFLICT: &str = "The settings changed on the server since this form loaded them. Nothing was saved.";
+
+#[gpui_kit::test]
+fn a_privacy_save_over_an_outside_change_warns_and_save_anyway_overwrites(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = refused_privacy_save(cx, &rt, &rig);
+
+    // The warning outlasts the timed refreshes.
+    std::thread::sleep(REFRESH * 3);
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "privacy-conflict"), CONFLICT);
+        window.click("privacy-save-anyway", cx);
+    });
+    wait_for_saves(cx, &shell, 2);
+    let mine = PrivacyConfig {
+        phone: false,
+        ..PrivacyConfig::default()
+    };
+    assert_eq!(rt.block_on(rig.engine.privacy("kim")).unwrap(), mine);
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("privacy-conflict").is_none());
+        assert_eq!(label(window, "privacy-result"), "Saved");
+        assert_eq!(label(window, "privacy-changes"), "");
+    });
+}
+
+#[gpui_kit::test]
+fn load_after_a_conflict_shows_the_server_settings_and_drops_the_draft(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = refused_privacy_save(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.click("privacy-load", cx);
+        assert!(window.try_find("privacy-conflict").is_none());
+        assert_eq!(window.find("privacy-phone").checked(), Some(true));
+        assert_eq!(window.find("privacy-card-number").checked(), Some(false));
+        assert_eq!(label(window, "pattern-label-0"), "outside");
+        assert_eq!(label(window, "privacy-changes"), "");
+    });
+    // The warning does not come back with a refresh.
+    std::thread::sleep(REFRESH * 3);
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert!(window.try_find("privacy-conflict").is_none());
+        // A save without edits now expects the loaded settings and changes nothing.
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 2);
+    assert_eq!(rt.block_on(rig.engine.privacy("kim")).unwrap(), outside());
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("privacy-conflict").is_none());
+        assert_eq!(label(window, "privacy-result"), "Saved");
+    });
+}
+
+#[gpui_kit::test]
+fn an_unchanged_privacy_form_follows_the_server_and_an_edited_one_does_not(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    change_privacy_from_outside(cx, &rt, &rig, &shell, outside());
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(window.find("privacy-card-number").checked(), Some(false));
+        assert_eq!(label(window, "pattern-label-0"), "outside");
+        assert_eq!(label(window, "privacy-changes"), "");
+        assert!(window.try_find("privacy-conflict").is_none());
+        // Now the user edits the form.
+        window.click("privacy-phone", cx);
+    });
+
+    let again = PrivacyConfig {
+        email: false,
+        ..outside()
+    };
+    change_privacy_from_outside(cx, &rt, &rig, &shell, again.clone());
+    std::thread::sleep(REFRESH * 3);
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(window.find("privacy-email").checked(), Some(true));
+        assert_eq!(window.find("privacy-phone").checked(), Some(false));
+        assert_eq!(label(window, "privacy-changes"), "Not saved");
+        // The base is the first outside change. The server holds the second one now.
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    // The second outside change came after the edit, so the save is refused.
+    assert_eq!(rt.block_on(rig.engine.privacy("kim")).unwrap(), again);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "privacy-conflict"), CONFLICT);
+    });
+}
+
+#[gpui_kit::test]
+fn an_item_shows_the_reads_it_is_based_on_and_can_be_approved(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(common::ingest_event_with_a_read(&rig));
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbox-count"), "Approval inbox: 2");
+        assert_eq!(
+            label(window, "basis-2"),
+            r#"Read: slack/search {"query":"deploy date"}"#
+        );
+        // The item without reads shows no basis.
+        assert!(window.try_find("basis-1").is_none());
+        window.click("approve-2", cx);
+    });
+    wait_until(cx, &shell, "the executed item", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox.iter().any(|i| i.id == 2 && i.state.as_str() == "executed"))
+    });
+    let (tool, args) = rig.slack.calls().last().cloned().unwrap();
+    assert_eq!(tool, "post");
+    assert!(args["text"].as_str().unwrap().starts_with("Friday."), "{args:?}");
+    // The first item is still pending, below the other one. The inbox scrolls to its buttons.
+    on_screen(cx, window, |window, cx| {
+        window.scroll("inbox-1", ScrollDelta::Pixels(point(px(0.), px(-200.))), cx);
+        window.click("approve-1", cx);
+    });
+    wait_until(cx, &shell, "the first item executed", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox.iter().all(|i| i.state.as_str() == "executed"))
     });
 }
