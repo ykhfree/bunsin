@@ -519,7 +519,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             match &connections.llm {
                 Some(llm) => println!(
                     "llm\t{}\t{}\t{}\t{}",
-                    json(&llm.wire),
+                    json(&llm.wire).trim_matches('"'),
                     llm.base_url,
                     llm.model,
                     source(llm.token)

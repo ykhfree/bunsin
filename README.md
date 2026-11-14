@@ -62,8 +62,6 @@ The window uses GPUI through the `gpui-kit` crate.
 export BUNSIN_DATA_DIR=/var/lib/bunsin
 bunsind profile-add kim --owner "Kim"
 bunsind token-add kim --label "Kim's laptop"   # prints the access token once
-export BUNSIN_SECRET_KIM__LLM=...               # the LLM endpoint token of profile kim
-export BUNSIN_SECRET_KIM__SLACK=...             # the Slack MCP token of profile kim
 bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 ```
 
@@ -73,9 +71,15 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **TLS.** The server refuses to listen on a public address without TLS. Behind a TLS
   proxy, listen on `127.0.0.1`. To try Bunsin on one machine, run
   `bunsind serve --listen 127.0.0.1:8787` and use `http://127.0.0.1:8787` as the address.
-- **Secrets.** Profile settings name a secret key such as `LLM`. The server reads the value
-  from the environment variable `BUNSIN_SECRET_<PROFILE>__<KEY>`. A profile cannot name
-  another profile's secret.
+- **Tokens of the LLM and of MCP servers.** Each profile owner enters them in the window
+  or on the command line, and the server keeps them encrypted in that profile's database.
+  The key is in the file `master.key` in the data directory (or `--master-key-file`).
+  This protects a copied database or backup, so keep the key file out of backups of the
+  data directory. It does not protect against a person who can read the key file. If the
+  key file is lost, the owners enter their tokens again.
+- **Tokens from the operator.** If a profile has no stored token, the server reads the
+  environment variable `BUNSIN_SECRET_<PROFILE>__<KEY>`, for example
+  `BUNSIN_SECRET_KIM__LLM`. A profile cannot name another profile's secret.
 - **Upstream addresses.** Profile owners choose the LLM and MCP addresses, and the server
   sends the requests. By default the server accepts any `https://` address except
   `localhost` and internal IP addresses. A host name that resolves to an internal address
@@ -102,36 +106,46 @@ For a server with a private CA, set `BUNSIN_CA_CERT` to the CA certificate file.
 A new profile can do nothing. Its settings must name an LLM endpoint, connectors,
 approved tools and permission rules.
 
-### Principles, LLM and connectors
+### LLM endpoint and connectors
+
+Enter these in the desktop window (section "Connections"), or on the command line:
+
+```sh
+bunsind llm-set kim --wire anthropic-messages --base-url https://llm.example.com \
+    --model your-model-id --token-stdin          # type or pipe the token, then Enter
+bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin
+bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
+bunsind connections kim                          # addresses and where each token comes from
+bunsind tools kim slack                          # connects and lists the tools: the check that it works
+bunsind connector-remove kim jira                # removes the connector and its token
+```
+
+- `--wire` is `anthropic-messages` or `openai-chat`.
+- The server stores each token encrypted and never sends it back. `connections` shows
+  only "token stored on the server", "token from the server's environment" or "no token".
+- Without `--token-stdin` the stored token is kept. `--clear-token` removes it.
+- A token belongs to the address it was entered for. If you move a connection to another
+  host or port, enter the token again; the server refuses to keep it.
+- A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
+  for example `slack/post_message`.
+- One connector that cannot connect does not stop the others.
+- A connector that runs as a command on the server (`"transport": "stdio"`) is set in the
+  settings file by someone the operator allows, with `command` (an absolute path), `args`
+  and `env`.
+
+### Principles
 
 ```json
 {
   "principles": [
     "Answer in two sentences.",
     "Never promise a date without checking Jira."
-  ],
-  "llm": {
-    "wire": "anthropic-messages",
-    "base_url": "https://llm.example.com",
-    "model": "your-model-id",
-    "token_secret": "LLM"
-  },
-  "connectors": {
-    "slack": {
-      "mcp": { "transport": "http", "url": "https://mcp.example.com/slack" },
-      "token_secret": "SLACK"
-    }
-  }
+  ]
 }
 ```
 
-- `principles` go into every prompt as instructions. All other text the agent reads
-  (messages, pages, tool descriptions) is quoted as data.
-- `wire` is `anthropic-messages` or `openai-chat`.
-- `token_secret` is a secret key. With profile `kim`, `"LLM"` means the server's
-  environment variable `BUNSIN_SECRET_KIM__LLM`.
-- A connector with `"transport": "stdio"` takes `command` (an absolute path), `args`
-  and `env` instead of `url`.
+`principles` go into every prompt as instructions. All other text the agent reads
+(messages, pages, tool descriptions) is quoted as data.
 
 ### Permission rules
 
@@ -168,8 +182,7 @@ approved tools and permission rules.
   tools of connector `slack` and marks each as `new`, `changed`, `approved` or `gone`;
   `bunsind tools kim slack --approve` approves exactly the list it showed. Before every
   call the server compares the approved list with the live one. If a tool was changed or
-  removed, the call is denied until you approve the list again. Listing tools needs the
-  `llm` and `connectors` settings to be in place.
+  removed, the call is denied until you approve the list again.
 - **`policy.rules`** is the permission table. A key is `<connector>/<tool>`. The agent can
   propose only tools that have a rule and an approved entry.
 - **`class`** is `read`, `write` or `delete`. A read runs at once, also when the kill
@@ -275,7 +288,7 @@ address in `~/Library/Application Support/Bunsin/connection.json` and the token 
 macOS Keychain.
 
 The window shows the profile, the approval inbox with every argument of each call, the
-audit log, the kill switch and the privacy settings. It reloads from the server every 5 seconds. An edit before
+audit log, the kill switch, the connections and the privacy settings. It reloads from the server every 5 seconds. An edit before
 approval is available on the command line only.
 
 For development, `BUNSIN_SERVER` and `BUNSIN_TOKEN` in the environment take the place of

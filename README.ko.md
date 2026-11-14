@@ -57,8 +57,6 @@ Linux에서는 창을 빼고 빌드와 테스트를 합니다: `cargo test --wor
 export BUNSIN_DATA_DIR=/var/lib/bunsin
 bunsind profile-add kim --owner "Kim"
 bunsind token-add kim --label "Kim's laptop"   # 접속 token을 한 번만 출력합니다
-export BUNSIN_SECRET_KIM__LLM=...               # 프로필 kim의 LLM endpoint token
-export BUNSIN_SECRET_KIM__SLACK=...             # 프로필 kim의 Slack MCP token
 bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 ```
 
@@ -67,8 +65,12 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   프로필 생성과 token 발급은 서버에서만 할 수 있고, 네트워크로는 할 수 없습니다.
 - **TLS.** 서버는 외부 주소에 TLS 없이 뜨지 않습니다. TLS 프록시 뒤에 둘 때는 `127.0.0.1`에 띄웁니다.
   한 컴퓨터에서 시험할 때는 `bunsind serve --listen 127.0.0.1:8787`로 띄우고 주소로 `http://127.0.0.1:8787`을 씁니다.
-- **비밀 값.** 프로필 설정은 `LLM` 같은 비밀 값의 key만 가집니다. 서버는 환경 변수
-  `BUNSIN_SECRET_<프로필>__<KEY>`에서 값을 읽습니다. 한 프로필은 다른 프로필의 비밀 값을 가리킬 수 없습니다.
+- **LLM과 MCP 서버의 token.** 프로필 소유자가 창이나 명령줄에서 입력하고, 서버가 암호화해 그 프로필의 DB에 보관합니다.
+  키는 데이터 폴더의 `master.key` 파일(또는 `--master-key-file`)에 있습니다.
+  이 암호화는 DB만 복사되거나 백업이 유출된 경우를 막습니다. 그래서 키 파일은 데이터 폴더의 백업에 넣지 마십시오.
+  키 파일을 읽을 수 있는 사람은 막지 못합니다. 키 파일을 잃으면 소유자가 token을 다시 입력해야 합니다.
+- **운영자가 넣는 token.** 프로필에 저장된 token이 없으면 서버는 환경 변수 `BUNSIN_SECRET_<프로필>__<KEY>`를 읽습니다
+  (예: `BUNSIN_SECRET_KIM__LLM`). 한 프로필은 다른 프로필의 비밀 값을 가리킬 수 없습니다.
 - **접속 대상 주소.** LLM과 MCP 주소는 프로필 소유자가 정하고, 요청은 서버가 보냅니다.
   기본 규칙은 `localhost`와 내부 IP 주소를 뺀 모든 `https://` 주소를 받습니다.
   내부 주소로 풀리는 host 이름은 통과합니다. 여러 사람이 쓰는 서버나 사외에 노출된 서버는
@@ -91,35 +93,44 @@ bunsind config-set kim kim.json
 
 새 프로필은 아무것도 할 수 없습니다. 설정에 LLM endpoint, 커넥터, 승인한 도구, 권한 규칙을 넣어야 합니다.
 
-### 원칙, LLM, 커넥터
+### LLM endpoint와 커넥터
+
+데스크톱 창의 "Connections" 화면에서 입력하거나, 명령줄로 입력합니다.
+
+```sh
+bunsind llm-set kim --wire anthropic-messages --base-url https://llm.example.com \
+    --model your-model-id --token-stdin          # token을 입력하거나 파이프로 넘긴 뒤 Enter
+bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin
+bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
+bunsind connections kim                          # 주소와 각 token의 출처
+bunsind tools kim slack                          # 접속해서 도구 목록을 봅니다. 동작 확인 방법입니다
+bunsind connector-remove kim jira                # 커넥터와 그 token을 지웁니다
+```
+
+- `--wire`는 `anthropic-messages` 또는 `openai-chat`입니다.
+- 서버는 token을 암호화해 저장하고, 다시 돌려주지 않습니다. `connections`는 "서버에 저장됨",
+  "서버 환경 변수", "없음" 중 하나만 보여 줍니다.
+- `--token-stdin`이 없으면 저장된 token을 유지합니다. `--clear-token`은 token을 지웁니다.
+- token은 입력한 주소에 묶입니다. 연결을 다른 host나 port로 옮기면 token을 다시 입력해야 합니다.
+  서버는 그 경우 token 유지를 거부합니다.
+- 커넥터 이름은 a-z, 0-9, `-`로 된 1~32자입니다. 이름은 모든 도구 ID의 앞부분이 됩니다(예: `slack/post_message`).
+- 커넥터 하나가 접속하지 못해도 다른 커넥터는 멈추지 않습니다.
+- 서버에서 명령으로 실행하는 커넥터(`"transport": "stdio"`)는 운영자가 허용한 경우에 설정 파일로 넣습니다.
+  `command`(절대 경로), `args`, `env`를 적습니다.
+
+### 원칙
 
 ```json
 {
   "principles": [
     "Answer in two sentences.",
     "Never promise a date without checking Jira."
-  ],
-  "llm": {
-    "wire": "anthropic-messages",
-    "base_url": "https://llm.example.com",
-    "model": "your-model-id",
-    "token_secret": "LLM"
-  },
-  "connectors": {
-    "slack": {
-      "mcp": { "transport": "http", "url": "https://mcp.example.com/slack" },
-      "token_secret": "SLACK"
-    }
-  }
+  ]
 }
 ```
 
-- `principles`는 모든 프롬프트에 지시로 들어갑니다. agent가 읽는 그 밖의 글(메시지, 문서, 도구 설명)은
-  인용된 데이터로 들어갑니다.
-- `wire`는 `anthropic-messages` 또는 `openai-chat`입니다.
-- `token_secret`은 비밀 값의 key입니다. 프로필이 `kim`이면 `"LLM"`은 서버의 환경 변수
-  `BUNSIN_SECRET_KIM__LLM`을 뜻합니다.
-- `"transport": "stdio"` 커넥터는 `url` 대신 `command`(절대 경로), `args`, `env`를 받습니다.
+`principles`는 모든 프롬프트에 지시로 들어갑니다. agent가 읽는 그 밖의 글(메시지, 문서, 도구 설명)은
+인용된 데이터로 들어갑니다.
 
 ### 권한 규칙
 
@@ -155,7 +166,7 @@ bunsind config-set kim kim.json
   직접 입력하지 않습니다. `bunsind tools kim slack`은 커넥터 `slack`의 도구를 보여 주고 각각을
   `new`, `changed`, `approved`, `gone`으로 표시합니다. `bunsind tools kim slack --approve`는 화면에 보인 목록을 그대로 승인합니다.
   서버는 호출할 때마다 승인된 목록을 현재 목록과 비교합니다. 도구가 바뀌었거나 없어졌으면,
-  목록을 다시 승인할 때까지 호출을 거부합니다. 도구 목록을 보려면 `llm`과 `connectors` 설정이 먼저 있어야 합니다.
+  목록을 다시 승인할 때까지 호출을 거부합니다.
 - **`policy.rules`** 가 권한 표입니다. key는 `<커넥터>/<도구>`입니다. agent는 규칙과 승인 항목이 모두 있는 도구만 제안할 수 있습니다.
 - **`class`** 는 `read`, `write`, `delete` 중 하나입니다. 읽기는 바로 실행되고, 정지 스위치가 켜져 있어도 실행됩니다.
 - **`tier`** 는 쓰기를 어디까지 허용할지 정합니다.
@@ -251,7 +262,7 @@ cargo run --release -p bunsin-app
 창은 서버에 접속해 값을 확인한 뒤, 주소를 `~/Library/Application Support/Bunsin/connection.json`에,
 token을 macOS Keychain에 저장합니다.
 
-창은 프로필, 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치, 개인정보 설정을 보여 줍니다.
+창은 프로필, 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치, 연결 설정, 개인정보 설정을 보여 줍니다.
 5초마다 서버에서 상태를 다시 읽습니다. 승인 전에 초안을 수정하는 기능은 명령줄에만 있습니다.
 
 개발할 때는 환경 변수 `BUNSIN_SERVER`와 `BUNSIN_TOKEN`이 저장된 접속을 대신합니다.
