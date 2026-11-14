@@ -24,7 +24,8 @@ Bunsin is in early development. Read this list before you use it.
 - **One event gives one proposal.** The agent does not yet read a tool result and continue.
 - **The privacy filter works on patterns.** It finds email addresses, phone numbers and
   the other listed forms. It does not find names or postal addresses.
-- **There is no setup wizard.** You edit the settings as a JSON file.
+- **There is no setup wizard.** The window and the command line set the connections and
+  the privacy filter. Principles, permission rules and polls are edited as a JSON file.
 - **Not built yet:** retrieval of work knowledge, ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
@@ -221,6 +222,8 @@ The server calls the tool every `every_secs` seconds (30 at least) and hands eac
 item to the agent.
 
 - The tool must have a rule with the class `read` and must be in the approved list.
+- The example above is an illustration. Fit `args` and `mapping` to what your MCP
+  server's search tool takes and returns.
 - `mapping` says where the fields are in the tool's result, as dot paths such as
   `user.id`. `items` is the path to the list; leave it empty if the result is the list.
   The ID must stay the same for the same message. `thread` may be `null`.
@@ -232,6 +235,8 @@ item to the agent.
   the AI marker are not events.
 - An event whose handling fails is tried again on a later run, three times in all. Then
   an item in the inbox tells you.
+- One ID becomes an event once. A Jira issue or a page that changes under the same ID
+  is not seen again; search for comments or changes, which have their own IDs.
 - Polling pauses while the kill switch is on.
 - `bunsind status kim` shows the last result of each poll. "none usable" means the
   mapping does not fit the result.
@@ -287,8 +292,9 @@ private CA, the CA certificate file. It checks them against the server, then kee
 address in `~/Library/Application Support/Bunsin/connection.json` and the token in the
 macOS Keychain.
 
-The window shows the profile, the approval inbox with every argument of each call, the
-audit log, the kill switch, the connections and the privacy settings. It reloads from the server every 5 seconds. An edit before
+The window has two views. **Inbox** shows the approval inbox with every argument of each
+call, the audit log and the kill switch. **Settings** has the connections (LLM endpoint,
+connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds. An edit before
 approval is available on the command line only.
 
 For development, `BUNSIN_SERVER` and `BUNSIN_TOKEN` in the environment take the place of
