@@ -192,7 +192,8 @@ mod tests {
     #[test]
     fn rejects_malformed_replies() {
         let n = Value::Null;
-        let cases: Vec<(String, fn(&ProposalError) -> bool)> = vec![
+        type Check = fn(&ProposalError) -> bool;
+        let cases: Vec<(String, Check)> = vec![
             ("I think we should reply.".into(), |e| matches!(e, ProposalError::Json(_))),
             (reply("launch", n.clone(), n.clone(), n.clone()), |e| matches!(e, ProposalError::Json(_))),
             // An extra field is rejected, not ignored.

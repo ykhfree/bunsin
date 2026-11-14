@@ -71,7 +71,6 @@ impl ApprovalState {
 mod tests {
     use super::ApprovalEvent as E;
     use super::ApprovalState as S;
-    use super::*;
 
     const STATES: [S; 7] = [
         S::Draft,
