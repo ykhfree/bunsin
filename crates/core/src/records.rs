@@ -20,12 +20,23 @@ pub enum InboxBody {
     Escalation { summary: String },
 }
 
+/// One read the agent made before it wrote a proposal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadNote {
+    /// A tool ID: `<connector>/<tool>`.
+    pub tool: String,
+    pub args: Map<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InboxItem {
     pub id: i64,
     pub event_key: String,
     pub body: InboxBody,
     pub rationale: String,
+    /// The reads the proposal is based on, in order. The owner sees them before deciding.
+    #[serde(default)]
+    pub basis: Vec<ReadNote>,
     pub state: ApprovalState,
     pub created_at: i64,
     pub updated_at: i64,

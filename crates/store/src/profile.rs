@@ -1,7 +1,7 @@
 use crate::{Result, StoreError};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem};
+use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem, ReadNote};
 use bunsin_core::sha256_hex;
 use rusqlite::{Connection, OptionalExtension, Row};
 use serde_json::Value;
@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS inbox (
     event_key TEXT NOT NULL,
     body TEXT NOT NULL,
     rationale TEXT NOT NULL,
+    basis TEXT NOT NULL DEFAULT '[]',
     state TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -96,7 +97,9 @@ pub struct ProfileStore {
     db: Mutex<Connection>,
 }
 
-fn inbox_from_row(row: &Row<'_>) -> rusqlite::Result<(i64, String, String, String, String, i64, i64)> {
+type InboxRow = (i64, String, String, String, String, i64, i64, String);
+
+fn inbox_from_row(row: &Row<'_>) -> rusqlite::Result<InboxRow> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -105,23 +108,25 @@ fn inbox_from_row(row: &Row<'_>) -> rusqlite::Result<(i64, String, String, Strin
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
     ))
 }
 
-fn inbox_item(raw: (i64, String, String, String, String, i64, i64)) -> Result<InboxItem> {
-    let (id, event_key, body, rationale, state, created_at, updated_at) = raw;
+fn inbox_item(raw: InboxRow) -> Result<InboxItem> {
+    let (id, event_key, body, rationale, state, created_at, updated_at, basis) = raw;
     Ok(InboxItem {
         id,
         event_key,
         body: serde_json::from_str(&body)?,
         rationale,
+        basis: serde_json::from_str(&basis)?,
         state: ApprovalState::parse(&state).ok_or(StoreError::BadState(state))?,
         created_at,
         updated_at,
     })
 }
 
-const INBOX_COLUMNS: &str = "id, event_key, body, rationale, state, created_at, updated_at";
+const INBOX_COLUMNS: &str = "id, event_key, body, rationale, state, created_at, updated_at, basis";
 
 impl ProfileStore {
     pub(crate) fn open(dir: &Path) -> Result<Self> {
@@ -135,6 +140,14 @@ impl ProfileStore {
             [],
             |row| row.get(0),
         )?;
+        let has_basis: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('inbox') WHERE name = 'basis')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_basis {
+            db.execute_batch("ALTER TABLE inbox ADD COLUMN basis TEXT NOT NULL DEFAULT '[]';")?;
+        }
         if !has_status {
             db.execute_batch(
                 "ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'done';
@@ -281,20 +294,29 @@ impl ProfileStore {
         event_key: &str,
         body: &InboxBody,
         rationale: &str,
+        basis: &[ReadNote],
         state: ApprovalState,
         now: i64,
     ) -> Result<InboxItem> {
         let db = self.db();
         db.execute(
-            "INSERT INTO inbox (event_key, body, rationale, state, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            (event_key, serde_json::to_string(body)?, rationale, state.as_str(), now),
+            "INSERT INTO inbox (event_key, body, rationale, basis, state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            (
+                event_key,
+                serde_json::to_string(body)?,
+                rationale,
+                serde_json::to_string(basis)?,
+                state.as_str(),
+                now,
+            ),
         )?;
         Ok(InboxItem {
             id: db.last_insert_rowid(),
             event_key: event_key.to_owned(),
             body: body.clone(),
             rationale: rationale.to_owned(),
+            basis: basis.to_vec(),
             state,
             created_at: now,
             updated_at: now,
@@ -598,7 +620,7 @@ mod tests {
     fn inbox_items_round_trip_newest_first() {
         let (_dir, s) = store();
         let a = s
-            .add_inbox_item("k1", &tool_call("hi"), "asked", ApprovalState::Pending, 10)
+            .add_inbox_item("k1", &tool_call("hi"), "asked", &[], ApprovalState::Pending, 10)
             .unwrap();
         let b = s
             .add_inbox_item(
@@ -607,6 +629,7 @@ mod tests {
                     summary: "decide".into(),
                 },
                 "unsure",
+                &[],
                 ApprovalState::Draft,
                 11,
             )
@@ -624,7 +647,7 @@ mod tests {
     fn a_state_move_happens_only_from_the_expected_state() {
         let (_dir, s) = store();
         let item = s
-            .add_inbox_item("k1", &tool_call("hi"), "r", ApprovalState::Pending, 10)
+            .add_inbox_item("k1", &tool_call("hi"), "r", &[], ApprovalState::Pending, 10)
             .unwrap();
         assert!(
             s.move_inbox_state(item.id, ApprovalState::Pending, ApprovalState::Approved, 20)
@@ -643,7 +666,7 @@ mod tests {
     fn only_a_pending_body_can_be_replaced() {
         let (_dir, s) = store();
         let item = s
-            .add_inbox_item("k1", &tool_call("hi"), "r", ApprovalState::Pending, 10)
+            .add_inbox_item("k1", &tool_call("hi"), "r", &[], ApprovalState::Pending, 10)
             .unwrap();
         assert!(s.replace_pending_body(item.id, &tool_call("hello"), 11).unwrap());
         assert_eq!(s.inbox_item(item.id).unwrap().body, tool_call("hello"));

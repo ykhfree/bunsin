@@ -263,6 +263,7 @@ mod tests {
             event_key: "k".into(),
             body,
             rationale: "r".into(),
+            basis: Vec::new(),
             state: ApprovalState::Pending,
             created_at: 0,
             updated_at: 0,

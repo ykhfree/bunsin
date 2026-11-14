@@ -190,11 +190,28 @@ async fn no_repair_is_requested_when_the_token_budget_is_used_up() {
     let rig = rig_with(config).await;
     rig.llm.reply("not json", 500).reply(&post("never used"), 10);
     let outcome = rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
-    assert!(
-        matches!(outcome, Outcome::Failed { ref error } if error.contains("token budget")),
-        "{outcome:?}"
-    );
+    // A spent budget ends the event for good: the owner gets it, and no retry spends the budget again.
+    let Outcome::Escalated { inbox_id } = outcome else {
+        panic!("expected an escalation, got {outcome:?}")
+    };
     assert_eq!(rig.llm.requests().len(), 1);
+    let item = rig
+        .engine
+        .snapshot("kim")
+        .await
+        .unwrap()
+        .inbox
+        .into_iter()
+        .find(|i| i.id == inbox_id)
+        .unwrap();
+    let InboxBody::Escalation { summary } = item.body else {
+        panic!("expected an escalation item")
+    };
+    assert!(summary.contains("token budget of 500"), "{summary}");
+    assert_eq!(
+        rig.engine.ingest("kim", event("e1", "hi")).await.unwrap(),
+        Outcome::Duplicate
+    );
 }
 
 #[tokio::test]
@@ -350,10 +367,14 @@ async fn the_kill_switch_stops_writes_but_not_reads() {
     assert_eq!(item.state, ApprovalState::Pending);
     assert!(rig.slack.calls().is_empty());
 
-    // A read still runs.
-    rig.llm.reply(&call("slack/search", json!({"query": "deploy"})), 10);
+    // A read still runs. The agent gets its result and then decides.
+    let no_action =
+        json!({"kind": "ignore", "rationale": "nothing to do", "summary": null, "tool": null, "args_json": null});
+    rig.llm
+        .reply(&call("slack/search", json!({"query": "deploy"})), 10)
+        .reply(&no_action.to_string(), 10);
     let read = rig.engine.ingest("kim", event("e3", "hi")).await.unwrap();
-    assert!(matches!(read, Outcome::Executed { .. }), "{read:?}");
+    assert_eq!(read, Outcome::Ignored);
     assert_eq!(rig.slack.calls().len(), 1);
     assert_eq!(rig.slack.calls()[0].0, "search");
 
@@ -419,11 +440,17 @@ async fn a_changed_tool_description_blocks_new_and_waiting_calls() {
     assert!(rig.slack.calls().is_empty());
 
     // An unchanged tool of the same connector still works.
-    rig.llm.reply(&call("slack/search", json!({"query": "x"})), 10);
-    assert!(matches!(
+    let no_action =
+        json!({"kind": "ignore", "rationale": "nothing to do", "summary": null, "tool": null, "args_json": null});
+    rig.llm
+        .reply(&call("slack/search", json!({"query": "x"})), 10)
+        .reply(&no_action.to_string(), 10);
+    assert_eq!(
         rig.engine.ingest("kim", event("e3", "hi")).await.unwrap(),
-        Outcome::Executed { .. }
-    ));
+        Outcome::Ignored
+    );
+    assert_eq!(rig.slack.calls().len(), 1);
+    assert_eq!(rig.slack.calls()[0].0, "search");
 }
 
 #[tokio::test]

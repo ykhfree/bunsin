@@ -21,7 +21,7 @@ use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_proposal, split_tool_id};
-use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo};
+use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
 use serde_json::{Map, Value, json};
@@ -35,6 +35,22 @@ const LIST_LIMIT: u32 = 200;
 const CORRECTIONS_IN_PROMPT: u32 = 5;
 /// How many times the handling of one event is tried before the owner is asked.
 const MAX_EVENT_ATTEMPTS: u32 = 3;
+/// How many tools that read the agent may call for one event.
+const MAX_READS_PER_EVENT: usize = 5;
+/// The most characters of one tool result that are stored and sent to the LLM.
+const MAX_RESULT_CHARS: usize = 20_000;
+
+/// What `propose` ended with.
+enum Proposed {
+    Ready {
+        proposal: Proposal,
+        reads: Vec<ReadNote>,
+    },
+    /// No proposal this time. Another try can work, for example after a rate limit.
+    Retry(String),
+    /// No proposal, and another try would end the same way. The owner must look at the event.
+    Stop(String),
+}
 
 /// The live clients of one profile. A client that could not be built holds the reason,
 /// so one wrong address stops only the part that needs it.
@@ -312,9 +328,30 @@ impl Engine {
             .collect()
     }
 
-    /// Asks the LLM for a proposal. An invalid reply gets one repair request.
-    /// Returns the proposal or the reason there is none, and every raw LLM reply.
-    async fn propose(&self, ctx: &Ctx, event: &InboundEvent) -> ApiResult<(Result<Proposal, String>, Vec<String>)> {
+    /// A tool result as text for the prompt and for the disk: filtered, and cut if it is long.
+    /// One function serves both, so nothing unfiltered is stored.
+    fn result_text(redactor: &Redactor, result: &Value) -> String {
+        let pretty = serde_json::to_string_pretty(result).expect("a JSON value always serializes");
+        let mut text = redactor.redact(&pretty, &mut RedactionCounts::new());
+        if text.chars().count() > MAX_RESULT_CHARS {
+            text = text.chars().take(MAX_RESULT_CHARS).collect();
+            text.push_str("\n[cut: the result was longer]");
+        }
+        text
+    }
+
+    /// Asks the LLM what to do about an event.
+    ///
+    /// If the LLM asks for a tool that reads, and `allow_reads` is set, the tool runs and the
+    /// LLM gets its result and is asked again. This repeats until the LLM proposes something
+    /// else. An invalid reply gets one repair request. Returns the outcome and every raw reply.
+    async fn propose(
+        &self,
+        ctx: &Ctx,
+        event: &InboundEvent,
+        key: &str,
+        allow_reads: bool,
+    ) -> ApiResult<(Proposed, Vec<String>)> {
         let Ctx {
             store,
             config,
@@ -339,45 +376,122 @@ impl Engine {
         );
 
         let mut replies = Vec::new();
+        let mut reads: Vec<ReadNote> = Vec::new();
         let mut used_tokens = 0;
-        for attempt in 0..2 {
+        let mut repaired = false;
+        loop {
+            // A retry would spend the same tokens again, so a spent budget ends the event.
+            if used_tokens >= config.token_budget {
+                let reason = format!("the token budget of {} for one event is used up", config.token_budget);
+                return Ok((Proposed::Stop(reason), replies));
+            }
             let llm = match &runtime.llm {
                 Ok(llm) => llm,
-                Err(error) => return Ok((Err(format!("the LLM cannot be used: {error}")), replies)),
+                Err(error) => return Ok((Proposed::Retry(format!("the LLM cannot be used: {error}")), replies)),
             };
             let response = match llm.complete(request.clone()).await {
                 Ok(response) => response,
-                Err(error) => return Ok((Err(format!("LLM call failed: {error}")), replies)),
+                Err(error) => return Ok((Proposed::Retry(format!("LLM call failed: {error}")), replies)),
             };
             used_tokens += response.usage.total();
             replies.push(response.content.clone());
-            if response.stop == StopReason::Refusal {
-                return Ok((Err("the LLM refused the request".into()), replies));
+            match response.stop {
+                StopReason::Refusal => return Ok((Proposed::Retry("the LLM refused the request".into()), replies)),
+                // The same request would be cut at the same place again.
+                StopReason::MaxTokens => {
+                    let reason = format!(
+                        "the LLM reply was cut off at the output limit of {} tokens; raise `max_output_tokens`",
+                        config.max_output_tokens
+                    );
+                    return Ok((Proposed::Stop(reason), replies));
+                }
+                StopReason::End => {}
             }
-            let error = match parse_proposal(&response.content).map_err(|e| e.to_string()) {
+            let parsed = match parse_proposal(&response.content).map_err(|e| e.to_string()) {
                 // A placeholder stands for removed text. Sending it to other people makes no sense.
                 Ok(Proposal::ToolCall { args, .. })
                     if Value::Object(args.clone()).to_string().contains(PLACEHOLDER_PREFIX) =>
                 {
-                    "the tool arguments contain a [REDACTED:...] placeholder; the removed value is not known. \
-                     Write the arguments without it, or choose `escalate`"
-                        .to_owned()
+                    Err(
+                        "the tool arguments contain a [REDACTED:...] placeholder; the removed value is not known. \
+                         Write the arguments without it, or choose `escalate`"
+                            .to_owned(),
+                    )
                 }
-                Ok(proposal) => return Ok((Ok(proposal), replies)),
-                Err(error) => error,
+                other => other,
             };
-            if attempt == 1 {
+            let proposal = match parsed {
+                Ok(proposal) => proposal,
+                Err(error) if repaired => {
+                    let reason = format!("the proposal is invalid after one repair: {error}");
+                    return Ok((Proposed::Retry(reason), replies));
+                }
+                Err(error) => {
+                    repaired = true;
+                    request.messages.push(Message {
+                        role: Role::Assistant,
+                        content: response.content,
+                    });
+                    request.messages.push(Message {
+                        role: Role::User,
+                        content: format!(
+                            "Your reply was rejected: {error}. Reply again with one JSON object that matches the schema."
+                        ),
+                    });
+                    continue;
+                }
+            };
+
+            // A proposal other than an allowed read ends the loop.
+            let Proposal::ToolCall { tool, args, .. } = &proposal else {
+                return Ok((Proposed::Ready { proposal, reads }, replies));
+            };
+            let is_read = config
+                .policy
+                .rules
+                .get(tool)
+                .is_some_and(|rule| rule.class == ToolClass::Read);
+            if !allow_reads || !is_read || self.decide(ctx, tool).await? != Decision::Execute {
+                return Ok((Proposed::Ready { proposal, reads }, replies));
+            }
+            if reads.len() >= MAX_READS_PER_EVENT {
+                let reason = format!("the agent asked for more than {MAX_READS_PER_EVENT} reads");
+                return Ok((Proposed::Stop(reason), replies));
+            }
+            let note = ReadNote {
+                tool: tool.clone(),
+                args: args.clone(),
+            };
+            if reads.contains(&note) {
                 return Ok((
-                    Err(format!("the proposal is invalid after one repair: {error}")),
+                    Proposed::Stop(format!("the agent repeated the same read of `{tool}`")),
                     replies,
                 ));
             }
-            if used_tokens >= config.token_budget {
-                return Ok((
-                    Err(format!("token budget of {} is used up", config.token_budget)),
-                    replies,
-                ));
-            }
+
+            let result = match split_tool_id(tool) {
+                Some((connector, name)) => match runtime.connector(connector) {
+                    Ok(connector) => connector.call_tool(name, args.clone()).await.map_err(|e| e.to_string()),
+                    Err(error) => Err(error),
+                },
+                None => Err(format!("`{tool}` is not a tool ID")),
+            };
+            // A failed read goes back to the LLM as data. It can then choose another step.
+            let text = match &result {
+                Ok(value) => Self::result_text(redactor, value),
+                Err(error) => format!(
+                    "The tool call failed: {}",
+                    redactor.redact(error, &mut RedactionCounts::new())
+                ),
+            };
+            store
+                .put_artifact("read_result", text.as_bytes(), self.now(), Some(key), None)
+                .map_err(store_error)?;
+            let detail = json!({"tool": tool, "args": Self::result_text(redactor, &Value::Object(args.clone())), "ok": result.is_ok()});
+            self.audit(store, "read", Some(key), detail)?;
+            reads.push(note);
+
+            let quoted = bunsin_core::context::quote_untrusted("tool-result", &text);
             request.messages.push(Message {
                 role: Role::Assistant,
                 content: response.content,
@@ -385,11 +499,10 @@ impl Engine {
             request.messages.push(Message {
                 role: Role::User,
                 content: format!(
-                    "Your reply was rejected: {error}. Reply again with one JSON object that matches the schema."
+                    "Result of `{tool}`:\n{quoted}\nDecide the next step. Reply with one JSON object that matches the schema."
                 ),
             });
         }
-        unreachable!("the loop returns on its second pass")
     }
 
     async fn decide(&self, ctx: &Ctx, tool_id: &str) -> ApiResult<Decision> {
@@ -435,9 +548,9 @@ impl Engine {
         };
         match result {
             Ok(value) => {
-                let content = serde_json::to_vec_pretty(&value).map_err(internal)?;
+                let content = Self::result_text(&ctx.redactor, &value);
                 store
-                    .put_artifact("tool_result", &content, self.now(), key, Some(item.id))
+                    .put_artifact("tool_result", content.as_bytes(), self.now(), key, Some(item.id))
                     .map_err(store_error)?;
                 store
                     .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Executed, self.now())
@@ -468,6 +581,7 @@ impl Engine {
         ctx: &Ctx,
         key: &str,
         rationale: &str,
+        basis: &[ReadNote],
         tool_id: String,
         mut args: Map<String, Value>,
     ) -> ApiResult<Outcome> {
@@ -503,7 +617,7 @@ impl Engine {
         }
         let body = InboxBody::ToolCall { tool: tool_id, args };
         let item = store
-            .add_inbox_item(key, &body, rationale, state, self.now())
+            .add_inbox_item(key, &body, rationale, basis, state, self.now())
             .map_err(store_error)?;
         match state {
             ApprovalState::Draft => Ok(Outcome::Drafted { inbox_id: item.id }),
@@ -552,7 +666,7 @@ impl Engine {
                 let body = InboxBody::Escalation { summary };
                 let rationale = "the handling of this event failed each time";
                 store
-                    .add_inbox_item(&key, &body, rationale, ApprovalState::Draft, self.now())
+                    .add_inbox_item(&key, &body, rationale, &[], ApprovalState::Draft, self.now())
                     .map_err(store_error)?;
                 self.audit(&store, "event_given_up", Some(&key), json!({}))?;
                 return Ok(Outcome::Failed {
@@ -577,17 +691,31 @@ impl Engine {
         event: &InboundEvent,
     ) -> ApiResult<Outcome> {
         let ctx = self.ctx(profile).await?;
-        let (proposal, replies) = self.propose(&ctx, event).await?;
+        let (proposed, replies) = self.propose(&ctx, event, key, true).await?;
         for reply in &replies {
             store
                 .put_artifact("llm_reply", reply.as_bytes(), self.now(), Some(key), None)
                 .map_err(store_error)?;
         }
-        let proposal = match proposal {
-            Ok(proposal) => proposal,
-            Err(error) => {
+        let (proposal, reads) = match proposed {
+            Proposed::Ready { proposal, reads } => (proposal, reads),
+            Proposed::Retry(error) => {
                 self.audit(store, "proposal_failed", Some(key), json!({"error": error}))?;
                 return Ok(Outcome::Failed { error });
+            }
+            // Another try would end the same way and cost the same again. The owner takes over.
+            Proposed::Stop(reason) => {
+                let summary = format!(
+                    "Bunsin stopped working on an event from {} by {}: {reason}. Handle it yourself.",
+                    event.source, event.author
+                );
+                let body = InboxBody::Escalation { summary };
+                let rationale = "the agent could not finish this event";
+                let item = store
+                    .add_inbox_item(key, &body, rationale, &[], ApprovalState::Draft, self.now())
+                    .map_err(store_error)?;
+                self.audit(store, "event_stopped", Some(key), json!({"reason": reason}))?;
+                return Ok(Outcome::Escalated { inbox_id: item.id });
             }
         };
         let content = serde_json::to_vec_pretty(&proposal).map_err(internal)?;
@@ -606,12 +734,12 @@ impl Engine {
             Proposal::Escalate { rationale, summary } => {
                 let body = InboxBody::Escalation { summary };
                 let item = store
-                    .add_inbox_item(key, &body, &rationale, ApprovalState::Draft, self.now())
+                    .add_inbox_item(key, &body, &rationale, &reads, ApprovalState::Draft, self.now())
                     .map_err(store_error)?;
                 Ok(Outcome::Escalated { inbox_id: item.id })
             }
             Proposal::ToolCall { rationale, tool, args } => {
-                self.handle_tool_call(&ctx, key, &rationale, tool, args).await
+                self.handle_tool_call(&ctx, key, &rationale, &reads, tool, args).await
             }
         }
     }
@@ -725,16 +853,17 @@ impl Engine {
         let store = &ctx.store;
         // Only the event goes to the LLM. The real reply is kept for the comparison.
         let event = Self::redact_event(&ctx.redactor, case.event, &mut RedactionCounts::new());
-        let (proposal, replies) = self.propose(&ctx, &event).await?;
         let key = event.dedupe_key();
+        // Replay runs no tool. A search made today would find the real reply and spoil the comparison.
+        let (proposed, replies) = self.propose(&ctx, &event, &key, false).await?;
         for reply in &replies {
             store
                 .put_artifact("replay_reply", reply.as_bytes(), self.now(), Some(&key), None)
                 .map_err(store_error)?;
         }
-        let (proposal, error) = match proposal {
-            Ok(proposal) => (Some(proposal), None),
-            Err(error) => (None, Some(error)),
+        let (proposal, error) = match proposed {
+            Proposed::Ready { proposal, .. } => (Some(proposal), None),
+            Proposed::Retry(error) | Proposed::Stop(error) => (None, Some(error)),
         };
         Ok(ReplayResult {
             proposal,

@@ -54,9 +54,12 @@ async fn approving_the_shown_list_lets_a_changed_tool_run_again() {
     // The permission rules are not touched by an approval.
     assert_eq!(config.policy, common::config().policy);
 
-    rig.llm.reply(&call("slack/search", json!({"query": "x"})), 10);
+    rig.llm
+        .reply(&call("slack/search", json!({"query": "x"})), 10)
+        .reply(&ignore(), 10);
     let allowed = rig.engine.ingest("kim", event("e2", "lee", "find it")).await.unwrap();
-    assert!(matches!(allowed, Outcome::Executed { .. }), "{allowed:?}");
+    assert_eq!(allowed, Outcome::Ignored);
+    assert_eq!(rig.slack.calls().len(), 1);
     let audit = rig.engine.snapshot("kim").await.unwrap().audit;
     assert!(
         audit
