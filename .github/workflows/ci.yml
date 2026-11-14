@@ -24,10 +24,8 @@ jobs:
             exit 1
           fi
 
-  # The desktop app. macOS runners cost about ten times as much as Linux runners,
-  # so this job runs only when someone starts the workflow by hand.
+  # The desktop app, and the whole workspace on macOS.
   app:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

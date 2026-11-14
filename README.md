@@ -91,3 +91,7 @@ It keeps the token in the macOS Keychain.
 
 `wire` is `anthropic-messages` or `openai-chat`. For a server with a private CA,
 set `BUNSIN_CA_CERT` to the CA certificate file.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
