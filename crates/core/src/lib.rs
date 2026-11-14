@@ -11,6 +11,7 @@ pub mod ports;
 pub mod privacy;
 pub mod proposal;
 pub mod records;
+pub mod settings;
 pub mod tool;
 
 use sha2::{Digest, Sha256};

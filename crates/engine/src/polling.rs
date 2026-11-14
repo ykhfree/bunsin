@@ -6,7 +6,6 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::poll::{PollConfig, extract};
 use bunsin_core::privacy::RedactionCounts;
-use bunsin_core::proposal::split_tool_id;
 use bunsin_store::ProfileStore;
 use serde_json::json;
 
@@ -66,9 +65,7 @@ impl Engine {
             Decision::Execute => {}
             other => return Err(format!("the policy does not allow `{tool_id}`: {other:?}")),
         }
-        let connector = split_tool_id(&tool_id)
-            .and_then(|(connector, _)| ctx.runtime.connectors.get(connector))
-            .ok_or_else(|| format!("there is no connector `{}`", poll.connector))?;
+        let connector = ctx.runtime.connector(&poll.connector)?;
         let result = connector
             .call_tool(&poll.tool, poll.args.clone())
             .await

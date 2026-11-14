@@ -19,6 +19,10 @@
 //! | GET | `/v1/profiles/{p}/privacy` | | `PrivacyConfig` |
 //! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyConfig` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
+//! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
+//! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
+//! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
+//! | DELETE | `/v1/profiles/{p}/connections/connectors/{c}` | | |
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 

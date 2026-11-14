@@ -8,7 +8,6 @@ use bunsin_core::llm::{CompletionRequest, CompletionResponse, LlmError};
 use bunsin_core::ports::{BoxFuture, LlmClient};
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
 
@@ -17,16 +16,7 @@ pub const MAX_ERROR_BODY_BYTES: usize = 2048;
 
 const REDACTED: &str = "[REDACTED]";
 
-/// The HTTP API shape that the endpoint speaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Wire {
-    /// OpenAI Chat Completions: `POST {base_url}/chat/completions`.
-    #[serde(rename = "openai-chat")]
-    OpenAiChat,
-    /// Anthropic Messages: `POST {base_url}/v1/messages`.
-    #[serde(rename = "anthropic-messages")]
-    AnthropicMessages,
-}
+pub use bunsin_core::settings::Wire;
 
 #[derive(Debug, Clone)]
 pub struct LlmConfig {

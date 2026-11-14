@@ -1,12 +1,15 @@
 //! The HTTP server and the remote client together, against a real engine with fakes.
 
-use bunsin_api::{ApiError, Edit, EngineApi, Outcome, ProfileConfig, ReplayCase};
+use bunsin_api::{
+    ApiError, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, ProfileConfig, ReplayCase, TokenChange, TokenSource,
+};
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
+use bunsin_core::settings::Wire;
 use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Backends, Engine, Runtime};
@@ -28,8 +31,8 @@ impl Backends for Fakes {
         let slack: Arc<dyn Connector> = self.slack.clone();
         Box::pin(async move {
             Ok(Runtime {
-                llm,
-                connectors: BTreeMap::from([("slack".to_owned(), slack)]),
+                llm: Ok(llm),
+                connectors: BTreeMap::from([("slack".to_owned(), Ok(slack))]),
             })
         })
     }
@@ -250,6 +253,21 @@ async fn a_token_reaches_only_its_own_profile() {
             .await,
         );
         refused(kim.test_poll(other, 0).await.map(|_| ()));
+        refused(kim.connections(other).await.map(|_| ()));
+        let llm = LlmUpdate {
+            wire: Wire::OpenAiChat,
+            base_url: "https://attacker.example".into(),
+            model: "m".into(),
+            timeout_secs: 60,
+            token: TokenChange::Set("t".into()),
+        };
+        refused(kim.set_llm(other, llm).await);
+        let connector = ConnectorUpdate {
+            url: "https://attacker.example/mcp".into(),
+            token: TokenChange::Keep,
+        };
+        refused(kim.set_connector(other, "slack", connector).await);
+        refused(kim.remove_connector(other, "slack").await);
         refused(
             kim.replay(
                 other,
@@ -541,4 +559,50 @@ async fn the_poll_task_finds_a_new_message_without_any_request() {
     assert_eq!(snapshot.polls[0].new_events, 1);
     // The other profile has no poll and got no event.
     assert!(rig.engine.snapshot("lee").await.unwrap().inbox.is_empty());
+}
+
+#[tokio::test]
+async fn connections_and_their_tokens_are_saved_through_the_server_and_never_come_back() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let llm = LlmUpdate {
+        wire: Wire::AnthropicMessages,
+        base_url: "https://llm.example.com".into(),
+        model: "m1".into(),
+        timeout_secs: 90,
+        token: TokenChange::Set("sk-over-the-wire".into()),
+    };
+    kim.set_llm("kim", llm).await.unwrap();
+    let jira = ConnectorUpdate {
+        url: "https://mcp.example.com/jira".into(),
+        token: TokenChange::Set("jira-token".into()),
+    };
+    kim.set_connector("kim", "jira", jira).await.unwrap();
+
+    let connections = kim.connections("kim").await.unwrap();
+    let saved = connections.llm.as_ref().unwrap();
+    assert_eq!((saved.timeout_secs, saved.token), (90, TokenSource::Stored));
+    assert_eq!(connections.connectors["jira"].token, TokenSource::Stored);
+    let answer = serde_json::to_string(&connections).unwrap()
+        + &serde_json::to_string(&kim.profile_config("kim").await.unwrap()).unwrap();
+    assert!(
+        !answer.contains("sk-over-the-wire") && !answer.contains("jira-token"),
+        "{answer}"
+    );
+
+    // The server's address rules apply to this path too, and its reason reaches the caller.
+    let internal = ConnectorUpdate {
+        url: "http://169.254.169.254/x".into(),
+        token: TokenChange::Set("t".into()),
+    };
+    let error = kim.set_connector("kim", "meta", internal).await.unwrap_err();
+    assert!(
+        matches!(error, ApiError::Invalid(ref m) if m.contains("connector `meta`")),
+        "{error:?}"
+    );
+
+    kim.remove_connector("kim", "jira").await.unwrap();
+    assert!(kim.connections("kim").await.unwrap().connectors.is_empty());
+    // The other profile sees nothing of this.
+    assert!(rig.engine.connections("lee").await.unwrap().llm.is_none());
 }

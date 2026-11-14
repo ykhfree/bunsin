@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     event_key TEXT,
     inbox_id INTEGER
 );
+CREATE TABLE IF NOT EXISTS secrets (
+    key TEXT PRIMARY KEY,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    origin TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at INTEGER NOT NULL,
@@ -60,6 +67,15 @@ BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 ";
 
 const KILL_SWITCH: &str = "kill_switch";
+
+/// A secret as it is stored: encrypted, with the address it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedSecret {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    /// The scheme, host and port the secret was entered for.
+    pub origin: String,
+}
 
 /// What `begin_event` found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +230,48 @@ impl ProfileStore {
             (dedupe_key, now, payload.to_string()),
         )?;
         Ok(inserted == 1)
+    }
+
+    // --- secrets ---
+
+    /// Stores an encrypted secret, replacing an earlier one with the same key.
+    pub fn put_secret(&self, key: &str, secret: &SealedSecret, now: i64) -> Result<()> {
+        self.db().execute(
+            "INSERT INTO secrets (key, nonce, ciphertext, origin, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (key) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext,
+                 origin = excluded.origin, updated_at = excluded.updated_at",
+            (key, &secret.nonce, &secret.ciphertext, &secret.origin, now),
+        )?;
+        Ok(())
+    }
+
+    pub fn secret(&self, key: &str) -> Result<Option<SealedSecret>> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT nonce, ciphertext, origin FROM secrets WHERE key = ?1",
+                [key],
+                |row| {
+                    Ok(SealedSecret {
+                        nonce: row.get(0)?,
+                        ciphertext: row.get(1)?,
+                        origin: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Returns true if a secret with this key existed.
+    pub fn delete_secret(&self, key: &str) -> Result<bool> {
+        Ok(self.db().execute("DELETE FROM secrets WHERE key = ?1", [key])? == 1)
+    }
+
+    pub fn secret_keys(&self) -> Result<Vec<String>> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT key FROM secrets ORDER BY key")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // --- inbox ---
@@ -668,5 +726,32 @@ mod tests {
         );
         assert_eq!(entries[1].detail, json!({"decision": "needs_approval"}));
         assert_eq!(entries[1].event_key.as_deref(), Some("k1"));
+    }
+
+    #[test]
+    fn sealed_secrets_round_trip_and_are_replaced_and_deleted() {
+        let (_dir, s) = store();
+        let first = SealedSecret {
+            nonce: vec![1; 24],
+            ciphertext: vec![9, 8, 7],
+            origin: "https://a.example:443".into(),
+        };
+        s.put_secret("LLM", &first, 1).unwrap();
+        assert_eq!(s.secret("LLM").unwrap(), Some(first));
+        assert_eq!(s.secret("MCP_SLACK").unwrap(), None);
+
+        let second = SealedSecret {
+            nonce: vec![2; 24],
+            ciphertext: vec![1],
+            origin: "https://b.example:443".into(),
+        };
+        s.put_secret("LLM", &second, 2).unwrap();
+        s.put_secret("MCP_SLACK", &second, 2).unwrap();
+        assert_eq!(s.secret("LLM").unwrap(), Some(second));
+        assert_eq!(s.secret_keys().unwrap(), ["LLM", "MCP_SLACK"]);
+
+        assert!(s.delete_secret("LLM").unwrap());
+        assert!(!s.delete_secret("LLM").unwrap());
+        assert_eq!(s.secret_keys().unwrap(), ["MCP_SLACK"]);
     }
 }

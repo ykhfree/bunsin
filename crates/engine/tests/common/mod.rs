@@ -28,8 +28,8 @@ impl Backends for Fakes {
         let slack: Arc<dyn Connector> = self.slack.clone();
         Box::pin(async move {
             Ok(Runtime {
-                llm,
-                connectors: BTreeMap::from([("slack".to_owned(), slack)]),
+                llm: Ok(llm),
+                connectors: BTreeMap::from([("slack".to_owned(), Ok(slack))]),
             })
         })
     }

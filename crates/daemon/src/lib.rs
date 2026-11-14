@@ -10,43 +10,17 @@
 pub mod server;
 
 use bunsin_api::ProfileConfig;
-use bunsin_connectors::{McpConfig, McpConnector};
+use bunsin_connectors::McpConnector;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
-use bunsin_engine::{Backends, Runtime};
-use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig, Wire};
-use serde::Deserialize;
+use bunsin_core::settings::{ConnectorSection, LlmSection, McpConfig, origin_of};
+use bunsin_engine::{Backends, ProfileSecrets, Runtime};
+use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The `llm` section of the profile settings.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LlmSection {
-    pub wire: Wire,
-    pub base_url: String,
-    pub model: String,
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
-    /// The key of the secret that holds the endpoint token. See [`secret_env_name`].
-    pub token_secret: String,
-}
-
-fn default_timeout_secs() -> u64 {
-    120
-}
-
-/// One entry of the `connectors` section of the profile settings.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectorSection {
-    pub mcp: McpConfig,
-    /// The key of the secret that holds the bearer token, if the MCP server needs one.
-    pub token_secret: Option<String>,
-}
 
 /// The environment variable that holds secret `key` of `profile`:
 /// `BUNSIN_SECRET_<PROFILE>__<KEY>`, with the profile ID in upper case and `-` as `_`.
@@ -163,11 +137,35 @@ impl RealBackends {
         }
     }
 
-    fn secret(&self, profile: &str, key: &str) -> Result<String, String> {
-        let name = secret_env_name(profile, key)?;
-        match (self.secrets)(&name) {
-            Some(value) if !value.is_empty() => Ok(value),
-            _ => Err(format!("the environment variable `{name}` is not set")),
+    /// The token for `key`, to be sent to `address`.
+    ///
+    /// A token the owner stored is used only for the origin it was entered for. Without a
+    /// stored token, the server's environment variable for this profile and key is used.
+    fn token(
+        &self,
+        profile: &str,
+        key: &str,
+        address: Option<&str>,
+        secrets: &ProfileSecrets,
+    ) -> Result<String, String> {
+        match secrets.get(key) {
+            Some(Ok(stored)) if address.and_then(origin_of).as_deref() == Some(stored.origin.as_str()) => {
+                Ok(stored.value.clone())
+            }
+            Some(Ok(_)) => Err(format!(
+                "the stored token `{key}` was entered for another address. Enter the token again for the new address"
+            )),
+            // A stored token that cannot be read is an error. The environment is not tried instead.
+            Some(Err(error)) => Err(error.clone()),
+            None => {
+                let name = secret_env_name(profile, key)?;
+                match (self.secrets)(&name) {
+                    Some(value) if !value.is_empty() => Ok(value),
+                    _ => Err(format!(
+                        "no token is stored for `{key}` and the environment variable `{name}` is not set"
+                    )),
+                }
+            }
         }
     }
 
@@ -201,9 +199,10 @@ impl RealBackends {
         Ok(section)
     }
 
-    pub fn llm(&self, profile: &str, section: &Value) -> Result<HttpLlmClient, String> {
+    pub fn llm(&self, profile: &str, section: &Value, secrets: &ProfileSecrets) -> Result<HttpLlmClient, String> {
         let section = self.llm_section(section)?;
-        let token = ApiToken::new(self.secret(profile, &section.token_secret)?);
+        let token = self.token(profile, &section.token_secret, Some(&section.base_url), secrets)?;
+        let token = ApiToken::new(token);
         let config = LlmConfig {
             wire: section.wire,
             base_url: section.base_url,
@@ -213,12 +212,22 @@ impl RealBackends {
         HttpLlmClient::new(config, token).map_err(|e| format!("the LLM client cannot start: {e}"))
     }
 
-    async fn connector(&self, profile: &str, name: &str, section: &Value) -> Result<McpConnector, String> {
+    async fn connector(
+        &self,
+        profile: &str,
+        name: &str,
+        section: &Value,
+        secrets: &ProfileSecrets,
+    ) -> Result<McpConnector, String> {
         let section = self.connector_section(name, section)?;
+        let address = match &section.mcp {
+            McpConfig::Http { url } => Some(url.as_str()),
+            McpConfig::Stdio { .. } => None,
+        };
         let token = section
             .token_secret
             .as_deref()
-            .map(|key| self.secret(profile, key))
+            .map(|key| self.token(profile, key, address, secrets))
             .transpose()?;
         // A server that starts but never answers must not block the profile forever.
         let connect = McpConnector::connect(name, section.mcp, token.as_deref());
@@ -235,14 +244,31 @@ impl RealBackends {
 
 impl Backends for RealBackends {
     fn build<'a>(&'a self, profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
+        Box::pin(async move { self.build_with_secrets(profile, config, &ProfileSecrets::new()).await })
+    }
+
+    /// Builds each client on its own. One that fails holds its reason and does not stop the others.
+    fn build_with_secrets<'a>(
+        &'a self,
+        profile: &'a str,
+        config: &'a ProfileConfig,
+        secrets: &'a ProfileSecrets,
+    ) -> BoxFuture<'a, Result<Runtime, String>> {
         Box::pin(async move {
-            let llm: Arc<dyn LlmClient> = Arc::new(self.llm(profile, &config.llm)?);
-            let mut connectors: BTreeMap<String, Arc<dyn Connector>> = BTreeMap::new();
+            let llm = self
+                .llm(profile, &config.llm, secrets)
+                .map(|client| Arc::new(client) as Arc<dyn LlmClient>);
+            let mut connectors = BTreeMap::new();
             for (name, section) in &config.connectors {
-                connectors.insert(name.clone(), Arc::new(self.connector(profile, name, section).await?));
+                let connector = self.connector(profile, name, section, secrets).await;
+                connectors.insert(name.clone(), connector.map(|c| Arc::new(c) as Arc<dyn Connector>));
             }
             Ok(Runtime { llm, connectors })
         })
+    }
+
+    fn has_server_secret(&self, profile: &str, key: &str) -> bool {
+        secret_env_name(profile, key).is_ok_and(|name| (self.secrets)(&name).is_some_and(|value| !value.is_empty()))
     }
 
     /// Refuses settings that this server will not run. Empty `llm` settings are allowed,
@@ -308,7 +334,7 @@ mod tests {
     #[test]
     fn the_llm_client_is_built_from_settings_and_the_profiles_own_secret() {
         let b = backends(&[("BUNSIN_SECRET_KIM__LLM", "s3cret-value")], false);
-        let shown = format!("{:?}", b.llm("kim", &llm_section()).unwrap());
+        let shown = format!("{:?}", b.llm("kim", &llm_section(), &ProfileSecrets::new()).unwrap());
         assert!(shown.contains("https://llm.example"), "{shown}");
         assert!(!shown.contains("s3cret-value"), "{shown}");
     }
@@ -322,21 +348,29 @@ mod tests {
         ];
         let b = backends(env, false);
         // The same key under another profile is another variable, which is not set.
-        let error = b.llm("lee", &llm_section()).unwrap_err();
-        assert_eq!(error, "the environment variable `BUNSIN_SECRET_LEE__LLM` is not set");
+        let error = b.llm("lee", &llm_section(), &ProfileSecrets::new()).unwrap_err();
+        assert!(
+            error.contains("the environment variable `BUNSIN_SECRET_LEE__LLM` is not set"),
+            "{error}"
+        );
         // No key reaches a variable outside the profile's own names.
         for key in ["HOME", "KIM__LLM", "BUNSIN_SECRET_KIM__LLM"] {
             let mut section = llm_section();
             section["token_secret"] = json!(key);
-            assert!(b.llm("lee", &section).is_err(), "{key}");
+            assert!(b.llm("lee", &section, &ProfileSecrets::new()).is_err(), "{key}");
         }
     }
 
     #[test]
     fn a_missing_or_empty_secret_names_the_variable() {
         for env in [&[][..], &[("BUNSIN_SECRET_KIM__LLM", "")][..]] {
-            let error = backends(env, false).llm("kim", &llm_section()).unwrap_err();
-            assert_eq!(error, "the environment variable `BUNSIN_SECRET_KIM__LLM` is not set");
+            let error = backends(env, false)
+                .llm("kim", &llm_section(), &ProfileSecrets::new())
+                .unwrap_err();
+            assert!(
+                error.contains("the environment variable `BUNSIN_SECRET_KIM__LLM` is not set"),
+                "{error}"
+            );
         }
     }
 
@@ -344,12 +378,12 @@ mod tests {
     fn missing_and_invalid_llm_settings_are_reported() {
         let b = backends(&[("BUNSIN_SECRET_KIM__LLM", "x")], false);
         assert_eq!(
-            b.llm("kim", &Value::Null).unwrap_err(),
+            b.llm("kim", &Value::Null, &ProfileSecrets::new()).unwrap_err(),
             "the profile has no `llm` settings"
         );
         let unknown_wire = json!({"wire": "telepathy", "base_url": "u", "model": "m", "token_secret": "LLM"});
         assert!(
-            b.llm("kim", &unknown_wire)
+            b.llm("kim", &unknown_wire, &ProfileSecrets::new())
                 .unwrap_err()
                 .starts_with("the `llm` settings are invalid")
         );
@@ -357,7 +391,7 @@ mod tests {
         let mut inline = llm_section();
         inline["token"] = json!("s3cret-value");
         assert!(
-            b.llm("kim", &inline)
+            b.llm("kim", &inline, &ProfileSecrets::new())
                 .unwrap_err()
                 .starts_with("the `llm` settings are invalid")
         );
@@ -381,7 +415,7 @@ mod tests {
             "transport": "stdio", "command": "/usr/bin/touch", "args": [marker.to_str().unwrap()], "env": {}
         }});
         let error = backends(&[], false)
-            .connector("kim", "slack", &stdio)
+            .connector("kim", "slack", &stdio, &ProfileSecrets::new())
             .await
             .err()
             .unwrap();
@@ -419,7 +453,11 @@ mod tests {
     async fn a_connector_error_names_the_connector_and_hides_the_token() {
         let b = backends(&[("BUNSIN_SECRET_KIM__SLACK", "xoxb-s3cret")], true);
         let relative = json!({"mcp": {"transport": "stdio", "command": "slack-mcp", "args": [], "env": {}}});
-        let error = b.connector("kim", "slack", &relative).await.err().unwrap();
+        let error = b
+            .connector("kim", "slack", &relative, &ProfileSecrets::new())
+            .await
+            .err()
+            .unwrap();
         assert!(error.starts_with("connector `slack` cannot connect"), "{error}");
 
         // The operator allows this host, so the request is tried and fails at connect.
@@ -431,13 +469,24 @@ mod tests {
             },
         );
         let dead = json!({"mcp": {"transport": "http", "url": "http://127.0.0.1:1/mcp"}, "token_secret": "SLACK"});
-        let error = b.connector("kim", "slack", &dead).await.err().unwrap();
+        let error = b
+            .connector("kim", "slack", &dead, &ProfileSecrets::new())
+            .await
+            .err()
+            .unwrap();
         assert!(error.contains("connector `slack`"), "{error}");
         assert!(!error.contains("xoxb-s3cret"), "{error}");
 
         let missing = json!({"mcp": {"transport": "http", "url": "http://127.0.0.1:1/mcp"}, "token_secret": "JIRA"});
-        let error = b.connector("kim", "slack", &missing).await.err().unwrap();
-        assert_eq!(error, "the environment variable `BUNSIN_SECRET_KIM__JIRA` is not set");
+        let error = b
+            .connector("kim", "slack", &missing, &ProfileSecrets::new())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("the environment variable `BUNSIN_SECRET_KIM__JIRA` is not set"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -514,8 +563,91 @@ mod tests {
         assert!(error.contains("connector `jira`"), "{error}");
 
         // Settings that were stored earlier are refused at use, before any request is sent.
-        assert!(b.llm("kim", &llm).is_err());
-        let error = b.connector("kim", "jira", &mcp).await.err().unwrap();
+        assert!(b.llm("kim", &llm, &ProfileSecrets::new()).is_err());
+        let error = b
+            .connector("kim", "jira", &mcp, &ProfileSecrets::new())
+            .await
+            .err()
+            .unwrap();
         assert!(error.contains("must start with https://"), "{error}");
+    }
+
+    fn stored(value: &str, origin: &str) -> ProfileSecrets {
+        let secret = bunsin_engine::StoredSecret {
+            value: value.into(),
+            origin: origin.into(),
+        };
+        ProfileSecrets::from([("LLM".to_owned(), Ok(secret))])
+    }
+
+    #[test]
+    fn a_stored_token_is_used_only_for_the_address_it_was_entered_for() {
+        let b = backends(&[("BUNSIN_SECRET_KIM__LLM", "from-the-environment")], false);
+        let secrets = stored("stored-token", "https://llm.example:443");
+        // Same origin, other path: the stored token is used.
+        let mut same = llm_section();
+        same["base_url"] = json!("https://llm.example/v2");
+        assert!(b.llm("kim", &same, &secrets).is_ok());
+
+        // Another host, port or scheme: refused, and the environment token is not used instead.
+        for address in [
+            "https://attacker.example",
+            "https://llm.example:8443",
+            "https://llm.example.attacker.example",
+        ] {
+            let mut moved = llm_section();
+            moved["base_url"] = json!(address);
+            let error = b.llm("kim", &moved, &secrets).unwrap_err();
+            assert!(error.contains("entered for another address"), "{address}: {error}");
+            assert!(
+                !error.contains("stored-token") && !error.contains("from-the-environment"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_token_that_cannot_be_read_is_an_error_and_not_a_fallback() {
+        let b = backends(&[("BUNSIN_SECRET_KIM__LLM", "from-the-environment")], false);
+        let unreadable = ProfileSecrets::from([(
+            "LLM".to_owned(),
+            Err("the stored token `LLM` cannot be read".to_owned()),
+        )]);
+        let error = b.llm("kim", &llm_section(), &unreadable).unwrap_err();
+        assert!(error.contains("cannot be read"), "{error}");
+    }
+
+    #[test]
+    fn the_server_reports_whether_it_supplies_a_secret() {
+        let b = backends(
+            &[("BUNSIN_SECRET_KIM__LLM", "x"), ("BUNSIN_SECRET_KIM__EMPTY", "")],
+            false,
+        );
+        assert!(b.has_server_secret("kim", "LLM"));
+        assert!(!b.has_server_secret("lee", "LLM"));
+        assert!(!b.has_server_secret("kim", "EMPTY"));
+        assert!(!b.has_server_secret("kim", "../HOME"));
+    }
+
+    #[tokio::test]
+    async fn one_client_that_fails_does_not_stop_the_others() {
+        let b = RealBackends::new(
+            Arc::new(|name| (name == "BUNSIN_SECRET_KIM__LLM").then(|| "x".to_owned())),
+            false,
+            UpstreamPolicy {
+                allowed_hosts: vec!["127.0.0.1".into(), "llm.example".into()],
+            },
+        );
+        let dead = json!({"mcp": {"transport": "http", "url": "http://127.0.0.1:1/mcp"}});
+        let runtime = b.build("kim", &config(llm_section(), &[("jira", dead)])).await.unwrap();
+        assert!(runtime.llm.is_ok());
+        let error = runtime.connector("jira").err().unwrap();
+        assert!(error.contains("connector `jira` cannot connect"), "{error}");
+        // A profile without LLM settings can still have working connectors checked.
+        let runtime = b.build("kim", &config(Value::Null, &[])).await.unwrap();
+        assert_eq!(
+            runtime.llm.as_ref().err().map(String::as_str),
+            Some("the profile has no `llm` settings")
+        );
     }
 }

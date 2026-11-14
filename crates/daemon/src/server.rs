@@ -12,7 +12,8 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
-    ApiError, EngineApi, Outcome, PollPreview, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    ApiError, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PollPreview, ProfileConfig, ProfileSnapshot,
+    ReplayCase, ReplayResult, ToolsReport,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::PrivacyConfig;
@@ -206,6 +207,44 @@ async fn test_poll(
     Ok(Json(engine.test_poll(&profile, index).await?))
 }
 
+async fn get_connections(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Connections> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.connections(&profile).await?))
+}
+
+async fn put_llm(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<LlmUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_llm(&profile, update).await?))
+}
+
+async fn put_connector(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, name)): Path<(String, String)>,
+    Json(update): Json<ConnectorUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_connector(&profile, &name, update).await?))
+}
+
+async fn delete_connector(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, name)): Path<(String, String)>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.remove_connector(&profile, &name).await?))
+}
+
 pub fn router(engine: Arc<Engine>) -> Router {
     let profile = |rest: &str| format!("{PROFILES}/{{profile}}/{rest}");
     Router::new()
@@ -221,6 +260,12 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("connectors/{connector}/tools/approve"), post(approve_tools))
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("polls/{index}/test"), post(test_poll))
+        .route(&profile("connections"), get(get_connections))
+        .route(&profile("connections/llm"), put(put_llm))
+        .route(
+            &profile("connections/connectors/{name}"),
+            put(put_connector).delete(delete_connector),
+        )
         .with_state(engine)
 }
 

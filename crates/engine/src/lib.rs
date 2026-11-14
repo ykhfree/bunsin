@@ -2,11 +2,15 @@
 //!
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
+mod connections;
 mod polling;
+mod secrets;
+
+pub use secrets::{ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, Edit, EngineApi, Outcome, PollPreview, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, ToolsReport,
+    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -32,20 +36,47 @@ const CORRECTIONS_IN_PROMPT: u32 = 5;
 /// How many times the handling of one event is tried before the owner is asked.
 const MAX_EVENT_ATTEMPTS: u32 = 3;
 
-/// The live clients of one profile.
+/// The live clients of one profile. A client that could not be built holds the reason,
+/// so one wrong address stops only the part that needs it.
 pub struct Runtime {
-    pub llm: Arc<dyn LlmClient>,
+    pub llm: Result<Arc<dyn LlmClient>, String>,
     /// By connector name.
-    pub connectors: BTreeMap<String, Arc<dyn Connector>>,
+    pub connectors: BTreeMap<String, Result<Arc<dyn Connector>, String>>,
+}
+
+impl Runtime {
+    /// The connector with this name, or why it cannot be used.
+    pub fn connector(&self, name: &str) -> Result<&Arc<dyn Connector>, String> {
+        match self.connectors.get(name) {
+            Some(Ok(connector)) => Ok(connector),
+            Some(Err(error)) => Err(error.clone()),
+            None => Err(format!("there is no connector `{name}`")),
+        }
+    }
 }
 
 /// Builds the LLM client and the connectors of a profile from its config.
 pub trait Backends: Send + Sync {
     fn build<'a>(&'a self, profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>>;
 
+    /// Like `build`, with the tokens the owner stored on the server.
+    fn build_with_secrets<'a>(
+        &'a self,
+        profile: &'a str,
+        config: &'a ProfileConfig,
+        _secrets: &'a ProfileSecrets,
+    ) -> BoxFuture<'a, Result<Runtime, String>> {
+        self.build(profile, config)
+    }
+
     /// Checks new settings before they are stored. The error says what to change.
     fn validate(&self, _profile: &str, _config: &ProfileConfig) -> Result<(), String> {
         Ok(())
+    }
+
+    /// True if the server operator supplies this secret outside the store.
+    fn has_server_secret(&self, _profile: &str, _key: &str) -> bool {
+        false
     }
 }
 
@@ -60,6 +91,8 @@ pub enum OpenError {
     Store(#[from] StoreError),
     #[error("the lock file cannot be opened: {0}")]
     Io(#[from] std::io::Error),
+    #[error("the master key file {0} cannot be used: {1}")]
+    Key(std::path::PathBuf, std::io::Error),
 }
 
 /// What the handling of one request needs from a profile.
@@ -80,6 +113,8 @@ pub struct Engine {
     polling: Mutex<HashSet<String>>,
     /// When each poll last ran: profile and poll identity to Unix seconds.
     last_polls: Mutex<HashMap<(String, String), i64>>,
+    /// Encrypts and decrypts the tokens that owners store.
+    secret_box: secrets::SecretBox,
     /// Held for the life of the engine. A second engine on the same directory fails to open.
     _lock: File,
 }
@@ -127,7 +162,19 @@ impl Engine {
         create_profile(&self.app, id, &config, self.now())
     }
 
+    /// Opens the engine with the master key file `master.key` in the data directory.
     pub fn open(data_dir: &Path, backends: Arc<dyn Backends>, clock: Clock) -> Result<Self, OpenError> {
+        Self::open_with_key_file(data_dir, &data_dir.join("master.key"), backends, clock)
+    }
+
+    /// Opens the engine. `key_file` holds the key that encrypts stored tokens. It is
+    /// created if it does not exist. Keep it out of backups of the data directory.
+    pub fn open_with_key_file(
+        data_dir: &Path,
+        key_file: &Path,
+        backends: Arc<dyn Backends>,
+        clock: Clock,
+    ) -> Result<Self, OpenError> {
         let app = AppStore::open(data_dir)?;
         let lock = File::options()
             .create(true)
@@ -135,6 +182,8 @@ impl Engine {
             .write(true)
             .open(data_dir.join("engine.lock"))?;
         lock.try_lock().map_err(|_| OpenError::AlreadyRunning)?;
+        let secret_box =
+            secrets::SecretBox::load_or_create(key_file).map_err(|e| OpenError::Key(key_file.to_owned(), e))?;
         Ok(Self {
             app,
             backends,
@@ -143,6 +192,7 @@ impl Engine {
             runtimes: Mutex::new(HashMap::new()),
             polling: Mutex::new(HashSet::new()),
             last_polls: Mutex::new(HashMap::new()),
+            secret_box,
             _lock: lock,
         })
     }
@@ -173,7 +223,16 @@ impl Engine {
         if let Some(runtime) = self.runtimes.lock().expect("engine lock").get(profile) {
             return Ok(runtime.clone());
         }
-        let runtime = Arc::new(self.backends.build(profile, config).await.map_err(ApiError::Internal)?);
+        let store = self.store(profile)?;
+        let mut secrets = ProfileSecrets::new();
+        for key in store.secret_keys().map_err(store_error)? {
+            if let Some(sealed) = store.secret(&key).map_err(store_error)? {
+                // A token that cannot be decrypted is an error for its user, never a silent fallback.
+                secrets.insert(key.clone(), self.secret_box.open(profile, &key, &sealed));
+            }
+        }
+        let built = self.backends.build_with_secrets(profile, config, &secrets).await;
+        let runtime = Arc::new(built.map_err(ApiError::Internal)?);
         self.runtimes
             .lock()
             .expect("engine lock")
@@ -282,7 +341,11 @@ impl Engine {
         let mut replies = Vec::new();
         let mut used_tokens = 0;
         for attempt in 0..2 {
-            let response = match runtime.llm.complete(request.clone()).await {
+            let llm = match &runtime.llm {
+                Ok(llm) => llm,
+                Err(error) => return Ok((Err(format!("the LLM cannot be used: {error}")), replies)),
+            };
+            let response = match llm.complete(request.clone()).await {
                 Ok(response) => response,
                 Err(error) => return Ok((Err(format!("LLM call failed: {error}")), replies)),
             };
@@ -337,8 +400,8 @@ impl Engine {
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
             Some((connector, tool)) if config.policy.rules.contains_key(tool_id) => {
-                match (config.approved_tools.get(connector), runtime.connectors.get(connector)) {
-                    (Some(approved), Some(live)) => match live.list_tools().await {
+                match (config.approved_tools.get(connector), runtime.connector(connector)) {
+                    (Some(approved), Ok(live)) => match live.list_tools().await {
                         Ok(current) => pin_holds(&pin(approved), &current, tool),
                         Err(_) => false,
                     },
@@ -363,9 +426,12 @@ impl Engine {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
         let key = Some(item.event_key.as_str());
-        let result = match split_tool_id(tool_id).and_then(|(c, t)| Some((runtime.connectors.get(c)?, t))) {
-            Some((connector, tool)) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),
-            None => Err(format!("no connector for `{tool_id}`")),
+        let result = match split_tool_id(tool_id) {
+            Some((connector, tool)) => match runtime.connector(connector) {
+                Ok(connector) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),
+                Err(error) => Err(error),
+            },
+            None => Err(format!("`{tool_id}` is not a tool ID")),
         };
         match result {
             Ok(value) => {
@@ -673,14 +739,17 @@ impl Engine {
 
     async fn tools_report(&self, profile: &str, connector: &str) -> ApiResult<ToolsReport> {
         let ctx = self.ctx(profile).await?;
+        if !ctx.config.connectors.contains_key(connector) && !ctx.runtime.connectors.contains_key(connector) {
+            return Err(ApiError::NotFound(format!("connector `{connector}`")));
+        }
+        // This also tells the owner whether an address and token that were just saved work.
         let live = ctx
             .runtime
-            .connectors
-            .get(connector)
-            .ok_or_else(|| ApiError::NotFound(format!("connector `{connector}`")))?
+            .connector(connector)
+            .map_err(ApiError::NotAllowed)?
             .list_tools()
             .await
-            .map_err(|e| ApiError::Internal(format!("connector `{connector}` cannot list its tools: {e}")))?;
+            .map_err(|e| ApiError::NotAllowed(format!("connector `{connector}` cannot list its tools: {e}")))?;
         let approved = ctx.config.approved_tools.get(connector).cloned().unwrap_or_default();
         Ok(ToolsReport {
             diff: diff_pins(&pin(&approved), &live),
@@ -809,5 +878,26 @@ impl EngineApi for Engine {
 
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {
         Box::pin(self.preview_poll(profile, index))
+    }
+
+    fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {
+        Box::pin(async move { self.read_connections(profile) })
+    }
+
+    fn set_llm<'a>(&'a self, profile: &'a str, update: LlmUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_llm(profile, update) })
+    }
+
+    fn set_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_connector(profile, name, update) })
+    }
+
+    fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.delete_connector(profile, name) })
     }
 }

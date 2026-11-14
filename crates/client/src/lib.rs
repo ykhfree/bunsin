@@ -2,8 +2,8 @@
 
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
-    ApiError, ApiResult, Edit, EngineApi, Outcome, PollPreview, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, ToolsReport,
+    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
@@ -257,6 +257,39 @@ impl EngineApi for RemoteEngine {
                 NO_BODY,
             )
             .await
+        })
+    }
+
+    fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {
+        Box::pin(async move {
+            self.call(Method::GET, &profile_path(profile, "connections"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_llm<'a>(&'a self, profile: &'a str, update: LlmUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::PUT, &profile_path(profile, "connections/llm"), Some(&update))
+                .await
+        })
+    }
+
+    fn set_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connections/connectors/{name}"));
+            self.send_only(Method::PUT, &path, Some(&update)).await
+        })
+    }
+
+    fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connections/connectors/{name}"));
+            self.send_only(Method::DELETE, &path, NO_BODY).await
         })
     }
 }

@@ -9,6 +9,7 @@ use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, ProfileInfo};
+use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -132,6 +133,76 @@ pub struct PollStatus {
     pub error: Option<String>,
 }
 
+/// Where the token of a connection comes from. The token itself is never sent back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    /// The owner entered it. The server keeps it encrypted.
+    Stored,
+    /// The server operator set it in the server's environment.
+    ServerEnvironment,
+    None,
+}
+
+/// What to do with the token when a connection is saved.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenChange {
+    /// Keep the token as it is. Refused if the address moved to another host.
+    Keep,
+    Set(String),
+    Clear,
+}
+
+impl std::fmt::Debug for TokenChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token value is left out on purpose.
+        f.write_str(match self {
+            TokenChange::Keep => "Keep",
+            TokenChange::Set(_) => "Set([REDACTED])",
+            TokenChange::Clear => "Clear",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmConnection {
+    pub wire: Wire,
+    pub base_url: String,
+    pub model: String,
+    pub timeout_secs: u64,
+    pub token: TokenSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorConnection {
+    pub mcp: McpConfig,
+    pub token: TokenSource,
+}
+
+/// The LLM endpoint and the connectors of a profile, without any token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connections {
+    pub llm: Option<LlmConnection>,
+    pub connectors: BTreeMap<String, ConnectorConnection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmUpdate {
+    pub wire: Wire,
+    pub base_url: String,
+    pub model: String,
+    pub timeout_secs: u64,
+    pub token: TokenChange,
+}
+
+/// A connector that is reached over HTTP. Other transports are set by the server operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorUpdate {
+    pub url: String,
+    pub token: TokenChange,
+}
+
 /// The tools a connector lists now, compared with the approved ones.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolsReport {
@@ -207,6 +278,19 @@ pub trait EngineApi: Send + Sync {
     fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>>;
     /// Replaces only the privacy part of the settings.
     fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>>;
+    /// The LLM endpoint and the connectors, with where each token comes from.
+    fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>>;
+    /// Saves the LLM endpoint and its token in one step.
+    fn set_llm<'a>(&'a self, profile: &'a str, update: LlmUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// Saves one connector and its token in one step. Check it with `connector_tools`.
+    fn set_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>>;
+    /// Removes a connector and its stored token.
+    fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
 }

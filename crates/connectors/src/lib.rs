@@ -9,29 +9,10 @@ use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
 
-/// How to reach one MCP server. It never holds a token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
-pub enum McpConfig {
-    /// Streamable HTTP. The bearer token is passed to `McpConnector::connect`.
-    Http { url: String },
-    /// A child process that speaks MCP on stdin and stdout.
-    /// `command` must be an absolute path, because a macOS GUI app has a minimal PATH.
-    /// The child inherits the parent environment, plus `env`.
-    Stdio {
-        command: PathBuf,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-    },
-}
+pub use bunsin_core::settings::McpConfig;
 
 /// A connected MCP client session.
 pub struct McpConnector {

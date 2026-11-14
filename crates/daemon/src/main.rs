@@ -3,7 +3,7 @@
 //! Operator commands (`serve`, `profile-add`, `token-*`) work on the data directory
 //! of this machine. All other commands talk to a running server over HTTPS.
 
-use bunsin_api::{Edit, EngineApi, ProfileConfig};
+use bunsin_api::{ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource};
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
@@ -31,6 +31,33 @@ struct Cli {
 struct Local {
     #[arg(long, env = "BUNSIN_DATA_DIR")]
     data_dir: PathBuf,
+}
+
+/// What to do with the token of a connection. Without an option the token is kept.
+#[derive(Args)]
+struct TokenArgs {
+    /// Read the token from standard input. A token on the command line would show in the process list.
+    #[arg(long, conflicts_with = "clear_token")]
+    token_stdin: bool,
+    /// Remove the stored token.
+    #[arg(long)]
+    clear_token: bool,
+}
+
+impl TokenArgs {
+    fn change(&self) -> Result<TokenChange, String> {
+        if self.clear_token {
+            return Ok(TokenChange::Clear);
+        }
+        if !self.token_stdin {
+            return Ok(TokenChange::Keep);
+        }
+        let mut token = String::new();
+        std::io::stdin()
+            .read_line(&mut token)
+            .map_err(|e| format!("cannot read the token: {e}"))?;
+        Ok(TokenChange::Set(token.trim().to_owned()))
+    }
 }
 
 /// Which server to talk to. The access token is read from `BUNSIN_TOKEN`.
@@ -66,6 +93,11 @@ enum Command {
         /// resolves to an internal address still passes. Give the list on a shared server.
         #[arg(long = "allow-upstream-host")]
         allow_upstream_hosts: Vec<String>,
+        /// The file with the key that encrypts tokens which owners store on the server.
+        /// It is created if it does not exist. The default is `master.key` in the data
+        /// directory. Keep this file out of backups of the data directory.
+        #[arg(long, env = "BUNSIN_MASTER_KEY_FILE")]
+        master_key_file: Option<PathBuf>,
     },
     /// Operator: create a profile that can do nothing until it gets settings.
     ProfileAdd {
@@ -178,6 +210,47 @@ enum Command {
         /// The position of the poll in the `polls` list of the settings, from 0.
         index: usize,
     },
+    /// Show the LLM endpoint and the connectors, and where each token comes from.
+    Connections {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Save the LLM endpoint. With --token-stdin, read its token from standard input.
+    LlmSet {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        #[arg(long, value_parser = ["anthropic-messages", "openai-chat"])]
+        wire: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+        #[command(flatten)]
+        token: TokenArgs,
+    },
+    /// Save a connector that is reached over HTTP. With --token-stdin, read its token
+    /// from standard input. Then check it with `tools`.
+    ConnectorSet {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        name: String,
+        #[arg(long)]
+        url: String,
+        #[command(flatten)]
+        token: TokenArgs,
+    },
+    /// Remove a connector and its stored token.
+    ConnectorRemove {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        name: String,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -227,10 +300,13 @@ async fn run_server(
     listen: SocketAddr,
     tls: Option<(PathBuf, PathBuf)>,
     backends: RealBackends,
+    master_key_file: Option<PathBuf>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
-    let engine = Engine::open(&local.data_dir, backends, Arc::new(now)).map_err(|e| e.to_string())?;
+    let key_file = master_key_file.unwrap_or_else(|| local.data_dir.join("master.key"));
+    let engine =
+        Engine::open_with_key_file(&local.data_dir, &key_file, backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let engine = Arc::new(engine);
     let running = serve(engine.clone(), ServeConfig { listen, tls })
         .await
@@ -263,13 +339,14 @@ async fn run(cli: Cli) -> Result<(), String> {
             tls_key,
             allow_stdio_connectors,
             allow_upstream_hosts,
+            master_key_file,
         } => {
             let allowed_hosts = allow_upstream_hosts
                 .iter()
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
             let backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
-            run_server(local, listen, tls_cert.zip(tls_key), backends).await?;
+            run_server(local, listen, tls_cert.zip(tls_key), backends, master_key_file).await?;
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;
@@ -364,10 +441,12 @@ async fn run(cli: Cli) -> Result<(), String> {
                 author,
                 text: body,
             };
-            println!(
-                "{}",
-                json(&connect(&remote)?.ingest(&profile, event).await.map_err(text)?)
-            );
+            let outcome = connect(&remote)?.ingest(&profile, event).await.map_err(text)?;
+            // A handling that failed is an error for the caller, who may hand the event in again.
+            if let bunsin_api::Outcome::Failed { error } = outcome {
+                return Err(format!("the event was not handled: {error}"));
+            }
+            println!("{}", json(&outcome));
         }
         Command::Approve {
             remote,
@@ -429,6 +508,75 @@ async fn run(cli: Cli) -> Result<(), String> {
                     report.tools.len()
                 );
             }
+        }
+        Command::Connections { remote, profile } => {
+            let connections = connect(&remote)?.connections(&profile).await.map_err(text)?;
+            let source = |token: TokenSource| match token {
+                TokenSource::Stored => "token stored on the server",
+                TokenSource::ServerEnvironment => "token from the server's environment",
+                TokenSource::None => "no token",
+            };
+            match &connections.llm {
+                Some(llm) => println!(
+                    "llm\t{}\t{}\t{}\t{}",
+                    json(&llm.wire),
+                    llm.base_url,
+                    llm.model,
+                    source(llm.token)
+                ),
+                None => println!("llm\tnot set"),
+            }
+            for (name, connector) in &connections.connectors {
+                let address = match &connector.mcp {
+                    bunsin_core::settings::McpConfig::Http { url } => url.clone(),
+                    bunsin_core::settings::McpConfig::Stdio { command, .. } => format!("command {}", command.display()),
+                };
+                println!("{name}\t{address}\t{}", source(connector.token));
+            }
+        }
+        Command::LlmSet {
+            remote,
+            profile,
+            wire,
+            base_url,
+            model,
+            timeout_secs,
+            token,
+        } => {
+            let wire = serde_json::from_value(serde_json::Value::String(wire)).map_err(|e| e.to_string())?;
+            let update = LlmUpdate {
+                wire,
+                base_url,
+                model,
+                timeout_secs,
+                token: token.change()?,
+            };
+            connect(&remote)?.set_llm(&profile, update).await.map_err(text)?;
+            println!("LLM endpoint of {profile} saved");
+        }
+        Command::ConnectorSet {
+            remote,
+            profile,
+            name,
+            url,
+            token,
+        } => {
+            let update = ConnectorUpdate {
+                url,
+                token: token.change()?,
+            };
+            connect(&remote)?
+                .set_connector(&profile, &name, update)
+                .await
+                .map_err(text)?;
+            println!("connector {name} of {profile} saved. Check it with: bunsind tools {profile} {name}");
+        }
+        Command::ConnectorRemove { remote, profile, name } => {
+            connect(&remote)?
+                .remove_connector(&profile, &name)
+                .await
+                .map_err(text)?;
+            println!("connector {name} of {profile} removed");
         }
         Command::PollTest { remote, profile, index } => {
             let preview = connect(&remote)?.test_poll(&profile, index).await.map_err(text)?;
