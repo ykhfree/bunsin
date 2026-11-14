@@ -6,6 +6,7 @@ use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Backends, Engine, Runtime};
@@ -43,6 +44,7 @@ struct Rig {
     llm: Arc<FakeLlm>,
     slack: Arc<FakeConnector>,
     engine: Arc<Engine>,
+    clock: Arc<std::sync::atomic::AtomicI64>,
     server: Running,
     kim_token: String,
     lee_token: String,
@@ -85,7 +87,10 @@ async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig 
         slack: slack.clone(),
         real,
     });
-    let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1_000)).unwrap());
+    let clock = Arc::new(std::sync::atomic::AtomicI64::new(1_000_000));
+    let time = clock.clone();
+    let now = move || time.load(std::sync::atomic::Ordering::SeqCst);
+    let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(now)).unwrap());
     engine.create_profile("kim", profile_config("Kim")).await.unwrap();
     engine.create_profile("lee", profile_config("Lee")).await.unwrap();
     let kim_token = engine.app_store().add_token("kim", "test", 1).unwrap();
@@ -94,6 +99,7 @@ async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig 
     let server = serve(engine.clone(), ServeConfig { listen, tls }).await.unwrap();
     Rig {
         _dir: dir,
+        clock,
         llm,
         slack,
         engine,
@@ -230,6 +236,20 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.approve(other, inbox_id, None).await.map(|_| ()));
         refused(kim.reject(other, inbox_id, "x").await);
         refused(kim.set_kill_switch(other, true).await.map(|_| ()));
+        refused(kim.connector_tools(other, "slack").await.map(|_| ()));
+        refused(kim.approve_tools(other, "slack", Default::default()).await);
+        refused(kim.privacy(other).await.map(|_| ()));
+        refused(
+            kim.set_privacy(
+                other,
+                PrivacyConfig {
+                    email: false,
+                    ..PrivacyConfig::default()
+                },
+            )
+            .await,
+        );
+        refused(kim.test_poll(other, 0).await.map(|_| ()));
         refused(
             kim.replay(
                 other,
@@ -243,6 +263,7 @@ async fn a_token_reaches_only_its_own_profile() {
         );
     }
     // Nothing changed in lee's profile.
+    assert_eq!(rig.engine.privacy("lee").await.unwrap(), PrivacyConfig::default());
     let lee = rig.engine.snapshot("lee").await.unwrap();
     assert!(!lee.kill_switch);
     assert_eq!(lee.inbox[0].state, ApprovalState::Pending);
@@ -400,4 +421,124 @@ async fn tls_works_with_the_given_ca_and_fails_without_it() {
     )
     .unwrap();
     assert!(plain.snapshot("kim").await.is_err());
+}
+
+#[tokio::test]
+async fn privacy_settings_and_tool_approval_work_through_the_server() {
+    let rig = rig().await;
+    let kim = rig.kim();
+
+    let mut privacy = kim.privacy("kim").await.unwrap();
+    assert_eq!(privacy, PrivacyConfig::default());
+    privacy.custom.push(CustomPattern {
+        label: "employee id".into(),
+        pattern: r"EMP-\d{6}".into(),
+    });
+    kim.set_privacy("kim", privacy.clone()).await.unwrap();
+    assert_eq!(kim.privacy("kim").await.unwrap(), privacy);
+    // The server's reason for a refused pattern reaches the caller.
+    privacy.custom.push(CustomPattern {
+        label: "bad".into(),
+        pattern: "(unclosed".into(),
+    });
+    let error = kim.set_privacy("kim", privacy).await.unwrap_err();
+    assert!(
+        matches!(error, ApiError::Invalid(ref m) if m.contains("the pattern of `bad`")),
+        "{error:?}"
+    );
+    assert_eq!(kim.privacy("kim").await.unwrap().custom.len(), 1);
+
+    rig.llm.reply(&post("ok"), 10);
+    kim.ingest(
+        "kim",
+        InboundEvent {
+            text: "EMP-004211 and kim@example.com".into(),
+            ..event("p1")
+        },
+    )
+    .await
+    .unwrap();
+    let request = serde_json::to_string(&rig.llm.requests()).unwrap();
+    assert!(
+        !request.contains("EMP-004211") && !request.contains("kim@example.com"),
+        "{request}"
+    );
+
+    rig.slack
+        .set_tools(vec![tool("post", "Post a message"), tool("search", "Search messages")]);
+    let report = kim.connector_tools("kim", "slack").await.unwrap();
+    assert_eq!(report.diff.added, ["search"]);
+    kim.approve_tools("kim", "slack", bunsin_core::tool::pin(&report.tools))
+        .await
+        .unwrap();
+    assert!(kim.connector_tools("kim", "slack").await.unwrap().diff.is_clean());
+    assert!(matches!(
+        kim.connector_tools("kim", "jira").await,
+        Err(ApiError::NotFound(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_poll_task_finds_a_new_message_without_any_request() {
+    use bunsin_core::poll::{PollConfig, PollMapping};
+    use bunsin_daemon::server::Poller;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    let rig = rig().await;
+    rig.slack
+        .set_tools(vec![tool("post", "Post a message"), tool("search", "Search messages")]);
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.approved_tools.insert(
+        "slack".into(),
+        vec![tool("post", "Post a message"), tool("search", "Search messages")],
+    );
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    config.polls = vec![PollConfig {
+        connector: "slack".into(),
+        tool: "search".into(),
+        args: Default::default(),
+        every_secs: 30,
+        mapping: PollMapping {
+            items: "messages".into(),
+            id: "ts".into(),
+            text: "text".into(),
+            author: "user".into(),
+            thread: None,
+        },
+        skip_authors: vec![],
+    }];
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    rig.slack.set_result(
+        "search",
+        json!({"messages": [{"ts": "1", "user": "lee", "text": "old"}]}),
+    );
+
+    let poller = Poller::start(rig.engine.clone());
+    let wait_for = |what: &'static str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // The first cycle records the old message as history.
+    tokio::task::block_in_place(|| wait_for("the first search", &|| !rig.slack.calls().is_empty()));
+    assert!(rig.llm.requests().is_empty());
+
+    rig.slack.set_result(
+        "search",
+        json!({"messages": [{"ts": "1", "user": "lee", "text": "old"}, {"ts": "2", "user": "lee", "text": "new question"}]}),
+    );
+    rig.llm.reply(&post("Answer."), 10);
+    rig.clock.fetch_add(30, Ordering::SeqCst);
+    tokio::task::block_in_place(|| wait_for("the handled event", &|| !rig.llm.requests().is_empty()));
+
+    poller.stop().await;
+    let snapshot = rig.kim().snapshot("kim").await.unwrap();
+    assert_eq!(snapshot.inbox.len(), 1);
+    assert_eq!(snapshot.polls[0].tool, "slack/search");
+    assert_eq!(snapshot.polls[0].new_events, 1);
+    // The other profile has no poll and got no event.
+    assert!(rig.engine.snapshot("lee").await.unwrap().inbox.is_empty());
 }
