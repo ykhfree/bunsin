@@ -769,6 +769,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunsin-coding"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "bunsin-core"
 version = "0.1.0"
 dependencies = [
