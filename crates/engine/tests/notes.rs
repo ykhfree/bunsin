@@ -517,3 +517,64 @@ async fn the_owner_writes_changes_and_deletes_pages() {
     ));
     assert!(rig.engine.wiki_index("kim").await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn every_change_of_a_page_can_be_read_back_and_an_old_text_restored() {
+    let rig = rig().await;
+    let item = learn(&rig, "e1", "deploy-schedule", "Fridays.").await;
+    rig.engine.approve("kim", item, None).await.unwrap();
+    rig.engine
+        .set_wiki_page("kim", "deploy-schedule", owner_text("Thursdays."))
+        .await
+        .unwrap();
+    rig.engine.delete_wiki_page("kim", "deploy-schedule").await.unwrap();
+
+    let history = rig.engine.wiki_history("kim", "deploy-schedule").await.unwrap();
+    assert_eq!(history.len(), 3);
+    let first = history[0].as_ref().unwrap();
+    assert_eq!(
+        (first.text.body.as_str(), first.revision, first.author),
+        ("Fridays.", 1, WikiAuthor::Agent)
+    );
+    assert_eq!(first.sources[1].origin, "slack/search");
+    let second = history[1].as_ref().unwrap();
+    assert_eq!(
+        (second.text.body.as_str(), second.revision, second.author),
+        ("Thursdays.", 2, WikiAuthor::Owner)
+    );
+    assert_eq!(history[2], None);
+
+    // The owner restores the first text.
+    let restore = WikiPageUpdate {
+        text: first.text.clone(),
+        expected_revision: None,
+    };
+    rig.engine
+        .set_wiki_page("kim", "deploy-schedule", restore)
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.engine.wiki_page("kim", "deploy-schedule").await.unwrap().text.body,
+        "Fridays."
+    );
+    assert!(
+        rig.engine
+            .wiki_history("kim", "never-existed")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_page_change_can_be_approved_while_the_kill_switch_is_on() {
+    // A page is not an action on another system. The switch stops only those.
+    let rig = rig().await;
+    let item = learn(&rig, "e1", "deploy-schedule", "Fridays.").await;
+    rig.engine.set_kill_switch("kim", true).await.unwrap();
+    rig.engine.approve("kim", item, None).await.unwrap();
+    assert_eq!(
+        rig.engine.wiki_page("kim", "deploy-schedule").await.unwrap().revision,
+        1
+    );
+}

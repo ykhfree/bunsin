@@ -283,6 +283,15 @@ async fn delete_wiki_page(
     Ok(Json(engine.delete_wiki_page(&profile, &slug).await?))
 }
 
+async fn wiki_history(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, slug)): Path<(String, String)>,
+) -> Reply<Vec<Option<WikiPage>>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.wiki_history(&profile, &slug).await?))
+}
+
 pub fn router(engine: Arc<Engine>) -> Router {
     let profile = |rest: &str| format!("{PROFILES}/{{profile}}/{rest}");
     Router::new()
@@ -299,6 +308,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("polls/{index}/test"), post(test_poll))
         .route(&profile("wiki"), get(wiki_index))
+        .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(
             &profile("wiki/{slug}"),
             get(get_wiki_page).put(put_wiki_page).delete(delete_wiki_page),

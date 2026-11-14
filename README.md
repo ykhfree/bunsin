@@ -22,15 +22,15 @@ Bunsin is in early development. Read this list before you use it.
   you name in the settings (see [Find events](#find-events-polling)). It has run only
   against test servers. There is no webhook intake.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
-  tools with the class `read` (for example a search) up to five times and use the
-  results. Facts it keeps go into its notes, which you approve page by page (see
+  tools with the class `read` (for example a search) up to five times, and read up to
+  five pages of its notes, and use the results. Facts it keeps go into its notes, which you approve page by page (see
   [Notes](#notes)). Nothing is loaded in advance: the notes fill only with what the
   agent read while it handled events, and the search quality depends on your MCP servers.
 - **The privacy filter works on patterns.** It finds email addresses, phone numbers and
   the other listed forms. It does not find names or postal addresses.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. Principles, permission rules and polls are edited as a JSON file.
-- **Not built yet:** retrieval of work knowledge, ARD publishing and search, the REST API
+- **Not built yet:** full-text search of the notes, ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
   a real MCP server.
@@ -302,6 +302,7 @@ bunsind wiki-list kim
 bunsind wiki-show kim deploy-schedule
 bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
 bunsind wiki-delete kim team
+bunsind wiki-history kim team          # every change; --revision N prints an old text
 bunsind wiki-export kim ./notes        # index.md and pages/*.md
 ```
 

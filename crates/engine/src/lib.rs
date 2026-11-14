@@ -1159,4 +1159,8 @@ impl EngineApi for Engine {
     fn delete_wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.delete_owner_page(profile, slug) })
     }
+
+    fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>> {
+        Box::pin(async move { self.store(profile)?.wiki_history(slug).map_err(store_error) })
+    }
 }

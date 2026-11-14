@@ -282,6 +282,16 @@ enum Command {
         #[arg(long)]
         body_file: PathBuf,
     },
+    /// List every stored revision of a page. With --revision, print that revision's text,
+    /// which you can save again with `wiki-set` to restore it.
+    WikiHistory {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        slug: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
     /// Delete a page of the notes.
     WikiDelete {
         #[command(flatten)]
@@ -669,6 +679,32 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .await
                 .map_err(text)?;
             println!("page {} saved at revision {}", page.slug, page.revision);
+        }
+        Command::WikiHistory {
+            remote,
+            profile,
+            slug,
+            revision,
+        } => {
+            let history = connect(&remote)?.wiki_history(&profile, &slug).await.map_err(text)?;
+            match revision {
+                Some(wanted) => {
+                    let page = history.iter().flatten().find(|page| page.revision == wanted);
+                    let page = page.ok_or_else(|| format!("page {slug} has no revision {wanted}"))?;
+                    println!("{}", page_markdown(page));
+                }
+                None => {
+                    for entry in &history {
+                        match entry {
+                            Some(page) => {
+                                let author = json(&page.author);
+                                println!("{}\t{}\t{}", page.revision, author.trim_matches('"'), page.text.summary);
+                            }
+                            None => println!("-\tdeleted"),
+                        }
+                    }
+                }
+            }
         }
         Command::WikiDelete { remote, profile, slug } => {
             connect(&remote)?

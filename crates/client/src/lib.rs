@@ -327,6 +327,17 @@ impl EngineApi for RemoteEngine {
                 .await
         })
     }
+
+    fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>> {
+        Box::pin(async move {
+            self.call(
+                Method::GET,
+                &profile_path(profile, &format!("wiki/{slug}/history")),
+                NO_BODY,
+            )
+            .await
+        })
+    }
 }
 
 #[cfg(test)]

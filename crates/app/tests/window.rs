@@ -655,7 +655,8 @@ fn an_item_shows_the_reads_it_is_based_on_and_can_be_approved(cx: &mut TestAppCo
     let (tool, args) = rig.slack.calls().last().cloned().unwrap();
     assert_eq!(tool, "post");
     assert!(args["text"].as_str().unwrap().starts_with("Friday."), "{args:?}");
-    // The first item is still pending, below the other one. The inbox scrolls to its buttons.
+    // The first item is still pending, below the other one. Two items are taller than the inbox
+    // at laptop size, so the inbox scrolls to its buttons.
     on_screen(cx, window, |window, cx| {
         window.scroll("inbox-1", ScrollDelta::Pixels(point(px(0.), px(-200.))), cx);
         window.click("approve-1", cx);
@@ -666,4 +667,47 @@ fn an_item_shows_the_reads_it_is_based_on_and_can_be_approved(cx: &mut TestAppCo
             .as_ref()
             .is_some_and(|snap| snap.inbox.iter().all(|i| i.state.as_str() == "executed"))
     });
+}
+
+#[gpui_kit::test]
+fn a_note_is_approved_in_the_inbox_and_stored_on_the_server(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(common::ingest_event_with_a_note(&rig));
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbox-count"), "Approval inbox: 3");
+        // The note is told from an action by its title and by its button.
+        assert_eq!(label(window, "inbox-2"), "pending · note `deploy-schedule` (new page)");
+        let detail = label(window, "detail-2");
+        assert!(detail.contains("LAST-LINE-OF-THE-PAGE"), "{detail}");
+        assert!(detail.contains("- slack/search:"), "{detail}");
+        // The long page scrolls in its own box. Its row stays shorter than the inbox.
+        let page = window.find("detail-box-2").bounds().size.height;
+        assert!(page <= px(220.), "{page:?}");
+        window.scroll("inbox-2", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        // The title and the buttons of the note are on screen together.
+        assert!(window.find("inbox-2").visible());
+        window.click("approve-2", cx);
+    });
+    wait_until(cx, &shell, "the stored note", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox.iter().any(|i| i.id == 2 && i.state.as_str() == "executed"))
+    });
+    let page = rt.block_on(rig.engine.wiki_page("kim", "deploy-schedule")).unwrap();
+    assert!(page.text.body.ends_with("LAST-LINE-OF-THE-PAGE"));
+    // Approving the note posted nothing.
+    assert!(rig.slack.calls().iter().all(|(tool, _)| tool == "search"));
+    // The action that came with it is still waiting.
+    let snapshot = rt.block_on(rig.engine.snapshot("kim")).unwrap();
+    assert!(
+        snapshot
+            .inbox
+            .iter()
+            .any(|i| i.id == 3 && i.state.as_str() == "pending")
+    );
 }

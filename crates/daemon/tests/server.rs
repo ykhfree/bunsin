@@ -266,6 +266,7 @@ async fn a_token_reaches_only_its_own_profile() {
                 .map(|_| ()),
         );
         refused(kim.delete_wiki_page(other, "team").await);
+        refused(kim.wiki_history(other, "team").await.map(|_| ()));
         refused(kim.connections(other).await.map(|_| ()));
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
@@ -705,4 +706,8 @@ async fn the_notes_are_read_and_written_through_the_server() {
 
     kim.delete_wiki_page("kim", "team").await.unwrap();
     assert!(kim.wiki_index("kim").await.unwrap().is_empty());
+    let history = kim.wiki_history("kim", "team").await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].as_ref().unwrap().text.body, "Kim leads.");
+    assert_eq!(history[1], None);
 }

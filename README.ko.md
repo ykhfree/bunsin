@@ -20,13 +20,13 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
 
 - **이벤트 수신은 사용하는 MCP 서버에 달려 있습니다.** 서버는 설정에 적힌 검색 도구를 반복 호출합니다
   ([이벤트 찾기](#이벤트-찾기-폴링) 참고). 이 기능은 테스트 서버로만 실행해 보았습니다. webhook 수신은 없습니다.
-- **agent는 허용한 도구로만 읽습니다.** 제안하기 전에 `read` 도구(예: 검색)를 최대 5번 호출하고 그 결과를 씁니다.
+- **agent는 허용한 도구로만 읽습니다.** 제안하기 전에 `read` 도구(예: 검색)를 최대 5번 호출하고, notes의 페이지를 최대 5번 읽고, 그 결과를 씁니다.
   오래 쓸 사실은 notes에 정리하고, 사용자가 한 쪽씩 승인합니다([Notes](#notes) 참고). 미리 읽어 넣는 기능은 없습니다.
   notes는 agent가 이벤트를 처리하며 읽은 것으로만 채워지고, 검색 품질은 MCP 서버에 달려 있습니다.
 - **개인정보 필터는 패턴으로 동작합니다.** 이메일, 전화번호 같은 정해진 형식은 찾지만, 사람 이름과 주소는 찾지 못합니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다.
   원칙, 권한 규칙, poll은 JSON 파일로 편집합니다.
-- **아직 만들지 않은 것:** 업무지식 검색, ARD 게시와 검색, REST API 커넥터, MCP 서버용 OAuth, 재현 평가의 채점.
+- **아직 만들지 않은 것:** notes의 전문 검색, ARD 게시와 검색, REST API 커넥터, MCP 서버용 OAuth, 재현 평가의 채점.
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint나 실제 MCP 서버로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
@@ -270,6 +270,7 @@ bunsind wiki-list kim
 bunsind wiki-show kim deploy-schedule
 bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
 bunsind wiki-delete kim team
+bunsind wiki-history kim team          # 모든 변경. --revision N은 옛 본문을 출력
 bunsind wiki-export kim ./notes        # index.md와 pages/*.md
 ```
 

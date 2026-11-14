@@ -354,6 +354,9 @@ pub trait EngineApi: Send + Sync {
         update: WikiPageUpdate,
     ) -> BoxFuture<'a, ApiResult<WikiPage>>;
     fn delete_wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// Every stored revision of a page, oldest first. A deletion is `None`.
+    /// To restore an old text, save it again with `set_wiki_page`.
+    fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
 }

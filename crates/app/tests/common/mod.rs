@@ -156,3 +156,38 @@ pub async fn ingest_second_event(rig: &Rig) {
     };
     rig.engine.ingest("kim", event).await.unwrap();
 }
+
+/// Like `ingest_event_with_a_read`, and the agent also wants to keep what it read:
+/// a pending note with ID 2 (a long page) and a pending post with ID 3.
+#[allow(dead_code)]
+pub async fn ingest_event_with_a_note(rig: &Rig) {
+    let tools = vec![tool("post", "Post a message"), tool("search", "Search messages")];
+    rig.slack.set_tools(tools.clone());
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.approved_tools.insert("slack".into(), tools);
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    let body = (1..=40)
+        .map(|i| format!("Line {i} of the schedule."))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\nLAST-LINE-OF-THE-PAGE";
+    let search = json!({
+        "kind": "tool_call", "rationale": "Lee asked for the date", "summary": null,
+        "tool": "slack/search", "args_json": json!({"query": "deploy date"}).to_string()
+    });
+    let answer = json!({
+        "kind": "tool_call", "rationale": "Lee asked for the date", "summary": null,
+        "tool": "slack/post", "args_json": json!({"channel": "C1", "text": "Friday."}).to_string(),
+        "wiki_updates": [{"slug": "deploy-schedule", "title": "Deploy schedule", "summary": "When the team deploys", "body": body}]
+    });
+    rig.llm.reply(&search.to_string(), 10).reply(&answer.to_string(), 10);
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e-note".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "when is the deploy now?".into(),
+    };
+    rig.engine.ingest("kim", event).await.unwrap();
+}

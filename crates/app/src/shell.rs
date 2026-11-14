@@ -222,14 +222,26 @@ impl Render for Shell {
                     .p_2()
                     .border_1()
                     .child(labelled(format!("inbox-{id}"), inbox_title(item)))
-                    .child(labelled(format!("detail-{id}"), inbox_detail(item)))
+                    // A long text scrolls in its own box, so the buttons below stay close.
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("detail-box-{id}")))
+                            .test_support()
+                            .max_h(px(220.))
+                            .overflow_y_scroll()
+                            .child(labelled(format!("detail-{id}"), inbox_detail(item))),
+                    )
                     .child(div().child(SharedString::from(format!("Why: {}", item.rationale))))
                     .children(inbox_basis(item).map(|basis| labelled(format!("basis-{id}"), basis)));
                 let mut buttons = div().flex().gap_2();
                 if item.state == ApprovalState::Pending {
                     buttons = buttons.child(
                         Button::new(SharedString::from(format!("approve-{id}")))
-                            .label("Approve and run")
+                            // A note is stored. Nothing runs on another system.
+                            .label(match item.body {
+                                InboxBody::WikiChange { .. } => "Approve and keep",
+                                _ => "Approve and run",
+                            })
                             .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
                     );
                 }

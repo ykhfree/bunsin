@@ -27,6 +27,7 @@
 //! | GET | `/v1/profiles/{p}/wiki/{slug}` | | `WikiPage` |
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
 //! | DELETE | `/v1/profiles/{p}/wiki/{slug}` | | |
+//! | GET | `/v1/profiles/{p}/wiki/{slug}/history` | | `[WikiPage or null]` |
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 
