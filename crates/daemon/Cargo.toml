@@ -9,15 +9,22 @@ name = "bunsind"
 path = "src/main.rs"
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum-server = { version = "0.9", features = ["tls-rustls"] }
 bunsin-api.workspace = true
+bunsin-client.workspace = true
 bunsin-connectors.workspace = true
 bunsin-core.workspace = true
 bunsin-engine.workspace = true
 bunsin-llm.workspace = true
+bunsin-store.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+bunsin-testkit.workspace = true
+rcgen = "0.14"
 tempfile.workspace = true

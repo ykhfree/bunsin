@@ -1,113 +1,271 @@
-//! Runs the real `bunsind` binary. Each command is its own process, like a restart.
+//! Runs the real `bunsind` binary: one server process and separate command processes.
 
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 
-fn bunsind(data_dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_bunsind"))
-        .arg("--data-dir")
-        .arg(data_dir)
-        .args(args)
-        .env_remove("BUNSIN_DATA_DIR")
-        .output()
-        .expect("bunsind starts")
+fn bunsind() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bunsind"));
+    for name in [
+        "BUNSIN_DATA_DIR",
+        "BUNSIN_SERVER",
+        "BUNSIN_TOKEN",
+        "BUNSIN_CA_CERT",
+    ] {
+        command.env_remove(name);
+    }
+    command
 }
 
-fn ok(data_dir: &Path, args: &[&str]) -> String {
-    let output = bunsind(data_dir, args);
+fn stdout_of(output: Output, what: &str) -> String {
     assert!(
         output.status.success(),
-        "{args:?} failed: {}",
+        "{what} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn fails(data_dir: &Path, args: &[&str]) -> String {
-    let output = bunsind(data_dir, args);
-    assert_eq!(output.status.code(), Some(1), "{args:?} should fail");
+fn stderr_of_failure(output: Output, what: &str) -> String {
+    assert_eq!(output.status.code(), Some(1), "{what} should fail");
     String::from_utf8(output.stderr).unwrap()
 }
 
-#[test]
-fn profiles_are_created_and_listed() {
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(
-        ok(dir.path(), &["profile-add", "kim", "--owner", "Kim"]),
-        "created profile kim for Kim\n"
+/// Runs an operator command on the data directory.
+fn operator(data_dir: &Path, args: &[&str]) -> Output {
+    bunsind()
+        .arg(args[0])
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(&args[1..])
+        .output()
+        .unwrap()
+}
+
+/// A running `bunsind serve`. The process is killed when this is dropped.
+struct Server {
+    child: Child,
+    url: String,
+}
+
+impl Server {
+    fn start(data_dir: &Path) -> Self {
+        let mut child = bunsind()
+            .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+            .arg(data_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line
+            .trim()
+            .strip_prefix("listening on ")
+            .unwrap_or_else(|| panic!("unexpected: {line:?}"));
+        Self {
+            url: url.to_owned(),
+            child,
+        }
+    }
+
+    /// Runs a remote command against this server.
+    fn run(&self, token: &str, args: &[&str]) -> Output {
+        bunsind()
+            .arg(args[0])
+            .arg("--server")
+            .arg(&self.url)
+            .args(&args[1..])
+            .env("BUNSIN_TOKEN", token)
+            .output()
+            .unwrap()
+    }
+
+    /// Asks the server to stop and waits for it, like a service manager does.
+    fn stop(mut self) {
+        Command::new("kill")
+            .arg("-TERM")
+            .arg(self.child.id().to_string())
+            .status()
+            .unwrap();
+        assert!(
+            self.child.wait().unwrap().success(),
+            "the server did not stop cleanly"
+        );
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn add_profile(data_dir: &Path, id: &str, owner: &str) -> String {
+    stdout_of(
+        operator(data_dir, &["profile-add", id, "--owner", owner]),
+        "profile-add",
     );
-    ok(dir.path(), &["profile-add", "lee", "--owner", "Lee"]);
-    assert_eq!(ok(dir.path(), &["profile-list"]), "kim\tKim\nlee\tLee\n");
+    stdout_of(
+        operator(data_dir, &["token-add", id, "--label", "test"]),
+        "token-add",
+    )
+    .trim()
+    .to_owned()
+}
+
+#[test]
+fn an_owner_controls_only_the_own_profile_through_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    // The operator adds a profile while the server runs.
+    let lee = add_profile(dir.path(), "lee", "Lee");
+
+    assert_eq!(
+        stdout_of(server.run(&kim, &["profile-list"]), "profile-list"),
+        "kim\tKim\n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&lee, &["profile-list"]), "profile-list"),
+        "lee\tLee\n"
+    );
     assert!(
-        fails(dir.path(), &["profile-add", "kim", "--owner", "Other"]).contains("already exists")
+        stdout_of(server.run(&kim, &["status", "kim"]), "status").starts_with("kill switch: off\n")
     );
-    assert!(fails(dir.path(), &["profile-add", "../x", "--owner", "X"]).contains("invalid"));
-}
-
-#[test]
-fn the_kill_switch_stays_on_across_processes_and_is_per_profile() {
-    let dir = tempfile::tempdir().unwrap();
-    ok(dir.path(), &["profile-add", "kim", "--owner", "Kim"]);
-    ok(dir.path(), &["profile-add", "lee", "--owner", "Lee"]);
-    assert!(ok(dir.path(), &["status", "kim"]).starts_with("kill switch: off\n"));
-    assert_eq!(ok(dir.path(), &["stop", "kim", "on"]), "kill switch: on\n");
-    assert!(ok(dir.path(), &["status", "kim"]).starts_with("kill switch: on\n"));
-    assert!(ok(dir.path(), &["status", "lee"]).starts_with("kill switch: off\n"));
     assert_eq!(
-        ok(dir.path(), &["stop", "kim", "off"]),
-        "kill switch: off\n"
+        stdout_of(server.run(&kim, &["stop", "kim", "on"]), "stop"),
+        "kill switch: on\n"
     );
-    assert!(fails(dir.path(), &["stop", "nobody", "on"]).contains("not found"));
+    assert!(
+        stdout_of(server.run(&lee, &["status", "lee"]), "status").starts_with("kill switch: off\n")
+    );
+
+    let error = stderr_of_failure(
+        server.run(&kim, &["stop", "lee", "on"]),
+        "stop for another profile",
+    );
+    assert!(error.contains("not authorized"), "{error}");
+    assert!(
+        stdout_of(server.run(&lee, &["status", "lee"]), "status").starts_with("kill switch: off\n")
+    );
 }
 
 #[test]
-fn settings_round_trip_through_a_file() {
+fn the_kill_switch_stays_on_after_the_server_restarts() {
     let dir = tempfile::tempdir().unwrap();
-    ok(dir.path(), &["profile-add", "kim", "--owner", "Kim"]);
-    let shown = ok(dir.path(), &["config-show", "kim"]);
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let first = Server::start(dir.path());
+    stdout_of(first.run(&kim, &["stop", "kim", "on"]), "stop");
+    first.stop();
+
+    let second = Server::start(dir.path());
+    assert!(
+        stdout_of(second.run(&kim, &["status", "kim"]), "status").starts_with("kill switch: on\n")
+    );
+}
+
+#[test]
+fn a_revoked_or_missing_token_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    assert!(server.run(&kim, &["status", "kim"]).status.success());
+
+    let listed = stdout_of(operator(dir.path(), &["token-list"]), "token-list");
+    let fields: Vec<&str> = listed.trim().split('\t').collect();
+    assert_eq!(&fields[1..], ["kim", "test"]);
+    // The list never shows the token itself.
+    assert!(!listed.contains(&kim));
+    assert_eq!(
+        stdout_of(
+            operator(dir.path(), &["token-revoke", fields[0]]),
+            "token-revoke"
+        ),
+        format!("token {} removed\n", fields[0])
+    );
+
+    let error = stderr_of_failure(
+        server.run(&kim, &["status", "kim"]),
+        "status with a revoked token",
+    );
+    assert!(error.contains("not authorized"), "{error}");
+    assert!(
+        stderr_of_failure(
+            operator(dir.path(), &["token-revoke", fields[0]]),
+            "second revoke"
+        )
+        .contains("no token")
+    );
+
+    let no_token = bunsind()
+        .args(["status", "kim", "--server", &server.url])
+        .output()
+        .unwrap();
+    assert!(stderr_of_failure(no_token, "status without a token").contains("BUNSIN_TOKEN"));
+}
+
+#[test]
+fn settings_round_trip_and_unsafe_settings_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let shown = stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show");
     let mut config: serde_json::Value = serde_json::from_str(&shown).unwrap();
-    assert_eq!(config["owner_name"], "Kim");
     // A new profile can do nothing: no tools and no rules.
     assert_eq!(config["policy"]["rules"], serde_json::json!({}));
     assert_eq!(config["approved_tools"], serde_json::json!({}));
 
-    config["principles"] = serde_json::json!(["Answer in two sentences."]);
     let file = dir.path().join("kim.json");
+    config["principles"] = serde_json::json!(["Answer in two sentences."]);
     std::fs::write(&file, config.to_string()).unwrap();
-    ok(dir.path(), &["config-set", "kim", file.to_str().unwrap()]);
-    let again: serde_json::Value =
-        serde_json::from_str(&ok(dir.path(), &["config-show", "kim"])).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    let again: serde_json::Value = serde_json::from_str(&stdout_of(
+        server.run(&kim, &["config-show", "kim"]),
+        "config-show",
+    ))
+    .unwrap();
     assert_eq!(
         again["principles"],
         serde_json::json!(["Answer in two sentences."])
     );
 
-    std::fs::write(&file, "{\"owner_name\": 1}").unwrap();
-    assert!(
-        fails(dir.path(), &["config-set", "kim", file.to_str().unwrap()])
-            .contains("settings file is invalid")
+    // The real server refuses a connector that would run a command on it.
+    config["connectors"] = serde_json::json!({
+        "shell": {"mcp": {"transport": "stdio", "command": "/bin/sh", "args": [], "env": {}}}
+    });
+    std::fs::write(&file, config.to_string()).unwrap();
+    let error = stderr_of_failure(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "stdio settings",
     );
+    assert!(error.contains("--allow-stdio-connectors"), "{error}");
 }
 
 #[test]
 fn ingest_without_llm_settings_fails_with_the_reason() {
     let dir = tempfile::tempdir().unwrap();
-    ok(dir.path(), &["profile-add", "kim", "--owner", "Kim"]);
-    let error = fails(
-        dir.path(),
-        &[
-            "ingest",
-            "kim",
-            "--source",
-            "slack",
-            "--event-id",
-            "e1",
-            "--author",
-            "lee",
-            "--text",
-            "hi",
-        ],
-    );
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let args = [
+        "ingest",
+        "kim",
+        "--source",
+        "slack",
+        "--event-id",
+        "e1",
+        "--author",
+        "lee",
+        "--text",
+        "hi",
+    ];
+    let error = stderr_of_failure(server.run(&kim, &args), "ingest");
     assert!(
         error.contains("the profile has no `llm` settings"),
         "{error}"
@@ -115,10 +273,39 @@ fn ingest_without_llm_settings_fails_with_the_reason() {
 }
 
 #[test]
-fn an_edit_needs_both_the_arguments_and_the_reason() {
+fn operator_commands_check_their_input() {
     let dir = tempfile::tempdir().unwrap();
-    ok(dir.path(), &["profile-add", "kim", "--owner", "Kim"]);
-    let output = bunsind(dir.path(), &["approve", "kim", "1", "--args", "{}"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--reason"));
+    add_profile(dir.path(), "kim", "Kim");
+    assert!(
+        stderr_of_failure(
+            operator(dir.path(), &["profile-add", "kim", "--owner", "Other"]),
+            "duplicate"
+        )
+        .contains("already exists")
+    );
+    assert!(
+        stderr_of_failure(
+            operator(dir.path(), &["profile-add", "../x", "--owner", "X"]),
+            "bad id"
+        )
+        .contains("invalid")
+    );
+    assert!(
+        stderr_of_failure(
+            operator(dir.path(), &["token-add", "nobody", "--label", "x"]),
+            "no profile"
+        )
+        .contains("does not exist")
+    );
+}
+
+#[test]
+fn the_server_refuses_a_public_address_without_tls_and_a_second_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let public = operator(dir.path(), &["serve", "--listen", "0.0.0.0:0"]);
+    assert!(stderr_of_failure(public, "public serve").contains("TLS is required"));
+
+    let _running = Server::start(dir.path());
+    let second = operator(dir.path(), &["serve", "--listen", "127.0.0.1:0"]);
+    assert!(stderr_of_failure(second, "second serve").contains("another engine"));
 }

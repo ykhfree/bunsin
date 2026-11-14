@@ -25,6 +25,9 @@ pub struct UiState {
     pub snapshot: Option<ProfileSnapshot>,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
+    /// False until the engine answers, and again when it stops answering.
+    /// The window then shows no engine state, because that state may be out of date.
+    pub connected: bool,
 }
 
 /// Runs one command, then reloads the state from the engine.
@@ -60,9 +63,12 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
 }
 
 async fn reload(api: &dyn EngineApi, state: &mut UiState) {
+    state.snapshot = None;
+    state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
         Err(error) => {
+            state.profiles.clear();
             state.error = Some(error.to_string());
             return;
         }
@@ -72,12 +78,15 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     if !state.selected.as_ref().is_some_and(known) {
         state.selected = state.profiles.first().map(|p| p.id.clone());
     }
-    state.snapshot = None;
-    if let Some(profile) = &state.selected {
-        match api.snapshot(profile).await {
-            Ok(snapshot) => state.snapshot = Some(snapshot),
+    match &state.selected {
+        Some(profile) => match api.snapshot(profile).await {
+            Ok(snapshot) => {
+                state.snapshot = Some(snapshot);
+                state.connected = true;
+            }
             Err(error) => state.error = Some(error.to_string()),
-        }
+        },
+        None => state.connected = true,
     }
 }
 

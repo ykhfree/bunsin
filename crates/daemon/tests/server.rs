@@ -1,0 +1,454 @@
+//! The HTTP server and the remote client together, against a real engine with fakes.
+
+use bunsin_api::{ApiError, Edit, EngineApi, Outcome, ProfileConfig, ReplayCase};
+use bunsin_client::{RemoteConfig, RemoteEngine};
+use bunsin_core::approval::ApprovalState;
+use bunsin_core::event::InboundEvent;
+use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
+use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_daemon::RealBackends;
+use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve};
+use bunsin_engine::{Backends, Engine, Runtime};
+use bunsin_testkit::{FakeConnector, FakeLlm, tool};
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// Scripted clients, with the settings check of the real backends.
+struct Fakes {
+    llm: Arc<FakeLlm>,
+    slack: Arc<FakeConnector>,
+    real: RealBackends,
+}
+
+impl Backends for Fakes {
+    fn build<'a>(
+        &'a self,
+        _profile: &'a str,
+        _config: &'a ProfileConfig,
+    ) -> BoxFuture<'a, Result<Runtime, String>> {
+        let llm: Arc<dyn LlmClient> = self.llm.clone();
+        let slack: Arc<dyn Connector> = self.slack.clone();
+        Box::pin(async move {
+            Ok(Runtime {
+                llm,
+                connectors: BTreeMap::from([("slack".to_owned(), slack)]),
+            })
+        })
+    }
+
+    fn validate(&self, profile: &str, config: &ProfileConfig) -> Result<(), String> {
+        self.real.validate(profile, config)
+    }
+}
+
+struct Rig {
+    _dir: tempfile::TempDir,
+    llm: Arc<FakeLlm>,
+    slack: Arc<FakeConnector>,
+    engine: Arc<Engine>,
+    server: Running,
+    kim_token: String,
+    lee_token: String,
+}
+
+impl Rig {
+    fn client(&self, token: &str) -> RemoteEngine {
+        RemoteEngine::new(
+            &RemoteConfig {
+                url: self.server.url(),
+                ca_cert_pem: None,
+            },
+            token,
+        )
+        .unwrap()
+    }
+
+    fn kim(&self) -> RemoteEngine {
+        self.client(&self.kim_token)
+    }
+}
+
+fn profile_config(owner: &str) -> ProfileConfig {
+    let mut config = ProfileConfig::new(owner);
+    config
+        .approved_tools
+        .insert("slack".into(), vec![tool("post", "Post a message")]);
+    let rule = ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into()));
+    config.policy.rules.insert("slack/post".into(), rule);
+    config
+}
+
+async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = Arc::new(FakeLlm::new());
+    let slack = Arc::new(FakeConnector::new(
+        "slack",
+        vec![tool("post", "Post a message")],
+    ));
+    let real = RealBackends::new(Arc::new(|_| None), false);
+    let backends = Arc::new(Fakes {
+        llm: llm.clone(),
+        slack: slack.clone(),
+        real,
+    });
+    let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1_000)).unwrap());
+    engine
+        .create_profile("kim", profile_config("Kim"))
+        .await
+        .unwrap();
+    engine
+        .create_profile("lee", profile_config("Lee"))
+        .await
+        .unwrap();
+    let kim_token = engine.app_store().add_token("kim", "test", 1).unwrap();
+    let lee_token = engine.app_store().add_token("lee", "test", 1).unwrap();
+    let listen = "127.0.0.1:0".parse().unwrap();
+    let server = serve(engine.clone(), ServeConfig { listen, tls })
+        .await
+        .unwrap();
+    Rig {
+        _dir: dir,
+        llm,
+        slack,
+        engine,
+        server,
+        kim_token,
+        lee_token,
+    }
+}
+
+async fn rig() -> Rig {
+    rig_with(None).await
+}
+
+fn event(id: &str) -> InboundEvent {
+    InboundEvent {
+        source: "slack".into(),
+        external_id: id.into(),
+        thread: None,
+        author: "lee".into(),
+        text: "hi".into(),
+    }
+}
+
+fn post(text: &str) -> String {
+    let args = json!({"channel": "C1", "text": text}).to_string();
+    json!({"kind": "tool_call", "rationale": "asked", "summary": null, "tool": "slack/post", "args_json": args})
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_owner_works_through_the_server_like_through_the_engine() {
+    let rig = rig().await;
+    let kim = rig.kim();
+
+    rig.llm.reply(&post("Deployed."), 10);
+    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap()
+    else {
+        panic!("expected a pending item")
+    };
+    let snapshot = kim.snapshot("kim").await.unwrap();
+    assert_eq!(snapshot.inbox.len(), 1);
+    assert_eq!(snapshot.inbox[0].state, ApprovalState::Pending);
+    assert!(!snapshot.kill_switch);
+
+    let edit = Edit {
+        args: json!({"channel": "C1", "text": "Deployed at 3 pm."})
+            .as_object()
+            .unwrap()
+            .clone(),
+        reason: "add the time".into(),
+    };
+    assert_eq!(
+        kim.approve("kim", inbox_id, Some(edit)).await.unwrap(),
+        Outcome::Executed { inbox_id }
+    );
+    let calls = rig.slack.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].1["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Deployed at 3 pm.\n\n— AI agent")
+    );
+
+    assert!(kim.set_kill_switch("kim", true).await.unwrap());
+    assert!(kim.snapshot("kim").await.unwrap().kill_switch);
+    assert!(!kim.set_kill_switch("kim", false).await.unwrap());
+
+    rig.llm.reply(&post("second"), 10);
+    let Outcome::PendingApproval { inbox_id: second } =
+        kim.ingest("kim", event("e2")).await.unwrap()
+    else {
+        panic!("expected a pending item")
+    };
+    kim.reject("kim", second, "not needed").await.unwrap();
+    assert_eq!(
+        kim.snapshot("kim").await.unwrap().inbox[0].state,
+        ApprovalState::Rejected
+    );
+
+    rig.llm.reply(&post("replayed"), 10);
+    let case = ReplayCase {
+        event: event("old"),
+        actual_reply: "REAL".into(),
+    };
+    let result = kim.replay("kim", case).await.unwrap();
+    assert_eq!(result.actual_reply, "REAL");
+    assert!(result.proposal.is_some());
+
+    let mut config = kim.profile_config("kim").await.unwrap();
+    config.principles.push("Answer briefly.".into());
+    kim.set_profile_config("kim", config.clone()).await.unwrap();
+    assert_eq!(kim.profile_config("kim").await.unwrap(), config);
+}
+
+#[tokio::test]
+async fn engine_errors_keep_their_kind_across_the_network() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    assert!(matches!(
+        kim.approve("kim", 42, None).await,
+        Err(ApiError::NotFound(_))
+    ));
+    rig.llm.reply(&post("x"), 10);
+    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap()
+    else {
+        panic!()
+    };
+    kim.approve("kim", inbox_id, None).await.unwrap();
+    assert!(matches!(
+        kim.approve("kim", inbox_id, None).await,
+        Err(ApiError::NotAllowed(_))
+    ));
+    assert_eq!(rig.slack.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_token_reaches_only_its_own_profile() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    rig.llm.reply(&post("for lee"), 10);
+    let Outcome::PendingApproval { inbox_id } = rig
+        .client(&rig.lee_token)
+        .ingest("lee", event("e1"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected a pending item")
+    };
+
+    // The list shows the caller's own profile and nothing about others.
+    let listed: Vec<String> = kim
+        .list_profiles()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    assert_eq!(listed, ["kim"]);
+
+    // Every route refuses kim's token for lee's profile, and for a profile that does not exist,
+    // with the same error.
+    for other in ["lee", "nobody"] {
+        let refused = |result: Result<(), ApiError>| {
+            assert!(
+                matches!(result, Err(ApiError::Unauthorized(_))),
+                "{other}: {result:?}"
+            );
+        };
+        refused(kim.snapshot(other).await.map(|_| ()));
+        refused(kim.profile_config(other).await.map(|_| ()));
+        refused(
+            kim.set_profile_config(other, ProfileConfig::new("Mallory"))
+                .await,
+        );
+        refused(kim.ingest(other, event("e9")).await.map(|_| ()));
+        refused(kim.approve(other, inbox_id, None).await.map(|_| ()));
+        refused(kim.reject(other, inbox_id, "x").await);
+        refused(kim.set_kill_switch(other, true).await.map(|_| ()));
+        refused(
+            kim.replay(
+                other,
+                ReplayCase {
+                    event: event("r"),
+                    actual_reply: "x".into(),
+                },
+            )
+            .await
+            .map(|_| ()),
+        );
+    }
+    // Nothing changed in lee's profile.
+    let lee = rig.engine.snapshot("lee").await.unwrap();
+    assert!(!lee.kill_switch);
+    assert_eq!(lee.inbox[0].state, ApprovalState::Pending);
+    assert_eq!(
+        rig.engine.profile_config("lee").await.unwrap().owner_name,
+        "Lee"
+    );
+    assert!(rig.slack.calls().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_and_revoked_tokens_are_refused() {
+    let rig = rig().await;
+    for token in ["bsn_guess", "x", &rig.kim_token[..rig.kim_token.len() - 1]] {
+        let result = rig.client(token).snapshot("kim").await;
+        assert!(
+            matches!(result, Err(ApiError::Unauthorized(_))),
+            "{result:?}"
+        );
+        assert!(matches!(
+            rig.client(token).list_profiles().await,
+            Err(ApiError::Unauthorized(_))
+        ));
+    }
+    let kim = rig.kim();
+    assert!(kim.snapshot("kim").await.is_ok());
+    let id = rig
+        .engine
+        .app_store()
+        .list_tokens()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.profile == "kim")
+        .unwrap()
+        .id;
+    rig.engine.app_store().revoke_token(&id).unwrap();
+    // The same client, on an open connection, is refused on its next request.
+    assert!(matches!(
+        kim.snapshot("kim").await,
+        Err(ApiError::Unauthorized(_))
+    ));
+    assert!(rig.client(&rig.lee_token).snapshot("lee").await.is_ok());
+}
+
+#[tokio::test]
+async fn a_request_without_a_bearer_token_is_refused() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rig = rig().await;
+    for auth in [
+        "",
+        "Authorization: Basic a2ltOng=\r\n",
+        "Authorization: bsn_x\r\n",
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(rig.server.addr)
+            .await
+            .unwrap();
+        let request = format!(
+            "GET /v1/profiles/kim/snapshot HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 401"), "{auth:?}: {reply}");
+    }
+}
+
+#[tokio::test]
+async fn settings_that_break_isolation_are_refused_and_not_stored() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let before = kim.profile_config("kim").await.unwrap();
+
+    // A stdio connector would run a command on the server.
+    let mut stdio = before.clone();
+    stdio.connectors.insert(
+        "shell".into(),
+        json!({"mcp": {"transport": "stdio", "command": "/bin/sh", "args": ["-c", "id"], "env": {}}}),
+    );
+    let error = kim.set_profile_config("kim", stdio).await.unwrap_err();
+    assert!(
+        matches!(error, ApiError::Invalid(ref m) if m.contains("--allow-stdio-connectors")),
+        "{error:?}"
+    );
+
+    // A secret key cannot name another profile's secret or a server variable.
+    for key in ["LEE__LLM", "BUNSIN_SECRET_LEE__LLM", "../HOME"] {
+        let mut foreign = before.clone();
+        foreign.llm = json!({"wire": "openai-chat", "base_url": "https://attacker.example", "model": "m", "token_secret": key});
+        let error = kim.set_profile_config("kim", foreign).await.unwrap_err();
+        assert!(matches!(error, ApiError::Invalid(_)), "{key}: {error:?}");
+    }
+    assert_eq!(kim.profile_config("kim").await.unwrap(), before);
+
+    // The profile's own secret key is accepted.
+    let mut own = before.clone();
+    own.llm = json!({"wire": "openai-chat", "base_url": "https://llm.example", "model": "m", "token_secret": "LLM"});
+    kim.set_profile_config("kim", own).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stopped_server_is_reported_as_unreachable() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    assert!(kim.snapshot("kim").await.is_ok());
+    let Rig {
+        server, kim_token, ..
+    } = rig;
+    server.shutdown().await.unwrap();
+    let error = kim.snapshot("kim").await.unwrap_err();
+    assert!(matches!(error, ApiError::Unreachable(_)), "{error:?}");
+    assert!(!error.to_string().contains(&kim_token));
+}
+
+#[tokio::test]
+async fn a_public_address_needs_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let backends = Arc::new(RealBackends::new(Arc::new(|_| None), false));
+    let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1)).unwrap());
+    let config = ServeConfig {
+        listen: "0.0.0.0:0".parse().unwrap(),
+        tls: None,
+    };
+    assert!(matches!(
+        serve(engine, config).await,
+        Err(ServeError::TlsRequired(_))
+    ));
+}
+
+#[tokio::test]
+async fn tls_works_with_the_given_ca_and_fails_without_it() {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+    std::fs::write(&key_path, cert.signing_key.serialize_pem()).unwrap();
+
+    let rig = rig_with(Some((cert_path, key_path))).await;
+    assert!(rig.server.tls);
+    let url = format!("https://localhost:{}", rig.server.addr.port());
+    let trusted = RemoteConfig {
+        url: url.clone(),
+        ca_cert_pem: Some(cert.cert.pem().into_bytes()),
+    };
+    let kim = RemoteEngine::new(&trusted, &rig.kim_token).unwrap();
+    assert_eq!(kim.snapshot("kim").await.unwrap().profile.id, "kim");
+
+    // Without the CA the certificate is not trusted, so no request (and no token) is sent.
+    let untrusted = RemoteEngine::new(
+        &RemoteConfig {
+            url,
+            ca_cert_pem: None,
+        },
+        &rig.kim_token,
+    )
+    .unwrap();
+    assert!(matches!(
+        untrusted.snapshot("kim").await,
+        Err(ApiError::Unreachable(_))
+    ));
+    // Plain HTTP to the TLS port does not work either.
+    let plain = format!("http://127.0.0.1:{}", rig.server.addr.port());
+    let plain = RemoteEngine::new(
+        &RemoteConfig {
+            url: plain,
+            ca_cert_pem: None,
+        },
+        &rig.kim_token,
+    )
+    .unwrap();
+    assert!(plain.snapshot("kim").await.is_err());
+}

@@ -1,5 +1,7 @@
 //! The interface between a user interface (GPUI app, CLI) and the engine.
 
+pub mod http;
+
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{DenyReason, Policy};
 use bunsin_core::ports::BoxFuture;
@@ -125,17 +127,21 @@ pub enum ApiError {
     Invalid(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// The access token is missing, unknown, revoked or for another profile.
+    #[error("not authorized: {0}")]
+    Unauthorized(String),
+    /// The server did not answer. The request may or may not have run.
+    #[error("the server cannot be reached: {0}")]
+    Unreachable(String),
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// What a profile owner can do. Profiles and access tokens are created on the
+/// server by its operator, so they are not part of this interface.
 pub trait EngineApi: Send + Sync {
+    /// The profiles the caller may use.
     fn list_profiles(&self) -> BoxFuture<'_, ApiResult<Vec<ProfileInfo>>>;
-    fn create_profile<'a>(
-        &'a self,
-        id: &'a str,
-        config: ProfileConfig,
-    ) -> BoxFuture<'a, ApiResult<ProfileInfo>>;
     fn profile_config<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<ProfileConfig>>;
     fn set_profile_config<'a>(
         &'a self,

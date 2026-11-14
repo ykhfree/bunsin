@@ -98,6 +98,7 @@ impl ProfileStore {
     pub(crate) fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir.join("artifacts").join("sha256"))?;
         let db = Connection::open(dir.join("agent.db"))?;
+        db.busy_timeout(crate::BUSY_TIMEOUT)?;
         db.execute_batch(SCHEMA)?;
         Ok(Self {
             dir: dir.to_owned(),

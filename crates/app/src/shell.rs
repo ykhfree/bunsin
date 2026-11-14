@@ -85,6 +85,7 @@ impl Render for Shell {
         let snapshot = self.state.snapshot.as_ref();
         let stopped = snapshot.is_some_and(|s| s.kill_switch);
         let status = match snapshot {
+            None if !self.state.connected => "Not connected to the server",
             None => "No profile",
             Some(_) if stopped => "Stopped: the agent makes no changes",
             Some(_) => "Running",

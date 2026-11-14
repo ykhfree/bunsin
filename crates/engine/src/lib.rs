@@ -41,6 +41,11 @@ pub trait Backends: Send + Sync {
         profile: &'a str,
         config: &'a ProfileConfig,
     ) -> BoxFuture<'a, Result<Runtime, String>>;
+
+    /// Checks new settings before they are stored. The error says what to change.
+    fn validate(&self, _profile: &str, _config: &ProfileConfig) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Returns the current time in Unix seconds.
@@ -100,7 +105,36 @@ fn draft_text(args: &Map<String, Value>, text_arg: Option<&str>) -> String {
     }
 }
 
+/// Creates a profile with its settings. The server operator does this, not a profile owner.
+/// It needs no running engine, so it also works while a server uses the data directory.
+pub fn create_profile(
+    app: &AppStore,
+    id: &str,
+    config: &ProfileConfig,
+    now: i64,
+) -> ApiResult<ProfileInfo> {
+    let text = serde_json::to_string(config).map_err(internal)?;
+    let info = app
+        .create_profile(id, &config.owner_name, now)
+        .map_err(store_error)?;
+    let store = app.open_profile(id).map_err(store_error)?;
+    store.set_setting(CONFIG_KEY, &text).map_err(store_error)?;
+    store
+        .append_audit(now, "profile_created", None, &json!({"id": id}))
+        .map_err(store_error)?;
+    Ok(info)
+}
+
 impl Engine {
+    /// The shared store. The server reads access tokens from it.
+    pub fn app_store(&self) -> &AppStore {
+        &self.app
+    }
+
+    pub async fn create_profile(&self, id: &str, config: ProfileConfig) -> ApiResult<ProfileInfo> {
+        create_profile(&self.app, id, &config, self.now())
+    }
+
     pub fn open(
         data_dir: &Path,
         backends: Arc<dyn Backends>,
@@ -671,24 +705,6 @@ impl EngineApi for Engine {
         Box::pin(async move { self.app.list_profiles().map_err(store_error) })
     }
 
-    fn create_profile<'a>(
-        &'a self,
-        id: &'a str,
-        config: ProfileConfig,
-    ) -> BoxFuture<'a, ApiResult<ProfileInfo>> {
-        Box::pin(async move {
-            let text = serde_json::to_string(&config).map_err(internal)?;
-            let info = self
-                .app
-                .create_profile(id, &config.owner_name, self.now())
-                .map_err(store_error)?;
-            let store = self.store(id)?;
-            store.set_setting(CONFIG_KEY, &text).map_err(store_error)?;
-            self.audit(&store, "profile_created", None, json!({"id": id}))?;
-            Ok(info)
-        })
-    }
-
     fn profile_config<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<ProfileConfig>> {
         Box::pin(async move { Self::config(&*self.store(profile)?) })
     }
@@ -700,6 +716,9 @@ impl EngineApi for Engine {
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let store = self.store(profile)?;
+            self.backends
+                .validate(profile, &config)
+                .map_err(ApiError::Invalid)?;
             let text = serde_json::to_string(&config).map_err(internal)?;
             store.set_setting(CONFIG_KEY, &text).map_err(store_error)?;
             // The next use builds the clients again from the new settings.

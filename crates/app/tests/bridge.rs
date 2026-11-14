@@ -141,3 +141,39 @@ async fn a_command_without_any_profile_reports_an_error() {
     assert!(state.profiles.is_empty());
     assert_eq!(state.snapshot, None);
 }
+
+#[tokio::test]
+async fn a_server_that_stops_answering_clears_the_shown_state() {
+    use bunsin_client::{RemoteConfig, RemoteEngine};
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert!(state.connected);
+    assert!(state.snapshot.is_some());
+
+    // Nothing listens on this port, like a server that went down.
+    let dead = RemoteConfig {
+        url: "http://127.0.0.1:1".into(),
+        ca_cert_pem: None,
+    };
+    let dead = RemoteEngine::new(&dead, "bsn_test").unwrap();
+    apply(&dead, &mut state, UiCommand::Approve(1)).await;
+    assert!(!state.connected);
+    // No stale "Running" state stays on screen.
+    assert_eq!(state.snapshot, None);
+    assert!(state.profiles.is_empty());
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("cannot be reached")),
+        "{:?}",
+        state.error
+    );
+    assert!(rig.slack.calls().is_empty());
+
+    // When the server answers again, the state comes back.
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert!(state.connected);
+    assert_eq!(state.snapshot.unwrap().inbox.len(), 1);
+}

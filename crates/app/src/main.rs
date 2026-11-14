@@ -1,42 +1,38 @@
-//! The Bunsin desktop app. It runs the engine in this process and shows its window.
+//! The Bunsin desktop app: a window that manages agents on a Bunsin server.
 
 use bunsin_app::bridge::spawn_bridge;
 use bunsin_app::shell::Shell;
-use bunsin_daemon::RealBackends;
-use bunsin_engine::Engine;
+use bunsin_client::{RemoteConfig, RemoteEngine};
 use gpui_kit::{AppContext, Global, WindowOptions};
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Keeps the tokio runtime alive as long as the GPUI app.
 struct Tokio(#[allow(dead_code)] tokio::runtime::Runtime);
 
 impl Global for Tokio {}
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+fn fail(message: &str) -> ! {
+    eprintln!("error: {message}");
+    std::process::exit(1);
 }
 
 fn main() {
-    let Some(data_dir) = std::env::var_os("BUNSIN_DATA_DIR").map(PathBuf::from) else {
-        eprintln!("error: set BUNSIN_DATA_DIR to the folder that holds the profiles");
-        std::process::exit(1);
+    let Ok(url) = std::env::var("BUNSIN_SERVER") else {
+        fail("set BUNSIN_SERVER to the server address")
     };
-    if let Err(error) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("error: cannot create the data directory: {error}");
-        std::process::exit(1);
-    }
-    // Fails if `bunsind` or another window already uses this data directory.
-    let engine = match Engine::open(&data_dir, Arc::new(RealBackends::from_env()), Arc::new(now)) {
+    let Ok(token) = std::env::var("BUNSIN_TOKEN") else {
+        fail("set BUNSIN_TOKEN to your access token")
+    };
+    let ca_cert_pem = match std::env::var_os("BUNSIN_CA_CERT") {
+        Some(path) => match std::fs::read(&path) {
+            Ok(pem) => Some(pem),
+            Err(error) => fail(&format!("cannot read the CA certificate: {error}")),
+        },
+        None => None,
+    };
+    let engine = match RemoteEngine::new(&RemoteConfig { url, ca_cert_pem }, &token) {
         Ok(engine) => Arc::new(engine),
-        Err(error) => {
-            eprintln!("error: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fail(&error.to_string()),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

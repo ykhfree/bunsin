@@ -1,0 +1,13 @@
+[package]
+name = "bunsin-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bunsin-api.workspace = true
+bunsin-core.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+url = "2"
