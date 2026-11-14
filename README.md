@@ -27,17 +27,40 @@ The window uses GPUI through the `gpui-kit` crate. Builds are tested on macOS on
 
 ## Use
 
-`bunsind` is the headless command line. `bunsin-app` is the desktop window.
-Both use the folder named by `BUNSIN_DATA_DIR`, one process at a time.
+`bunsind serve` runs the agents on a server. The desktop window (`bunsin-app`) and
+the other `bunsind` commands manage them over HTTPS. To try it on one machine,
+run the server on `127.0.0.1`.
+
+### On the server (operator)
 
 ```sh
-export BUNSIN_DATA_DIR="$HOME/bunsin-data"
-cargo run -p bunsin-daemon -- profile-add kim --owner "Kim"
-cargo run -p bunsin-daemon -- config-show kim > kim.json
+export BUNSIN_DATA_DIR=/var/lib/bunsin
+bunsind profile-add kim --owner "Kim"
+bunsind token-add kim --label "Kim's laptop"   # prints the access token once
+export BUNSIN_SECRET_KIM__LLM=...               # the LLM endpoint token of profile kim
+bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
+```
+
+- An access token gives access to one profile. `token-list` and `token-revoke` manage tokens.
+- The server refuses to listen on a public address without TLS. Behind a TLS proxy,
+  listen on `127.0.0.1`.
+- Profile settings name a secret key such as `LLM`. The server reads the value from
+  `BUNSIN_SECRET_<PROFILE>__<KEY>`. A profile cannot name another profile's secret.
+- By default, profile settings may name only public `https://` addresses for the LLM and
+  for MCP servers. To allow an internal gateway, start the server with
+  `--allow-upstream-host <host>`; then only the listed hosts are allowed.
+- MCP servers that run as a local command need `--allow-stdio-connectors`.
+
+### From your machine (profile owner)
+
+```sh
+export BUNSIN_SERVER=https://bunsin.example.com:8787
+export BUNSIN_TOKEN=bsn_...
+bunsind config-show kim > kim.json
 # Edit kim.json, then:
-cargo run -p bunsin-daemon -- config-set kim kim.json
-cargo run -p bunsin-daemon -- status kim
-cargo run -p bunsin-app
+bunsind config-set kim kim.json
+bunsind status kim
+bunsind stop kim on          # the kill switch
 ```
 
 A new profile can do nothing until its settings name an LLM endpoint, connectors,
@@ -49,17 +72,16 @@ approved tools and permission rules. Example of the `llm` and `connectors` setti
     "wire": "anthropic-messages",
     "base_url": "https://llm.example.com",
     "model": "your-model-id",
-    "token_env": "BUNSIN_LLM_TOKEN"
+    "token_secret": "LLM"
   },
   "connectors": {
     "slack": {
       "mcp": { "transport": "http", "url": "https://mcp.example.com/slack" },
-      "token_env": "BUNSIN_SLACK_TOKEN"
+      "token_secret": "SLACK"
     }
   }
 }
 ```
 
-`wire` is `anthropic-messages` or `openai-chat`. Settings hold the name of an
-environment variable, never a token. Set those variables before you start
-`bunsind` or `bunsin-app`.
+`wire` is `anthropic-messages` or `openai-chat`. For a server with a private CA,
+set `BUNSIN_CA_CERT` to the CA certificate file.
