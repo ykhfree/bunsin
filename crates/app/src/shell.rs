@@ -58,15 +58,15 @@ pub fn inbox_title(item: &InboxItem) -> String {
     format!("{} · {what}", item.state.as_str())
 }
 
-/// The text the user must read before deciding.
+/// What the user must read before deciding. A tool call shows every argument,
+/// so the user approves exactly what will run, not only its message text.
 pub fn inbox_detail(item: &InboxItem) -> String {
     match &item.body {
-        // `text` is what other people will read, so it is shown when the call has it.
-        InboxBody::ToolCall { args, .. } => match args.get("text").and_then(|value| value.as_str())
-        {
-            Some(text) => text.to_owned(),
-            None => serde_json::Value::Object(args.clone()).to_string(),
-        },
+        InboxBody::ToolCall { args, .. } => {
+            let all = serde_json::to_string_pretty(&serde_json::Value::Object(args.clone()))
+                .expect("a JSON value always serializes");
+            format!("Arguments:\n{all}")
+        }
         InboxBody::Escalation { summary } => summary.clone(),
     }
 }
@@ -124,7 +124,7 @@ impl Render for Shell {
                     .p_2()
                     .border_1()
                     .child(labelled(format!("inbox-{id}"), inbox_title(item)))
-                    .child(div().child(SharedString::from(inbox_detail(item))))
+                    .child(labelled(format!("detail-{id}"), inbox_detail(item)))
                     .child(div().child(SharedString::from(format!("Why: {}", item.rationale))));
                 let mut buttons = div().flex().gap_2();
                 if item.state == ApprovalState::Pending {
@@ -224,5 +224,57 @@ impl Render for Shell {
                             .children(audit_rows),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(body: InboxBody) -> InboxItem {
+        InboxItem {
+            id: 1,
+            event_key: "k".into(),
+            body,
+            rationale: "r".into(),
+            state: ApprovalState::Pending,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_tool_call_shows_every_argument_not_only_the_text() {
+        let args = json!({"channel": "C-ALL-COMPANY", "text": "hello", "broadcast": true});
+        let body = InboxBody::ToolCall {
+            tool: "slack/post".into(),
+            args: args.as_object().unwrap().clone(),
+        };
+        let detail = inbox_detail(&item(body));
+        for expected in [
+            "\"channel\": \"C-ALL-COMPANY\"",
+            "\"text\": \"hello\"",
+            "\"broadcast\": true",
+        ] {
+            assert!(detail.contains(expected), "{detail}");
+        }
+    }
+
+    #[test]
+    fn titles_name_the_state_and_the_tool() {
+        let call = InboxBody::ToolCall {
+            tool: "jira/add_comment".into(),
+            args: Default::default(),
+        };
+        assert_eq!(inbox_title(&item(call)), "pending · jira/add_comment");
+        let escalation = InboxBody::Escalation {
+            summary: "Decide the budget.".into(),
+        };
+        assert_eq!(
+            inbox_title(&item(escalation.clone())),
+            "pending · needs your decision"
+        );
+        assert_eq!(inbox_detail(&item(escalation)), "Decide the budget.");
     }
 }

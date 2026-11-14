@@ -74,6 +74,14 @@ fn the_window_shows_engine_state_and_sends_commands(cx: &mut TestAppContext) {
             Some("Approval inbox: 1")
         );
         assert_eq!(window.find("inbox-1").label(), Some("pending · slack/post"));
+        // The destination is on screen before the user approves, not only the message text.
+        let detail = window
+            .find("detail-1")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(detail.contains("\"channel\": \"C1\""), "{detail}");
+        assert!(detail.contains("We deploy at 3 pm."), "{detail}");
         window.click("approve-1", cx);
     })
     .unwrap();
