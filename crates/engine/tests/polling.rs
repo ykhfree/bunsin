@@ -398,3 +398,36 @@ async fn a_manual_event_that_failed_can_be_handed_in_again() {
     let third = rig.engine.ingest("kim", event("e1", "lee", "question")).await.unwrap();
     assert_eq!(third, Outcome::Duplicate);
 }
+
+#[tokio::test]
+async fn a_profile_whose_clients_cannot_be_built_shows_the_reason_in_its_poll_status() {
+    use bunsin_core::ports::BoxFuture;
+    use bunsin_engine::{Backends, Engine, Runtime};
+    struct NoLlm;
+    impl Backends for NoLlm {
+        fn build<'a>(&'a self, _: &'a str, _: &'a bunsin_api::ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
+            Box::pin(async { Err("the profile has no `llm` settings".to_owned()) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(dir.path(), std::sync::Arc::new(NoLlm), std::sync::Arc::new(|| 1_000)).unwrap();
+    let mut config = config();
+    config.polls = vec![poll()];
+    engine.create_profile("kim", config).await.unwrap();
+
+    assert_eq!(engine.poll_profile("kim").await.unwrap(), 0);
+    assert!(engine.poll_all().await.is_empty());
+    let snapshot = engine.snapshot("kim").await.unwrap();
+    let error = snapshot.polls[0].error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("the profile has no `llm` settings"),
+        "{:?}",
+        snapshot.polls[0]
+    );
+    let status_before = snapshot.polls[0].clone();
+    // A second call inside the interval does not try again.
+    assert_eq!(engine.poll_profile("kim").await.unwrap(), 0);
+    assert_eq!(engine.snapshot("kim").await.unwrap().polls[0], status_before);
+    // The same failure on the next cycle is not logged again.
+    assert_eq!(snapshot.audit.iter().filter(|a| a.kind == "poll").count(), 1);
+}

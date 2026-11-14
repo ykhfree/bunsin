@@ -18,11 +18,10 @@ LLM은 제안만 합니다. 무엇을 실행할지는 하네스가 결정합니�
 
 Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 읽으십시오.
 
-- **서버가 스스로 이벤트를 모으지 않습니다.** Slack, Jira, Confluence를 주기적으로 조회하는 기능이 아직 없습니다.
-  이벤트는 `bunsind ingest` 명령이나 HTTP API로 직접 넘겨야 합니다.
+- **이벤트 수신은 사용하는 MCP 서버에 달려 있습니다.** 서버는 설정에 적힌 검색 도구를 반복 호출합니다
+  ([이벤트 찾기](#이벤트-찾기-폴링) 참고). 이 기능은 테스트 서버로만 실행해 보았습니다. webhook 수신은 없습니다.
 - **이벤트 하나에 제안 하나입니다.** agent가 도구 결과를 읽고 이어서 작업하는 기능이 아직 없습니다.
-- **MCP 서버의 도구 목록을 보여 주는 명령이 없습니다.** 각 도구의 이름, 설명, 입력 스키마를 설정에 직접 옮겨 적어야 합니다
-  ([권한 규칙](#권한-규칙) 참고).
+- **개인정보 필터는 패턴으로 동작합니다.** 이메일, 전화번호 같은 정해진 형식은 찾지만, 사람 이름과 주소는 찾지 못합니다.
 - **구성 마법사가 없습니다.** 설정을 JSON 파일로 편집합니다.
 - **아직 만들지 않은 것:** 업무지식 검색, ARD 게시와 검색, REST API 커넥터, MCP 서버용 OAuth, 재현 평가의 채점.
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint나 실제 MCP 서버로 실행하는 테스트는 없습니다.
@@ -152,9 +151,11 @@ bunsind config-set kim kim.json
 }
 ```
 
-- **`approved_tools`** 에는 각 도구를 MCP 서버가 알려 주는 그대로 적습니다: 이름, 설명, 입력 스키마.
-  서버는 호출할 때마다 이 내용을 MCP 서버의 현재 목록과 비교합니다. 도구가 바뀌었거나 없어졌으면,
-  이 항목을 고쳐 다시 승인할 때까지 호출을 거부합니다.
+- **`approved_tools`** 에는 각 도구가 MCP 서버가 알려 주는 그대로 들어갑니다: 이름, 설명, 입력 스키마.
+  직접 입력하지 않습니다. `bunsind tools kim slack`은 커넥터 `slack`의 도구를 보여 주고 각각을
+  `new`, `changed`, `approved`, `gone`으로 표시합니다. `bunsind tools kim slack --approve`는 화면에 보인 목록을 그대로 승인합니다.
+  서버는 호출할 때마다 승인된 목록을 현재 목록과 비교합니다. 도구가 바뀌었거나 없어졌으면,
+  목록을 다시 승인할 때까지 호출을 거부합니다. 도구 목록을 보려면 `llm`과 `connectors` 설정이 먼저 있어야 합니다.
 - **`policy.rules`** 가 권한 표입니다. key는 `<커넥터>/<도구>`입니다. agent는 규칙과 승인 항목이 모두 있는 도구만 제안할 수 있습니다.
 - **`class`** 는 `read`, `write`, `delete` 중 하나입니다. 읽기는 바로 실행되고, 정지 스위치가 켜져 있어도 실행됩니다.
 - **`tier`** 는 쓰기를 어디까지 허용할지 정합니다.
@@ -170,12 +171,68 @@ bunsind config-set kim kim.json
   서버가 그 인자에 `ai_marker`를 붙입니다. `"none"`은 그 도구가 다른 사람에게 글을 보내지 않는다는 뜻입니다.
   AI 표시는 문자열 인자 하나에만 붙습니다.
 
+### 이벤트 찾기 (폴링)
+
+```json
+{
+  "polls": [
+    {
+      "connector": "slack",
+      "tool": "search_messages",
+      "args": { "query": "to:me" },
+      "every_secs": 60,
+      "mapping": { "items": "messages", "id": "ts", "text": "text", "author": "user", "thread": "thread_ts" },
+      "skip_authors": ["U012AB3CD"]
+    }
+  ]
+}
+```
+
+서버는 `every_secs`초(최소 30초)마다 도구를 호출하고, 새 항목을 agent에게 넘깁니다.
+
+- 도구는 `read` 규칙이 있어야 하고, 승인된 목록에 있어야 합니다.
+- `mapping`은 도구 결과에서 각 필드의 위치를 `user.id` 같은 dot 경로로 적습니다.
+  `items`는 항목 목록의 경로입니다. 결과 자체가 목록이면 비워 둡니다.
+  ID는 같은 메시지에 대해 항상 같아야 합니다. `thread`는 `null`로 둘 수 있습니다.
+- `bunsind poll-test kim 0`은 0번 poll을 한 번 실행해, agent에게 넘길 이벤트를 출력합니다.
+  mapping을 맞출 때 쓰십시오. 아무것도 저장하지 않습니다.
+- 검색의 첫 실행은 찾은 항목을 "이미 본 것"으로만 기록합니다. 그 뒤에 생긴 항목만 이벤트가 됩니다.
+  검색을 바꾸면(`connector`, `tool`, `args`) 같은 방식으로 다시 시작합니다.
+- `skip_authors`에는 자신의 계정 이름이나 ID를 적습니다. 자신의 메시지와 AI 표시가 든 글은 이벤트가 아닙니다.
+- 처리에 실패한 이벤트는 다음 실행에서 다시 시도합니다. 모두 3번 시도한 뒤에는 승인함의 항목으로 알려 줍니다.
+- 정지 스위치가 켜져 있는 동안 폴링은 쉽니다.
+- `bunsind status kim`은 각 poll의 마지막 결과를 보여 줍니다. "none usable"은 mapping이 결과와 맞지 않는다는 뜻입니다.
+
+### 개인정보 필터
+
+```json
+{
+  "privacy": {
+    "email": true,
+    "phone": true,
+    "resident_number": true,
+    "card_number": true,
+    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }]
+  }
+}
+```
+
+서버는 이벤트를 저장하기 전에, 그리고 인용하는 글을 LLM에 보내기 전에, 일치하는 부분을
+`[REDACTED:EMAIL]` 같은 자리표시자로 바꿉니다. 지워진 글은 DB, 파일, 로그 어디에도 없습니다. 감사 로그에는 개수만 남습니다.
+
+- 새 프로필은 기본 4종이 모두 켜져 있습니다. `resident_number`는 주민등록번호입니다.
+  카드번호는 검증 숫자가 맞는 것만 지웁니다.
+- `custom` 패턴은 Rust [`regex`](https://docs.rs/regex) crate의 문법을 씁니다.
+  서버는 컴파일되지 않는 패턴과 빈 문자열에 일치하는 패턴을 거부합니다.
+- 데스크톱 창에 이 설정을 편집하는 화면이 있습니다.
+- 사용자가 직접 쓴 `principles`와 사용자가 직접 고친 글은 거르지 않습니다.
+
 ### agent와 일하기
 
 ```sh
 bunsind ingest kim --source slack --event-id 1700000000.000100 \
     --author lee --text "When do we deploy?"
-bunsind status kim                 # 정지 스위치와 승인함
+bunsind status kim                 # 정지 스위치, poll 상태, 승인함
 bunsind approve kim 1              # 대기 중인 1번 항목을 실행
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
@@ -194,7 +251,7 @@ cargo run --release -p bunsin-app
 창은 서버에 접속해 값을 확인한 뒤, 주소를 `~/Library/Application Support/Bunsin/connection.json`에,
 token을 macOS Keychain에 저장합니다.
 
-창은 프로필, 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
+창은 프로필, 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치, 개인정보 설정을 보여 줍니다.
 5초마다 서버에서 상태를 다시 읽습니다. 승인 전에 초안을 수정하는 기능은 명령줄에만 있습니다.
 
 개발할 때는 환경 변수 `BUNSIN_SERVER`와 `BUNSIN_TOKEN`이 저장된 접속을 대신합니다.

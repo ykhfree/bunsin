@@ -18,11 +18,12 @@ The LLM only proposes. The harness decides what runs:
 
 Bunsin is in early development. Read this list before you use it.
 
-- **The server does not collect events by itself.** There is no polling of Slack, Jira or
-  Confluence yet. You hand each event to the agent with `bunsind ingest` or the HTTP API.
+- **Finding events depends on your MCP servers.** The server repeats a search tool that
+  you name in the settings (see [Find events](#find-events-polling)). It has run only
+  against test servers. There is no webhook intake.
 - **One event gives one proposal.** The agent does not yet read a tool result and continue.
-- **No command lists the tools of an MCP server.** You copy each tool's name, description
-  and input schema into the settings by hand (see [Permission rules](#permission-rules)).
+- **The privacy filter works on patterns.** It finds email addresses, phone numbers and
+  the other listed forms. It does not find names or postal addresses.
 - **There is no setup wizard.** You edit the settings as a JSON file.
 - **Not built yet:** retrieval of work knowledge, ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
@@ -163,9 +164,12 @@ approved tools and permission rules.
 ```
 
 - **`approved_tools`** holds each tool exactly as the MCP server lists it: name,
-  description and input schema. Before every call the server compares this with the live
-  list. If a tool was changed or removed, the call is denied until you approve the tool
-  again by updating this entry.
+  description and input schema. You do not type it. `bunsind tools kim slack` shows the
+  tools of connector `slack` and marks each as `new`, `changed`, `approved` or `gone`;
+  `bunsind tools kim slack --approve` approves exactly the list it showed. Before every
+  call the server compares the approved list with the live one. If a tool was changed or
+  removed, the call is denied until you approve the list again. Listing tools needs the
+  `llm` and `connectors` settings to be in place.
 - **`policy.rules`** is the permission table. A key is `<connector>/<tool>`. The agent can
   propose only tools that have a rule and an approved entry.
 - **`class`** is `read`, `write` or `delete`. A read runs at once, also when the kill
@@ -183,12 +187,73 @@ approved tools and permission rules.
   that other people will read; the server appends `ai_marker` to it. `"none"` means the
   tool sends no text to other people. The marker covers one string argument only.
 
+### Find events (polling)
+
+```json
+{
+  "polls": [
+    {
+      "connector": "slack",
+      "tool": "search_messages",
+      "args": { "query": "to:me" },
+      "every_secs": 60,
+      "mapping": { "items": "messages", "id": "ts", "text": "text", "author": "user", "thread": "thread_ts" },
+      "skip_authors": ["U012AB3CD"]
+    }
+  ]
+}
+```
+
+The server calls the tool every `every_secs` seconds (30 at least) and hands each new
+item to the agent.
+
+- The tool must have a rule with the class `read` and must be in the approved list.
+- `mapping` says where the fields are in the tool's result, as dot paths such as
+  `user.id`. `items` is the path to the list; leave it empty if the result is the list.
+  The ID must stay the same for the same message. `thread` may be `null`.
+- `bunsind poll-test kim 0` runs poll number 0 once and prints the events it would hand
+  over. Use it to get the mapping right. It stores nothing.
+- The first run of a search records what it finds as already seen. Only later items
+  become events. A changed search (`connector`, `tool` or `args`) starts again that way.
+- `skip_authors` lists your own account names or IDs. Your messages and texts that carry
+  the AI marker are not events.
+- An event whose handling fails is tried again on a later run, three times in all. Then
+  an item in the inbox tells you.
+- Polling pauses while the kill switch is on.
+- `bunsind status kim` shows the last result of each poll. "none usable" means the
+  mapping does not fit the result.
+
+### Privacy filter
+
+```json
+{
+  "privacy": {
+    "email": true,
+    "phone": true,
+    "resident_number": true,
+    "card_number": true,
+    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }]
+  }
+}
+```
+
+Before the server stores an event or sends any quoted text to the LLM, it replaces each
+match with a placeholder such as `[REDACTED:EMAIL]`. The removed text is in no database,
+file or log; the audit log holds counts only.
+
+- The four built-in kinds are on in a new profile. `resident_number` is the Korean
+  resident registration number. A card number counts only if its check digit is right.
+- `custom` patterns use the syntax of the Rust [`regex`](https://docs.rs/regex) crate.
+  The server refuses a pattern that does not compile or that matches empty text.
+- The desktop window has a form for these settings.
+- Your own `principles` and your own edits are not filtered.
+
 ### Work with the agent
 
 ```sh
 bunsind ingest kim --source slack --event-id 1700000000.000100 \
     --author lee --text "When do we deploy?"
-bunsind status kim                 # the kill switch and the inbox
+bunsind status kim                 # the kill switch, the polls and the inbox
 bunsind approve kim 1              # run pending item 1
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
@@ -210,7 +275,7 @@ address in `~/Library/Application Support/Bunsin/connection.json` and the token 
 macOS Keychain.
 
 The window shows the profile, the approval inbox with every argument of each call, the
-audit log and the kill switch. It reloads from the server every 5 seconds. An edit before
+audit log, the kill switch and the privacy settings. It reloads from the server every 5 seconds. An edit before
 approval is available on the command line only.
 
 For development, `BUNSIN_SERVER` and `BUNSIN_TOKEN` in the environment take the place of

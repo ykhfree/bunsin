@@ -167,35 +167,59 @@ impl Engine {
             return Ok(0);
         }
 
-        let ctx = self.ctx(profile).await?;
-        let mut new_events = 0;
-        for poll in due {
+        // The interval counts from this try, also when the try fails. A profile that cannot
+        // connect is then tried again after the interval, not on every tick.
+        for poll in &due {
             self.last_polls
                 .lock()
                 .expect("engine lock")
                 .insert((profile.to_owned(), poll.identity()), now);
+        }
+        // A profile whose clients cannot be built (missing LLM settings, a connector that is
+        // down) must show that in its poll status, not only in the server's log.
+        let ctx = match self.ctx(profile).await {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                for poll in due {
+                    let status = PollStatus {
+                        tool: poll.tool_id(),
+                        last_run_at: Some(now),
+                        error: Some(error.to_string()),
+                        ..PollStatus::default()
+                    };
+                    self.save_poll_status(&store, poll, &status)?;
+                }
+                return Ok(0);
+            }
+        };
+        let mut new_events = 0;
+        for poll in due {
             let status = self.run_poll(profile, &ctx, poll).await?;
             new_events += status.new_events;
-
-            let key = status_key(poll);
-            let before: Option<PollStatus> = match store.setting(&key).map_err(store_error)? {
-                Some(text) => serde_json::from_str(&text).ok(),
-                None => None,
-            };
-            store
-                .set_setting(&key, &serde_json::to_string(&status).map_err(internal)?)
-                .map_err(store_error)?;
-            // The audit log gets an entry when something happened or the state of the poll changed,
-            // not on every quiet run.
-            let unusable = |s: &PollStatus| s.items > 0 && s.usable == 0;
-            let changed = before
-                .as_ref()
-                .is_none_or(|before| before.error != status.error || unusable(before) != unusable(&status));
-            if status.new_events > 0 || changed {
-                self.audit(&store, "poll", None, json!(status))?;
-            }
+            self.save_poll_status(&store, poll, &status)?;
         }
         Ok(new_events)
+    }
+
+    /// Stores the result of a run. The audit log gets an entry when something happened or
+    /// the state of the poll changed, not on every quiet run.
+    fn save_poll_status(&self, store: &ProfileStore, poll: &PollConfig, status: &PollStatus) -> ApiResult<()> {
+        let key = status_key(poll);
+        let before: Option<PollStatus> = match store.setting(&key).map_err(store_error)? {
+            Some(text) => serde_json::from_str(&text).ok(),
+            None => None,
+        };
+        store
+            .set_setting(&key, &serde_json::to_string(status).map_err(internal)?)
+            .map_err(store_error)?;
+        let unusable = |s: &PollStatus| s.items > 0 && s.usable == 0;
+        let changed = before
+            .as_ref()
+            .is_none_or(|before| before.error != status.error || unusable(before) != unusable(status));
+        if status.new_events > 0 || changed {
+            self.audit(store, "poll", None, json!(status))?;
+        }
+        Ok(())
     }
 
     /// Polls every profile once. One failing profile does not stop the others.
