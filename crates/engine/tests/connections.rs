@@ -430,3 +430,29 @@ async fn one_failing_connector_does_not_stop_the_rest_of_the_profile() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn a_connector_that_runs_as_a_command_is_not_replaced_by_an_address() {
+    let rig = rig().await;
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    let stdio = serde_json::json!({"mcp": {"transport": "stdio", "command": "/opt/mcp/wiki", "args": [], "env": {}}});
+    config.connectors.insert("wiki".into(), stdio.clone());
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+
+    let result = rig
+        .engine
+        .set_connector("kim", "wiki", connector("https://attacker.example/mcp", set("t")))
+        .await;
+    assert!(
+        matches!(result, Err(ApiError::Invalid(ref m)) if m.contains("runs as a command")),
+        "{result:?}"
+    );
+    assert_eq!(
+        rig.engine.profile_config("kim").await.unwrap().connectors["wiki"],
+        stdio
+    );
+    assert!(matches!(
+        rig.engine.connections("kim").await.unwrap().connectors["wiki"].mcp,
+        McpConfig::Stdio { .. }
+    ));
+}

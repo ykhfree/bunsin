@@ -3,12 +3,16 @@
 //! The window never changes its own copy of engine state. It sends a command
 //! and shows the state that comes back.
 
-use bunsin_api::{ApiResult, EngineApi, Outcome, ProfileSnapshot};
+use bunsin_api::{
+    ApiResult, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, ProfileSnapshot, ToolsReport,
+};
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
+use bunsin_core::tool::PinSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// A command that names a profile is refused if that profile is no longer selected.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiCommand {
     Refresh,
@@ -16,14 +20,61 @@ pub enum UiCommand {
     Approve(i64),
     Reject(i64),
     SetKillSwitch(bool),
-    /// Saves the privacy settings of `profile`. It is refused if `profile` is no longer selected.
     SavePrivacy {
         profile: String,
         privacy: PrivacyConfig,
     },
+    /// Saves the LLM endpoint. A typed token travels only in this command.
+    SaveLlm {
+        profile: String,
+        update: LlmUpdate,
+    },
+    /// Saves one connector. A typed token travels only in this command.
+    SaveConnector {
+        profile: String,
+        name: String,
+        update: ConnectorUpdate,
+    },
+    RemoveConnector {
+        profile: String,
+        name: String,
+    },
+    /// Connects the connector and lists its tools.
+    CheckConnector {
+        profile: String,
+        name: String,
+    },
+    /// Approves the tool list that was shown. `shown` holds the fingerprint of each tool.
+    ApproveTools {
+        profile: String,
+        name: String,
+        shown: PinSet,
+    },
 }
 
-/// What the window shows. Every field comes from the engine.
+/// What the last connection command did. An error is the text to show.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionResult {
+    LlmSaved(Result<(), String>),
+    ConnectorSaved {
+        name: String,
+        result: Result<(), String>,
+    },
+    ConnectorRemoved {
+        name: String,
+        result: Result<(), String>,
+    },
+    Checked {
+        name: String,
+        result: Result<ToolsReport, String>,
+    },
+    ToolsApproved {
+        name: String,
+        result: Result<(), String>,
+    },
+}
+
+/// What the window shows. Every field comes from the engine. No token is ever in it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiState {
     pub profiles: Vec<ProfileInfo>,
@@ -35,6 +86,12 @@ pub struct UiState {
     pub privacy_result: Option<Result<(), String>>,
     /// How many `SavePrivacy` commands the bridge has run. It changes once per save.
     pub privacy_saves: u64,
+    /// The LLM endpoint and the connectors of the selected profile, as the server has them.
+    pub connections: Option<Connections>,
+    /// The result of the last command, if it was a connection command. A failure is shown here, not in `error`.
+    pub connection_result: Option<ConnectionResult>,
+    /// How many connection commands the bridge has run. It changes once per command.
+    pub connection_commands: u64,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -42,16 +99,61 @@ pub struct UiState {
     pub connected: bool,
 }
 
+/// Runs `call` if `profile` is still the selected profile. The call does nothing until it is awaited.
+async fn for_profile<T>(
+    selected: Option<&str>,
+    profile: &str,
+    call: impl Future<Output = ApiResult<T>>,
+) -> Result<T, String> {
+    match selected {
+        None => Err("no profile is selected".to_owned()),
+        Some(selected) if selected != profile => Err("another profile is selected now, so nothing was done".to_owned()),
+        Some(_) => call.await.map_err(|e| e.to_string()),
+    }
+}
+
 /// Runs one command, then reloads the state from the engine.
 pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand) {
     state.error = None;
     state.privacy_result = None;
-    let save = matches!(command, UiCommand::SavePrivacy { .. });
-    let profile = state.selected.clone();
-    let result = match (command, profile.as_deref()) {
+    state.connection_result = None;
+    let selected = state.selected.clone();
+    let selected = selected.as_deref();
+    let result = match (command, selected) {
         (UiCommand::Refresh, _) => Ok(()),
         (UiCommand::SelectProfile(id), _) => {
             state.selected = Some(id);
+            Ok(())
+        }
+        (UiCommand::SavePrivacy { profile, privacy }, _) => {
+            let result = for_profile(selected, &profile, api.set_privacy(&profile, privacy)).await;
+            state.privacy_result = Some(result);
+            state.privacy_saves += 1;
+            Ok(())
+        }
+        (UiCommand::SaveLlm { profile, update }, _) => {
+            let result = for_profile(selected, &profile, api.set_llm(&profile, update)).await;
+            state.connection_result = Some(ConnectionResult::LlmSaved(result));
+            Ok(())
+        }
+        (UiCommand::SaveConnector { profile, name, update }, _) => {
+            let result = for_profile(selected, &profile, api.set_connector(&profile, &name, update)).await;
+            state.connection_result = Some(ConnectionResult::ConnectorSaved { name, result });
+            Ok(())
+        }
+        (UiCommand::RemoveConnector { profile, name }, _) => {
+            let result = for_profile(selected, &profile, api.remove_connector(&profile, &name)).await;
+            state.connection_result = Some(ConnectionResult::ConnectorRemoved { name, result });
+            Ok(())
+        }
+        (UiCommand::CheckConnector { profile, name }, _) => {
+            let result = for_profile(selected, &profile, api.connector_tools(&profile, &name)).await;
+            state.connection_result = Some(ConnectionResult::Checked { name, result });
+            Ok(())
+        }
+        (UiCommand::ApproveTools { profile, name, shown }, _) => {
+            let result = for_profile(selected, &profile, api.approve_tools(&profile, &name, shown)).await;
+            state.connection_result = Some(ConnectionResult::ToolsApproved { name, result });
             Ok(())
         }
         (_, None) => Err("no profile is selected".to_owned()),
@@ -69,29 +171,29 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),
-        (UiCommand::SavePrivacy { profile, .. }, Some(selected)) if profile != selected => {
-            Err("another profile is selected now, so nothing was saved".to_owned())
-        }
-        (UiCommand::SavePrivacy { profile, privacy }, Some(_)) => {
-            api.set_privacy(&profile, privacy).await.map_err(|e| e.to_string())
-        }
     };
-    if save {
-        state.privacy_result = Some(result);
-        state.privacy_saves += 1;
-    } else if let Err(error) = result {
+    // Every connection command sets a result, so this counts them.
+    if state.connection_result.is_some() {
+        state.connection_commands += 1;
+    }
+    if let Err(error) = result {
         state.error = Some(error);
     }
     reload(api, state).await;
 }
 
-async fn load_profile(api: &dyn EngineApi, profile: &str) -> ApiResult<(ProfileSnapshot, PrivacyConfig)> {
-    Ok((api.snapshot(profile).await?, api.privacy(profile).await?))
+async fn load_profile(api: &dyn EngineApi, profile: &str) -> ApiResult<(ProfileSnapshot, PrivacyConfig, Connections)> {
+    Ok((
+        api.snapshot(profile).await?,
+        api.privacy(profile).await?,
+        api.connections(profile).await?,
+    ))
 }
 
 async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.snapshot = None;
     state.privacy = None;
+    state.connections = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -107,11 +209,12 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
         state.selected = state.profiles.first().map(|p| p.id.clone());
     }
     match &state.selected {
-        // The window is connected only if both calls succeed.
+        // The window is connected only if every call succeeds.
         Some(profile) => match load_profile(api, profile).await {
-            Ok((snapshot, privacy)) => {
+            Ok((snapshot, privacy, connections)) => {
                 state.snapshot = Some(snapshot);
                 state.privacy = Some(privacy);
+                state.connections = Some(connections);
                 state.connected = true;
             }
             Err(error) => state.error = Some(error.to_string()),

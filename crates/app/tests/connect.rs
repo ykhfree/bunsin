@@ -5,10 +5,10 @@ mod common;
 use bunsin_app::connect::{AppView, Source};
 use bunsin_app::connection::{Connection, MemoryTokenStore, TokenStore, load_connection, save_connection};
 use bunsin_daemon::server::{Running, ServeConfig, serve};
-use gpui_kit::test::{TestQueryExt, TestWindowExt};
+use common::window::screen_texts;
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, Entity, Point, TestAppContext, Window, WindowBounds, WindowOptions, px,
-    size,
+    AnyWindowHandle, App, AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions, px, size,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -145,17 +145,6 @@ fn fill_and_connect(cx: &mut TestAppContext, window: AnyWindowHandle, server: &s
         window.click("connect", cx);
     })
     .unwrap();
-}
-
-/// Every accessibility text of the window: labels, values, descriptions and placeholders.
-fn screen_texts(window: &Window) -> Vec<String> {
-    window
-        .elements()
-        .iter()
-        .flat_map(|e| [e.label(), e.value(), e.description(), e.placeholder()])
-        .flatten()
-        .map(str::to_owned)
-        .collect()
 }
 
 /// Fails if `secret` is in any accessibility text. `shown` must be found, so the scan is real.

@@ -1,6 +1,7 @@
-//! The main window: profiles, kill switch, approval inbox, audit log and privacy settings.
+//! The main window: profiles, kill switch, approval inbox, audit log, privacy settings and connections.
 
 use crate::bridge::{UiCommand, UiState};
+use crate::connections_form::ConnectionsForm;
 use crate::privacy::PrivacyForm;
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
@@ -15,6 +16,7 @@ pub struct Shell {
     pub state: UiState,
     commands: mpsc::UnboundedSender<UiCommand>,
     pub(crate) privacy: PrivacyForm,
+    pub(crate) connections: ConnectionsForm,
 }
 
 impl Shell {
@@ -29,6 +31,7 @@ impl Shell {
             while let Some(state) = states.recv().await {
                 let updated = this.update_in(cx, |shell, window, cx| {
                     shell.privacy.receive(&state, window, cx);
+                    shell.connections.receive(&state, window, cx);
                     shell.state = state;
                     cx.notify();
                 });
@@ -43,6 +46,7 @@ impl Shell {
             state: UiState::default(),
             commands,
             privacy: PrivacyForm::new(window, cx),
+            connections: ConnectionsForm::new(window, cx),
         }
     }
 
@@ -167,7 +171,7 @@ impl Render for Shell {
             .child(
                 div()
                     .flex_1()
-                    // Long lines must not push the privacy column out of the window.
+                    // Long lines must not push the settings columns out of the window.
                     .min_w(px(0.))
                     .flex()
                     .flex_col()
@@ -203,6 +207,7 @@ impl Render for Shell {
                     ),
             )
             .child(self.privacy_section(cx))
+            .child(self.connections_section(cx))
     }
 }
 

@@ -1,9 +1,12 @@
 mod common;
 
-use bunsin_api::EngineApi;
-use bunsin_app::bridge::{UiCommand, UiState, apply, refresh, spawn_bridge};
+use bunsin_api::{Connections, ConnectorUpdate, EngineApi, LlmUpdate, TokenChange, TokenSource};
+use bunsin_app::bridge::{ConnectionResult, UiCommand, UiState, apply, refresh, spawn_bridge};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
+use bunsin_core::settings::Wire;
+use bunsin_core::tool::{PinSet, pin};
+use bunsin_testkit::tool;
 
 /// An engine with no profile.
 fn empty_engine(dir: &tempfile::TempDir) -> bunsin_engine::Engine {
@@ -312,4 +315,319 @@ async fn save_privacy_without_any_profile_reports_an_error() {
     assert_eq!(state.privacy_saves, 1);
     assert_eq!(state.error, None);
     assert_eq!(state.privacy, None);
+}
+
+const TOKEN: &str = "sk-llm-token-7f3a9c";
+
+fn llm(base_url: &str, token: TokenChange) -> LlmUpdate {
+    LlmUpdate {
+        wire: Wire::OpenAiChat,
+        base_url: base_url.into(),
+        model: "m1".into(),
+        timeout_secs: 120,
+        token,
+    }
+}
+
+fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
+    ConnectorUpdate { url: url.into(), token }
+}
+
+/// One of each connection command for `profile`, on connector `slack`.
+fn connection_commands(profile: &str) -> Vec<UiCommand> {
+    let profile = profile.to_owned();
+    let name = "slack".to_owned();
+    vec![
+        UiCommand::SaveLlm {
+            profile: profile.clone(),
+            update: llm("https://llm.example", TokenChange::Set(TOKEN.into())),
+        },
+        UiCommand::SaveConnector {
+            profile: profile.clone(),
+            name: name.clone(),
+            update: connector("https://mcp.example/slack", TokenChange::Keep),
+        },
+        UiCommand::RemoveConnector {
+            profile: profile.clone(),
+            name: name.clone(),
+        },
+        UiCommand::CheckConnector {
+            profile: profile.clone(),
+            name: name.clone(),
+        },
+        UiCommand::ApproveTools {
+            profile,
+            name,
+            shown: PinSet::new(),
+        },
+    ]
+}
+
+/// The error of a connection command result.
+fn error_of(result: &Option<ConnectionResult>) -> String {
+    match result {
+        Some(
+            ConnectionResult::LlmSaved(Err(error))
+            | ConnectionResult::ConnectorSaved { result: Err(error), .. }
+            | ConnectionResult::ConnectorRemoved { result: Err(error), .. }
+            | ConnectionResult::Checked { result: Err(error), .. }
+            | ConnectionResult::ToolsApproved { result: Err(error), .. },
+        ) => error.clone(),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+fn no_connections() -> Connections {
+    Connections {
+        llm: None,
+        connectors: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn the_state_holds_the_connections_of_the_selected_profile() {
+    let rig = common::rig().await;
+    rig.engine
+        .set_llm("lee", llm("https://llm.example/v1", TokenChange::Set(TOKEN.into())))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert_eq!(state.connections, Some(no_connections()));
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
+    let lee = state.connections.clone().unwrap().llm.unwrap();
+    assert_eq!(
+        (lee.base_url.as_str(), lee.token),
+        ("https://llm.example/v1", TokenSource::Stored)
+    );
+
+    // A timed refresh shows a change that another client made.
+    rig.engine
+        .set_connector("lee", "jira", connector("https://mcp.example/jira", TokenChange::Keep))
+        .await
+        .unwrap();
+    refresh(&*rig.engine, &mut state).await;
+    assert!(state.connections.unwrap().connectors.contains_key("jira"));
+}
+
+#[tokio::test]
+async fn save_llm_writes_only_the_named_profile_and_keeps_the_token_out_of_the_state() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let save = UiCommand::SaveLlm {
+        profile: "kim".into(),
+        update: llm("https://llm.example/v1", TokenChange::Set(TOKEN.into())),
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    // The state holds the address, but never the token, in any field.
+    let text = format!("{state:?}");
+    assert!(text.contains("https://llm.example/v1"), "{text}");
+    assert!(!text.contains(TOKEN), "{text}");
+    assert_eq!(state.connection_result, Some(ConnectionResult::LlmSaved(Ok(()))));
+    assert_eq!(state.connection_commands, 1);
+    assert_eq!(state.error, None);
+    let shown = state.connections.as_ref().unwrap().llm.clone().unwrap();
+    assert_eq!((shown.wire, shown.token), (Wire::OpenAiChat, TokenSource::Stored));
+    let kim = rig.engine.connections("kim").await.unwrap().llm.unwrap();
+    assert_eq!(kim.token, TokenSource::Stored);
+    assert_eq!(rig.engine.connections("lee").await.unwrap(), no_connections());
+
+    // A timed refresh keeps the result. The next command clears it, but not the count.
+    refresh(&*rig.engine, &mut state).await;
+    assert_eq!(state.connection_result, Some(ConnectionResult::LlmSaved(Ok(()))));
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert_eq!(state.connection_result, None);
+    assert_eq!(state.connection_commands, 1);
+}
+
+#[tokio::test]
+async fn refused_connection_saves_show_the_server_error_and_change_nothing() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let save = UiCommand::SaveLlm {
+        profile: "kim".into(),
+        update: llm("http://llm.example", TokenChange::Set(TOKEN.into())),
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    let error = error_of(&state.connection_result);
+    assert!(error.contains("must start with https://"), "{error}");
+    // The connections section shows the failed save. The window's error line does not.
+    assert_eq!(state.error, None);
+
+    let save = UiCommand::SaveConnector {
+        profile: "kim".into(),
+        name: "Bad Name".into(),
+        update: connector("https://mcp.example/x", TokenChange::Keep),
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    let error = error_of(&state.connection_result);
+    assert!(error.contains("the connector name `Bad Name` is invalid"), "{error}");
+
+    let remove = UiCommand::RemoveConnector {
+        profile: "kim".into(),
+        name: "jira".into(),
+    };
+    apply(&*rig.engine, &mut state, remove).await;
+    assert!(error_of(&state.connection_result).contains("not found"));
+    assert_eq!(state.connection_commands, 3);
+    assert_eq!(rig.engine.connections("kim").await.unwrap(), no_connections());
+    assert_eq!(state.connections, Some(no_connections()));
+}
+
+#[tokio::test]
+async fn save_connector_and_remove_connector_report_what_they_did() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let save = UiCommand::SaveConnector {
+        profile: "kim".into(),
+        name: "jira".into(),
+        update: connector("https://mcp.example/jira", TokenChange::Set(TOKEN.into())),
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    assert_eq!(
+        state.connection_result,
+        Some(ConnectionResult::ConnectorSaved {
+            name: "jira".into(),
+            result: Ok(())
+        })
+    );
+    let jira = rig.engine.connections("kim").await.unwrap().connectors["jira"].clone();
+    assert_eq!(jira.token, TokenSource::Stored);
+    assert_eq!(state.connections.as_ref().unwrap().connectors["jira"], jira);
+    assert!(!format!("{state:?}").contains(TOKEN));
+
+    let remove = UiCommand::RemoveConnector {
+        profile: "kim".into(),
+        name: "jira".into(),
+    };
+    apply(&*rig.engine, &mut state, remove).await;
+    assert_eq!(
+        state.connection_result,
+        Some(ConnectionResult::ConnectorRemoved {
+            name: "jira".into(),
+            result: Ok(())
+        })
+    );
+    assert_eq!(state.connections, Some(no_connections()));
+    assert_eq!(rig.engine.connections("kim").await.unwrap(), no_connections());
+}
+
+#[tokio::test]
+async fn check_lists_the_tools_and_approve_takes_the_shown_list() {
+    let rig = common::rig().await;
+    for name in ["slack", "jira"] {
+        let url = format!("https://mcp.example/{name}");
+        rig.engine
+            .set_connector("kim", name, connector(&url, TokenChange::Keep))
+            .await
+            .unwrap();
+    }
+    rig.slack
+        .set_tools(vec![tool("post", "Post a message"), tool("search", "Search")]);
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let check = |name: &str| UiCommand::CheckConnector {
+        profile: "kim".into(),
+        name: name.into(),
+    };
+
+    apply(&*rig.engine, &mut state, check("slack")).await;
+    let report = match &state.connection_result {
+        Some(ConnectionResult::Checked {
+            name,
+            result: Ok(report),
+        }) if name == "slack" => report.clone(),
+        other => panic!("expected a report, got {other:?}"),
+    };
+    assert_eq!(report.tools.len(), 2);
+    assert_eq!(report.diff.added, ["search"]);
+
+    // A list other than the live one is refused.
+    let mut stale = pin(&report.tools);
+    stale.remove("search");
+    let approve = |shown: PinSet| UiCommand::ApproveTools {
+        profile: "kim".into(),
+        name: "slack".into(),
+        shown,
+    };
+    apply(&*rig.engine, &mut state, approve(stale)).await;
+    let error = error_of(&state.connection_result);
+    assert!(error.contains("lists other tools now than the ones shown"), "{error}");
+    assert!(
+        !rig.engine
+            .connector_tools("kim", "slack")
+            .await
+            .unwrap()
+            .diff
+            .is_clean()
+    );
+
+    apply(&*rig.engine, &mut state, approve(pin(&report.tools))).await;
+    assert_eq!(
+        state.connection_result,
+        Some(ConnectionResult::ToolsApproved {
+            name: "slack".into(),
+            result: Ok(())
+        })
+    );
+    assert!(
+        rig.engine
+            .connector_tools("kim", "slack")
+            .await
+            .unwrap()
+            .diff
+            .is_clean()
+    );
+
+    // A connector that cannot connect reports why.
+    apply(&*rig.engine, &mut state, check("jira")).await;
+    let error = error_of(&state.connection_result);
+    assert!(error.contains(common::REFUSED), "{error}");
+    assert_eq!(state.error, None);
+    assert_eq!(state.connection_commands, 4);
+}
+
+#[tokio::test]
+async fn connection_commands_for_a_profile_that_is_no_longer_selected_are_refused() {
+    let rig = common::rig().await;
+    rig.engine
+        .set_connector(
+            "kim",
+            "slack",
+            connector("https://mcp.example/slack", TokenChange::Keep),
+        )
+        .await
+        .unwrap();
+    let before = rig.engine.profile_config("kim").await.unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
+    for command in connection_commands("kim") {
+        apply(&*rig.engine, &mut state, command.clone()).await;
+        let error = error_of(&state.connection_result);
+        assert!(error.contains("another profile is selected"), "{command:?}: {error}");
+    }
+    assert_eq!(state.connection_commands, 5);
+    assert_eq!(rig.engine.profile_config("kim").await.unwrap(), before);
+    assert_eq!(rig.engine.connections("lee").await.unwrap(), no_connections());
+}
+
+#[tokio::test]
+async fn connection_commands_without_any_profile_report_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = empty_engine(&dir);
+    let mut state = UiState::default();
+    for command in connection_commands("kim") {
+        apply(&engine, &mut state, command.clone()).await;
+        assert_eq!(
+            error_of(&state.connection_result),
+            "no profile is selected",
+            "{command:?}"
+        );
+        assert_eq!(state.error, None);
+    }
+    assert_eq!(state.connection_commands, 5);
+    assert_eq!(state.connections, None);
 }

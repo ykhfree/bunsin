@@ -1,32 +1,57 @@
 //! A real engine with a scripted LLM and a recording connector.
 
+pub mod window;
+
 use bunsin_api::{EngineApi, ProfileConfig};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Backends, Engine, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Scripted clients, with the settings check of the real backends.
 struct Fakes {
     llm: Arc<FakeLlm>,
     slack: Arc<FakeConnector>,
+    real: RealBackends,
 }
 
 impl Backends for Fakes {
-    fn build<'a>(&'a self, _profile: &'a str, _config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
+    /// `slack` always works. Every other connector in the settings cannot connect.
+    fn build<'a>(&'a self, _profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
         let llm: Arc<dyn LlmClient> = self.llm.clone();
         let slack: Arc<dyn Connector> = self.slack.clone();
+        let mut connectors: BTreeMap<_, _> = config
+            .connectors
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    Err(format!("connector `{name}` cannot connect: {REFUSED}")),
+                )
+            })
+            .collect();
+        connectors.insert("slack".to_owned(), Ok(slack));
         Box::pin(async move {
             Ok(Runtime {
                 llm: Ok(llm),
-                connectors: BTreeMap::from([("slack".to_owned(), Ok(slack))]),
+                connectors,
             })
         })
     }
+
+    fn validate(&self, profile: &str, config: &ProfileConfig) -> Result<(), String> {
+        self.real.validate(profile, config)
+    }
 }
+
+/// Why a connector other than `slack` cannot connect.
+#[allow(dead_code)]
+pub const REFUSED: &str = "connection refused";
 
 pub struct Rig {
     pub _dir: tempfile::TempDir,
@@ -41,9 +66,12 @@ pub async fn rig() -> Rig {
     let llm = Arc::new(FakeLlm::new());
     let tools = vec![tool("post", "Post a message")];
     let slack = Arc::new(FakeConnector::new("slack", tools.clone()));
+    // The real address rules, with stdio connectors allowed and no token in the environment.
+    let real = RealBackends::new(Arc::new(|_| None), true, UpstreamPolicy::default());
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
         slack: slack.clone(),
+        real,
     });
     let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1_000)).unwrap());
 

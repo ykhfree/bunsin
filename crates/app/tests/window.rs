@@ -3,81 +3,12 @@
 mod common;
 
 use bunsin_api::EngineApi;
-use bunsin_app::bridge::spawn_bridge;
 use bunsin_app::shell::Shell;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
+use common::window::{REFRESH, label, on_screen, open, runtime, value, wait_until};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, Entity, Point, TestAppContext, Window, WindowBounds, WindowOptions, px,
-    size,
-};
-use std::time::{Duration, Instant};
-
-/// The bridge refresh interval in these tests. It is short, so a wait can outlast it.
-const REFRESH: Duration = Duration::from_millis(50);
-
-fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
-/// Waits in real time, because the engine runs on tokio threads.
-fn wait_until(cx: &mut TestAppContext, shell: &Entity<Shell>, what: &str, done: impl Fn(&Shell) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        cx.run_until_parked();
-        if shell.read_with(cx, |shell, _| done(shell)) {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// Opens the main window on the engine of `rig` and waits for the first snapshot.
-fn open(cx: &mut TestAppContext, rt: &tokio::runtime::Runtime, rig: &common::Rig) -> (AnyWindowHandle, Entity<Shell>) {
-    // The engine wakes the view from tokio threads, as in the real app. Tell the test scheduler.
-    cx.executor().allow_parking();
-    let (commands, states) = spawn_bridge(rt.handle(), rig.engine.clone(), REFRESH);
-    cx.update(gpui_kit::init);
-    let (window, shell) = cx.update(|cx| {
-        let bounds = Bounds {
-            origin: Point::default(),
-            size: size(px(1100.), px(900.)),
-        };
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            ..Default::default()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Shell::new(states, commands, window, cx))
-        })
-        .unwrap()
-    });
-    wait_until(cx, &shell, "the first snapshot", |s| s.state.snapshot.is_some());
-    (window, shell)
-}
-
-/// Runs `f` on a freshly drawn frame of the window.
-fn on_screen<R>(cx: &mut TestAppContext, window: AnyWindowHandle, f: impl FnOnce(&mut Window, &mut App) -> R) -> R {
-    cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
-        f(window, cx)
-    })
-    .unwrap()
-}
-
-fn label(window: &Window, id: &'static str) -> String {
-    window.find(id).label().unwrap_or_default().to_owned()
-}
-
-fn value(window: &Window, id: &'static str) -> String {
-    window.find(id).value().unwrap_or_default().to_owned()
-}
+use gpui_kit::{App, AppContext, Entity, TestAppContext, Window};
 
 /// Types a label and a pattern into the Add fields. Does not press Add.
 fn type_pattern(window: &mut Window, cx: &mut App, label: &str, pattern: &str) {
@@ -478,5 +409,55 @@ fn add_with_an_empty_field_adds_no_row(cx: &mut TestAppContext) {
         assert_eq!(label(window, "privacy-message"), "Enter a label and a pattern.");
         // Nothing changed, so there is nothing to save.
         assert_eq!(label(window, "privacy-changes"), "");
+    });
+}
+
+#[gpui_kit::test]
+fn save_is_refused_while_the_add_fields_hold_text(cx: &mut TestAppContext) {
+    const UNADDED: &str = "Add the pattern or clear the fields first";
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| window.click("save-privacy", cx));
+    wait_for_saves(cx, &shell, 1);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "privacy-result"), "Saved");
+        // A pattern typed without Add.
+        window.click("new-pattern", cx);
+        window.input("NOT-ADDED", cx);
+        window.click("save-privacy", cx);
+        assert_eq!(label(window, "privacy-message"), UNADDED);
+        // The earlier "Saved" must not stand next to text that was not stored.
+        assert_eq!(label(window, "privacy-result"), "");
+
+        // A label alone is refused too.
+        window.press("cmd-a", cx);
+        window.press("backspace", cx);
+        window.click("new-label", cx);
+        window.input("only a label", cx);
+        window.click("save-privacy", cx);
+        assert_eq!(label(window, "privacy-message"), UNADDED);
+    });
+    std::thread::sleep(REFRESH * 2);
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, _| s.state.privacy_saves), 1);
+    assert_eq!(
+        rt.block_on(rig.engine.privacy("kim")).unwrap(),
+        PrivacyConfig::default()
+    );
+
+    // After Add, the same text is saved.
+    on_screen(cx, window, |window, cx| {
+        window.click("new-pattern", cx);
+        window.input("ADDED", cx);
+        window.click("add-pattern", cx);
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 2);
+    let saved = rt.block_on(rig.engine.privacy("kim")).unwrap();
+    assert_eq!(saved.custom, vec![pattern("only a label", "ADDED")]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "privacy-message"), "");
+        assert_eq!(label(window, "privacy-result"), "Saved");
     });
 }

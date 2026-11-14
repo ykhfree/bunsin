@@ -15,6 +15,7 @@ const HELP: &str = "Matching text is removed before the agent sees it. \
     The filter finds patterns, such as email addresses and phone numbers. \
     It does not find names or postal addresses. \
     Custom patterns use the syntax of the Rust regex crate.";
+const UNADDED: &str = "Add the pattern or clear the fields first";
 
 pub struct PrivacyForm {
     /// The profile and the settings the user edits. None until the server's settings arrive.
@@ -23,7 +24,7 @@ pub struct PrivacyForm {
     saves_seen: u64,
     label: Entity<InputState>,
     pattern: Entity<InputState>,
-    /// The window's own message about the last Add.
+    /// The window's own message about the last Add or Save.
     message: Option<&'static str>,
 }
 
@@ -76,6 +77,13 @@ impl PrivacyForm {
         self.message = None;
         self.clear_fields(window, cx);
     }
+
+    /// Sets the message if the Add fields hold text. A save would not store that text.
+    fn save_check(&mut self, cx: &App) {
+        let label = self.label.read(cx).value();
+        let pattern = self.pattern.read(cx).value();
+        self.message = (!label.trim().is_empty() || !pattern.is_empty()).then_some(UNADDED);
+    }
 }
 
 impl Shell {
@@ -126,11 +134,12 @@ impl Shell {
                 )
         });
 
-        // "Saved" describes the form only while it equals the server's settings.
+        // "Saved" describes the form only while it equals the server's settings
+        // and no message says that something was not done.
         let changed = draft != server;
         let result = match &self.state.privacy_result {
             Some(Err(error)) => error.clone(),
-            Some(Ok(())) if !changed => "Saved".to_owned(),
+            Some(Ok(())) if !changed && form.message.is_none() => "Saved".to_owned(),
             _ => String::new(),
         };
 
@@ -172,13 +181,17 @@ impl Shell {
             .child(
                 Button::new("save-privacy")
                     .label("Save")
-                    .on_click(cx.listener(|this, _, _, _| {
-                        if let Some((profile, draft)) = &this.privacy.draft {
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.privacy.save_check(cx);
+                        if this.privacy.message.is_none()
+                            && let Some((profile, draft)) = &this.privacy.draft
+                        {
                             this.send(UiCommand::SavePrivacy {
                                 profile: profile.clone(),
                                 privacy: draft.clone(),
                             });
                         }
+                        cx.notify();
                     })),
             )
             .child(labelled("privacy-changes", if changed { "Not saved" } else { "" }))

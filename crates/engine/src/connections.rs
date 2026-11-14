@@ -165,7 +165,19 @@ impl Engine {
         let url = update.url.trim().to_owned();
         // An earlier entry may name its secret itself (set with `config-set`). A kept token keeps that name.
         let earlier = match config.connectors.get(name) {
-            Some(value) => connector_section(name, value)?.token_secret,
+            // A connector that runs as a command on the server is set by its operator.
+            // This call must not replace it with an address the caller chose.
+            Some(value) => match connector_section(name, value)? {
+                ConnectorSection {
+                    mcp: McpConfig::Stdio { .. },
+                    ..
+                } => {
+                    return Err(ApiError::Invalid(format!(
+                        "connector `{name}` runs as a command on the server and cannot be changed here"
+                    )));
+                }
+                section => section.token_secret,
+            },
             None => None,
         };
         let key = match (&update.token, &earlier) {
