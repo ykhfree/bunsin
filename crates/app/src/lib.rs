@@ -3,4 +3,5 @@
 pub mod bridge;
 pub mod connect;
 pub mod connection;
+pub mod privacy;
 pub mod shell;

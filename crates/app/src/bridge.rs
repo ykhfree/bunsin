@@ -3,7 +3,8 @@
 //! The window never changes its own copy of engine state. It sends a command
 //! and shows the state that comes back.
 
-use bunsin_api::{EngineApi, Outcome, ProfileSnapshot};
+use bunsin_api::{ApiResult, EngineApi, Outcome, ProfileSnapshot};
+use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -15,6 +16,11 @@ pub enum UiCommand {
     Approve(i64),
     Reject(i64),
     SetKillSwitch(bool),
+    /// Saves the privacy settings of `profile`. It is refused if `profile` is no longer selected.
+    SavePrivacy {
+        profile: String,
+        privacy: PrivacyConfig,
+    },
 }
 
 /// What the window shows. Every field comes from the engine.
@@ -23,6 +29,12 @@ pub struct UiState {
     pub profiles: Vec<ProfileInfo>,
     pub selected: Option<String>,
     pub snapshot: Option<ProfileSnapshot>,
+    /// The privacy settings of the selected profile, as the server has them.
+    pub privacy: Option<PrivacyConfig>,
+    /// The result of the last command, if it was `SavePrivacy`. A failed save is shown here, not in `error`.
+    pub privacy_result: Option<Result<(), String>>,
+    /// How many `SavePrivacy` commands the bridge has run. It changes once per save.
+    pub privacy_saves: u64,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -33,6 +45,8 @@ pub struct UiState {
 /// Runs one command, then reloads the state from the engine.
 pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand) {
     state.error = None;
+    state.privacy_result = None;
+    let save = matches!(command, UiCommand::SavePrivacy { .. });
     let profile = state.selected.clone();
     let result = match (command, profile.as_deref()) {
         (UiCommand::Refresh, _) => Ok(()),
@@ -55,15 +69,29 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),
+        (UiCommand::SavePrivacy { profile, .. }, Some(selected)) if profile != selected => {
+            Err("another profile is selected now, so nothing was saved".to_owned())
+        }
+        (UiCommand::SavePrivacy { profile, privacy }, Some(_)) => {
+            api.set_privacy(&profile, privacy).await.map_err(|e| e.to_string())
+        }
     };
-    if let Err(error) = result {
+    if save {
+        state.privacy_result = Some(result);
+        state.privacy_saves += 1;
+    } else if let Err(error) = result {
         state.error = Some(error);
     }
     reload(api, state).await;
 }
 
+async fn load_profile(api: &dyn EngineApi, profile: &str) -> ApiResult<(ProfileSnapshot, PrivacyConfig)> {
+    Ok((api.snapshot(profile).await?, api.privacy(profile).await?))
+}
+
 async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.snapshot = None;
+    state.privacy = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -79,9 +107,11 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
         state.selected = state.profiles.first().map(|p| p.id.clone());
     }
     match &state.selected {
-        Some(profile) => match api.snapshot(profile).await {
-            Ok(snapshot) => {
+        // The window is connected only if both calls succeed.
+        Some(profile) => match load_profile(api, profile).await {
+            Ok((snapshot, privacy)) => {
                 state.snapshot = Some(snapshot);
+                state.privacy = Some(privacy);
                 state.connected = true;
             }
             Err(error) => state.error = Some(error.to_string()),

@@ -195,18 +195,11 @@ impl Engine {
     pub(crate) fn delete_connector(&self, profile: &str, name: &str) -> ApiResult<()> {
         let store = self.store(profile)?;
         let mut config = Self::config(&store)?;
-        let Some(value) = config.connectors.remove(name) else {
+        if config.connectors.remove(name).is_none() {
             return Err(ApiError::NotFound(format!("connector `{name}`")));
-        };
-        // The token goes with the connector, under the name the server chose and under a custom one.
-        store.delete_secret(&connector_secret_key(name)).map_err(store_error)?;
-        if let Ok(ConnectorSection {
-            token_secret: Some(key),
-            ..
-        }) = connector_section(name, &value)
-        {
-            store.delete_secret(&key).map_err(store_error)?;
         }
+        // The token goes with the connector. The server stores a connector's token only under this key.
+        store.delete_secret(&connector_secret_key(name)).map_err(store_error)?;
         self.commit_connections(profile, &store, &config)?;
         self.audit(&store, "connection_removed", None, json!({"target": name}))
     }

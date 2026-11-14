@@ -1,6 +1,7 @@
-//! The main window: profiles, kill switch, approval inbox and audit log.
+//! The main window: profiles, kill switch, approval inbox, audit log and privacy settings.
 
 use crate::bridge::{UiCommand, UiState};
+use crate::privacy::PrivacyForm;
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
@@ -13,18 +14,21 @@ const AUDIT_ROWS: usize = 50;
 pub struct Shell {
     pub state: UiState,
     commands: mpsc::UnboundedSender<UiCommand>,
+    pub(crate) privacy: PrivacyForm,
 }
 
 impl Shell {
     pub fn new(
         mut states: mpsc::UnboundedReceiver<UiState>,
         commands: mpsc::UnboundedSender<UiCommand>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // tokio channels work on the GPUI executor. tokio timers do not, so none is used here.
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Some(state) = states.recv().await {
-                let updated = this.update(cx, |shell, cx| {
+                let updated = this.update_in(cx, |shell, window, cx| {
+                    shell.privacy.receive(&state, window, cx);
                     shell.state = state;
                     cx.notify();
                 });
@@ -38,10 +42,11 @@ impl Shell {
         Self {
             state: UiState::default(),
             commands,
+            privacy: PrivacyForm::new(window, cx),
         }
     }
 
-    fn send(&self, command: UiCommand) {
+    pub(crate) fn send(&self, command: UiCommand) {
         // A closed channel means the engine task ended. The window then shows stale state.
         let _ = self.commands.send(command);
     }
@@ -162,6 +167,8 @@ impl Render for Shell {
             .child(
                 div()
                     .flex_1()
+                    // Long lines must not push the privacy column out of the window.
+                    .min_w(px(0.))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -195,6 +202,7 @@ impl Render for Shell {
                             .children(audit_rows),
                     ),
             )
+            .child(self.privacy_section(cx))
     }
 }
 

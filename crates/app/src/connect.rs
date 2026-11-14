@@ -166,7 +166,7 @@ impl AppView {
         // The token now lives in the client and the token store, not in the form.
         self.token.update(cx, |input, cx| input.set_value("", window, cx));
         let (commands, states) = spawn_bridge(&self.runtime, engine, REFRESH_EVERY);
-        self.shell = Some(cx.new(|cx| Shell::new(states, commands, cx)));
+        self.shell = Some(cx.new(|cx| Shell::new(states, commands, window, cx)));
     }
 
     /// Ends the session. The shell holds the bridge's command sender.
