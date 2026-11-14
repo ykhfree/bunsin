@@ -71,11 +71,16 @@ fn llm(wire: Wire, base_url: &str, model: &str, token: TokenChange) -> LlmUpdate
         model: model.into(),
         timeout_secs: 30,
         token,
+        expected: bunsin_api::Expected::Unchecked,
     }
 }
 
 fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
-    ConnectorUpdate { url: url.into(), token }
+    ConnectorUpdate {
+        url: url.into(),
+        token,
+        expected: bunsin_api::Expected::Unchecked,
+    }
 }
 
 /// Which API format the radio group shows as chosen: 0 Anthropic, 1 OpenAI.

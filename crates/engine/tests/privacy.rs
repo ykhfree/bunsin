@@ -55,7 +55,10 @@ async fn a_custom_pattern_set_through_the_privacy_call_is_applied() {
         label: "employee id".into(),
         pattern: r"\bEMP-\d{6}\b".into(),
     });
-    rig.engine.set_privacy("kim", privacy.clone()).await.unwrap();
+    rig.engine
+        .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy.clone()))
+        .await
+        .unwrap();
     assert_eq!(rig.engine.privacy("kim").await.unwrap(), privacy);
 
     rig.llm.reply(&ignore(), 10);
@@ -76,7 +79,10 @@ async fn a_kind_that_is_turned_off_is_not_removed() {
         phone: false,
         ..PrivacyConfig::default()
     };
-    rig.engine.set_privacy("kim", privacy).await.unwrap();
+    rig.engine
+        .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy))
+        .await
+        .unwrap();
     rig.llm.reply(&ignore(), 10);
     rig.engine.ingest("kim", personal_event("e1")).await.unwrap();
     let requests = all_requests(&rig);
@@ -96,7 +102,10 @@ async fn the_privacy_call_changes_only_the_privacy_settings() {
         email: false,
         ..PrivacyConfig::default()
     };
-    rig.engine.set_privacy("kim", privacy.clone()).await.unwrap();
+    rig.engine
+        .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy.clone()))
+        .await
+        .unwrap();
     let after = rig.engine.profile_config("kim").await.unwrap();
     assert_eq!(after.privacy, privacy);
     before.privacy = privacy;
@@ -112,7 +121,11 @@ async fn a_bad_pattern_is_refused_and_the_old_settings_stay() {
             label: "bad".into(),
             pattern: pattern.into(),
         });
-        let error = rig.engine.set_privacy("kim", privacy.clone()).await.unwrap_err();
+        let error = rig
+            .engine
+            .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy.clone()))
+            .await
+            .unwrap_err();
         assert!(matches!(error, ApiError::Invalid(_)), "{pattern:?}: {error:?}");
         // The same check applies when the whole settings are replaced.
         let mut config = rig.engine.profile_config("kim").await.unwrap();

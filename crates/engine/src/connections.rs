@@ -7,8 +7,8 @@
 use crate::secrets::StoredSecret;
 use crate::{Engine, internal, store_error};
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorConnection, ConnectorUpdate, LlmConnection, LlmUpdate, ProfileConfig,
-    TokenChange, TokenSource,
+    ApiError, ApiResult, Connections, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate,
+    ProfileConfig, TokenChange, TokenSource,
 };
 use bunsin_core::settings::{
     ConnectorSection, LLM_SECRET_KEY, LlmSection, McpConfig, connector_secret_key, origin_of, valid_connector_name,
@@ -116,8 +116,14 @@ impl Engine {
     }
 
     /// Checks and stores changed settings, and makes the next use build new clients.
-    fn commit_connections(&self, profile: &str, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
-        Self::save_config(store, config)?;
+    fn commit_connections(
+        &self,
+        profile: &str,
+        store: &ProfileStore,
+        loaded: &str,
+        config: &ProfileConfig,
+    ) -> ApiResult<()> {
+        Self::save_config_from(store, loaded, config)?;
         // The cached clients hold the old address and the old token.
         self.runtimes.lock().expect("engine lock").remove(profile);
         Ok(())
@@ -133,13 +139,22 @@ impl Engine {
 
     pub(crate) fn save_llm(&self, profile: &str, update: LlmUpdate) -> ApiResult<()> {
         let store = self.store(profile)?;
-        let mut config = Self::config(&store)?;
+        if let Expected::Value(expected) = &update.expected
+            && *expected != self.read_connections(profile)?.llm
+        {
+            return Err(ApiError::Conflict(
+                "the LLM endpoint is not the one this form loaded".into(),
+            ));
+        }
+        let (loaded, mut config) = Self::config_with_text(&store)?;
         let section = LlmSection {
             wire: update.wire,
             base_url: update.base_url.trim().to_owned(),
             model: update.model.trim().to_owned(),
             timeout_secs: update.timeout_secs,
             token_secret: LLM_SECRET_KEY.to_owned(),
+            // The workspace ID is set in the settings file. A save from the form keeps it.
+            workspace_id: llm_section(&config)?.and_then(|earlier| earlier.workspace_id),
         };
         if section.model.is_empty() {
             return Err(ApiError::Invalid("the model name is empty".into()));
@@ -149,7 +164,7 @@ impl Engine {
         self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
         Self::check_config(&config)?;
         self.change_token(profile, &store, LLM_SECRET_KEY, &section.base_url, &update.token, true)?;
-        self.commit_connections(profile, &store, &config)?;
+        self.commit_connections(profile, &store, &loaded, &config)?;
         let detail = json!({"target": "llm", "token": Self::token_note(&update.token)});
         self.audit(&store, "connection_changed", None, detail)
     }
@@ -161,7 +176,14 @@ impl Engine {
             )));
         }
         let store = self.store(profile)?;
-        let mut config = Self::config(&store)?;
+        if let Expected::Value(expected) = &update.expected
+            && *expected != self.read_connections(profile)?.connectors.get(name).cloned()
+        {
+            return Err(ApiError::Conflict(format!(
+                "connector `{name}` is not the one this form loaded"
+            )));
+        }
+        let (loaded, mut config) = Self::config_with_text(&store)?;
         let url = update.url.trim().to_owned();
         // An earlier entry may name its secret itself (set with `config-set`). A kept token keeps that name.
         let earlier = match config.connectors.get(name) {
@@ -199,20 +221,20 @@ impl Engine {
         self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
         Self::check_config(&config)?;
         self.change_token(profile, &store, &key, &url, &update.token, earlier.is_some())?;
-        self.commit_connections(profile, &store, &config)?;
+        self.commit_connections(profile, &store, &loaded, &config)?;
         let detail = json!({"target": name, "token": Self::token_note(&update.token)});
         self.audit(&store, "connection_changed", None, detail)
     }
 
     pub(crate) fn delete_connector(&self, profile: &str, name: &str) -> ApiResult<()> {
         let store = self.store(profile)?;
-        let mut config = Self::config(&store)?;
+        let (loaded, mut config) = Self::config_with_text(&store)?;
         if config.connectors.remove(name).is_none() {
             return Err(ApiError::NotFound(format!("connector `{name}`")));
         }
         // The token goes with the connector. The server stores a connector's token only under this key.
         store.delete_secret(&connector_secret_key(name)).map_err(store_error)?;
-        self.commit_connections(profile, &store, &config)?;
+        self.commit_connections(profile, &store, &loaded, &config)?;
         self.audit(&store, "connection_removed", None, json!({"target": name}))
     }
 }

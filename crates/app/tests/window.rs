@@ -146,7 +146,11 @@ fn the_privacy_section_shows_the_server_settings(cx: &mut TestAppContext) {
         custom: vec![pattern("project", r"PRJ-\d{4}")],
         ..PrivacyConfig::default()
     };
-    rt.block_on(rig.engine.set_privacy("lee", stored)).unwrap();
+    rt.block_on(
+        rig.engine
+            .set_privacy("lee", bunsin_api::PrivacyUpdate::unchecked(stored)),
+    )
+    .unwrap();
     on_screen(cx, window, |window, cx| window.click("profile-lee", cx));
     wait_until(cx, &shell, "lee's settings", |s| {
         s.state.privacy.as_ref().is_some_and(|p| !p.card_number)
@@ -228,7 +232,11 @@ fn remove_and_save_deletes_the_pattern_on_the_server(cx: &mut TestAppContext) {
         custom: vec![pattern("first", "AAA"), pattern("second", "BBB")],
         ..PrivacyConfig::default()
     };
-    rt.block_on(rig.engine.set_privacy("kim", stored)).unwrap();
+    rt.block_on(
+        rig.engine
+            .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(stored)),
+    )
+    .unwrap();
     let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "pattern-count"), "Custom patterns: 2");
@@ -291,7 +299,11 @@ fn a_refresh_does_not_overwrite_the_form_being_edited(cx: &mut TestAppContext) {
         card_number: false,
         ..PrivacyConfig::default()
     };
-    rt.block_on(rig.engine.set_privacy("kim", other)).unwrap();
+    rt.block_on(
+        rig.engine
+            .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(other)),
+    )
+    .unwrap();
     wait_until(cx, &shell, "the refreshed settings", |s| {
         s.state.privacy.as_ref().is_some_and(|p| !p.card_number)
     });

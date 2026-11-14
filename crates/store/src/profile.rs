@@ -182,6 +182,16 @@ impl ProfileStore {
         Ok(())
     }
 
+    /// Replaces a setting only if it still has the value `old`. Returns false otherwise,
+    /// so two changes that started from the same value cannot both be stored.
+    pub fn replace_setting_if(&self, key: &str, old: &str, new: &str) -> Result<bool> {
+        let changed = self.db().execute(
+            "UPDATE settings SET value = ?1 WHERE key = ?2 AND value = ?3",
+            (new, key, old),
+        )?;
+        Ok(changed == 1)
+    }
+
     /// The kill switch is stored, so it stays on after a restart.
     pub fn kill_switch(&self) -> Result<bool> {
         Ok(self.setting(KILL_SWITCH)?.as_deref() == Some("on"))
@@ -776,5 +786,30 @@ mod tests {
         assert!(s.delete_secret("LLM").unwrap());
         assert!(!s.delete_secret("LLM").unwrap());
         assert_eq!(s.secret_keys().unwrap(), ["MCP_SLACK"]);
+    }
+
+    #[test]
+    fn a_setting_is_replaced_only_from_the_expected_value() {
+        let (_dir, s) = store();
+        s.set_setting("config", "v1").unwrap();
+        assert!(s.replace_setting_if("config", "v1", "v2").unwrap());
+        // A second change that also started from v1 loses.
+        assert!(!s.replace_setting_if("config", "v1", "v3").unwrap());
+        assert_eq!(s.setting("config").unwrap().as_deref(), Some("v2"));
+        assert!(!s.replace_setting_if("missing", "", "x").unwrap());
+    }
+
+    #[test]
+    fn an_inbox_item_keeps_the_reads_it_is_based_on() {
+        let (_dir, s) = store();
+        let basis = [ReadNote {
+            tool: "slack/search".into(),
+            args: json!({"query": "deploy"}).as_object().unwrap().clone(),
+        }];
+        let item = s
+            .add_inbox_item("k1", &tool_call("hi"), "r", &basis, ApprovalState::Pending, 1)
+            .unwrap();
+        assert_eq!(s.inbox_item(item.id).unwrap().basis, basis);
+        assert_eq!(s.list_inbox(1).unwrap()[0].basis, basis);
     }
 }

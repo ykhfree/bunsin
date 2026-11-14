@@ -140,6 +140,7 @@ fn rejects_a_token_that_is_not_a_header_value() {
             base_url: "http://127.0.0.1:9".into(),
             model: MODEL.into(),
             timeout: Duration::from_secs(1),
+            workspace_id: None,
         };
         let error = HttpLlmClient::new(config, ApiToken::new(secret.clone())).unwrap_err();
         assert!(matches!(error, LlmError::Transport(_)), "{error:?}");

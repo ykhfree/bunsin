@@ -9,8 +9,8 @@ mod secrets;
 pub use secrets::{ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmUpdate, Outcome, PollPreview,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -280,6 +280,32 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// The settings and the exact text they were stored as. The text is the base for
+    /// `save_config_from`.
+    fn config_with_text(store: &ProfileStore) -> ApiResult<(String, ProfileConfig)> {
+        let text = store.setting(CONFIG_KEY).map_err(store_error)?;
+        let text = text.ok_or_else(|| internal("the profile has no stored config"))?;
+        let config = serde_json::from_str(&text).map_err(internal)?;
+        Ok((text, config))
+    }
+
+    /// Stores changed settings only if the stored settings are still the ones that were
+    /// loaded. Two changes that started from the same settings cannot both be stored,
+    /// so neither is lost without notice.
+    fn save_config_from(store: &ProfileStore, loaded: &str, config: &ProfileConfig) -> ApiResult<()> {
+        let text = serde_json::to_string(config).map_err(internal)?;
+        if store
+            .replace_setting_if(CONFIG_KEY, loaded, &text)
+            .map_err(store_error)?
+        {
+            Ok(())
+        } else {
+            Err(ApiError::Conflict(
+                "another change was saved at the same time; load the settings and try again".into(),
+            ))
+        }
     }
 
     fn save_config(store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
@@ -901,10 +927,10 @@ impl Engine {
             )));
         }
         let store = self.store(profile)?;
-        let mut config = Self::config(&store)?;
+        let (loaded, mut config) = Self::config_with_text(&store)?;
         let count = live.len();
         config.approved_tools.insert(connector.to_owned(), live);
-        Self::save_config(&store, &config)?;
+        Self::save_config_from(&store, &loaded, &config)?;
         self.audit(
             &store,
             "tools_approved",
@@ -913,12 +939,19 @@ impl Engine {
         )
     }
 
-    fn replace_privacy(&self, profile: &str, privacy: PrivacyConfig) -> ApiResult<()> {
+    fn replace_privacy(&self, profile: &str, update: PrivacyUpdate) -> ApiResult<()> {
         let store = self.store(profile)?;
-        let mut config = Self::config(&store)?;
-        config.privacy = privacy;
+        let (loaded, mut config) = Self::config_with_text(&store)?;
+        if let Expected::Value(expected) = &update.expected
+            && *expected != config.privacy
+        {
+            return Err(ApiError::Conflict(
+                "the privacy settings are not the ones this form loaded".into(),
+            ));
+        }
+        config.privacy = update.privacy;
         Self::check_config(&config)?;
-        Self::save_config(&store, &config)?;
+        Self::save_config_from(&store, &loaded, &config)?;
         // Counts only. The patterns can describe what the owner wants hidden.
         let detail = json!({"custom_patterns": config.privacy.custom.len()});
         self.audit(&store, "privacy_changed", None, detail)
@@ -1007,8 +1040,8 @@ impl EngineApi for Engine {
         Box::pin(async move { Ok(Self::config(&*self.store(profile)?)?.privacy) })
     }
 
-    fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>> {
-        Box::pin(async move { self.replace_privacy(profile, privacy) })
+    fn set_privacy<'a>(&'a self, profile: &'a str, update: PrivacyUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_privacy(profile, update) })
     }
 
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {

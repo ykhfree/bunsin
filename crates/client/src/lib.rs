@@ -2,8 +2,8 @@
 
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
@@ -242,9 +242,9 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move { self.call(Method::GET, &profile_path(profile, "privacy"), NO_BODY).await })
     }
 
-    fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>> {
+    fn set_privacy<'a>(&'a self, profile: &'a str, update: PrivacyUpdate) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
-            self.send_only(Method::PUT, &profile_path(profile, "privacy"), Some(&privacy))
+            self.send_only(Method::PUT, &profile_path(profile, "privacy"), Some(&update))
                 .await
         })
     }

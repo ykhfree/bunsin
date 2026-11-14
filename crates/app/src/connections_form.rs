@@ -182,6 +182,7 @@ impl Shell {
             model: text(&form.llm_model, cx),
             timeout_secs,
             token,
+            expected: bunsin_api::Expected::Unchecked,
         };
         self.send(UiCommand::SaveLlm { profile, update });
     }
@@ -211,6 +212,7 @@ impl Shell {
         let update = ConnectorUpdate {
             url: text(&form.address, cx),
             token,
+            expected: bunsin_api::Expected::Unchecked,
         };
         self.send(UiCommand::SaveConnector { profile, name, update });
     }

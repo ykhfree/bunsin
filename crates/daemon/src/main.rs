@@ -221,11 +221,12 @@ enum Command {
         #[command(flatten)]
         remote: Remote,
         profile: String,
-        #[arg(long, value_parser = ["anthropic-messages", "openai-chat"])]
+        #[arg(long, value_parser = ["anthropic-messages", "openai-chat"], default_value = "anthropic-messages")]
         wire: String,
-        #[arg(long)]
+        /// The default is the Claude API.
+        #[arg(long, default_value = bunsin_core::settings::ANTHROPIC_BASE_URL)]
         base_url: String,
-        #[arg(long)]
+        #[arg(long, default_value = bunsin_core::settings::ANTHROPIC_DEFAULT_MODEL)]
         model: String,
         #[arg(long, default_value_t = 120)]
         timeout_secs: u64,
@@ -550,6 +551,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 model,
                 timeout_secs,
                 token: token.change()?,
+                expected: bunsin_api::Expected::Unchecked,
             };
             connect(&remote)?.set_llm(&profile, update).await.map_err(text)?;
             println!("LLM endpoint of {profile} saved");
@@ -564,6 +566,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             let update = ConnectorUpdate {
                 url,
                 token: token.change()?,
+                expected: bunsin_api::Expected::Unchecked,
             };
             connect(&remote)?
                 .set_connector(&profile, &name, update)

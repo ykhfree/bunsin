@@ -12,8 +12,8 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
-    ApiError, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PollPreview, ProfileConfig, ProfileSnapshot,
-    ReplayCase, ReplayResult, ToolsReport,
+    ApiError, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PollPreview, PrivacyUpdate, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::PrivacyConfig;
@@ -192,10 +192,10 @@ async fn put_privacy(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
     Path(profile): Path<String>,
-    Json(privacy): Json<PrivacyConfig>,
+    Json(update): Json<PrivacyUpdate>,
 ) -> Reply<()> {
     authorize(&engine, &headers, &profile)?;
-    Ok(Json(engine.set_privacy(&profile, privacy).await?))
+    Ok(Json(engine.set_privacy(&profile, update).await?))
 }
 
 async fn test_poll(

@@ -208,6 +208,7 @@ impl RealBackends {
             base_url: section.base_url,
             model: section.model,
             timeout: Duration::from_secs(section.timeout_secs),
+            workspace_id: section.workspace_id,
         };
         HttpLlmClient::new(config, token).map_err(|e| format!("the LLM client cannot start: {e}"))
     }

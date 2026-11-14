@@ -126,6 +126,7 @@ pub fn client_with_timeout(wire: Wire, base_url: String, timeout: Duration) -> H
         base_url,
         model: MODEL.into(),
         timeout,
+        workspace_id: None,
     };
     HttpLlmClient::new(config, ApiToken::new(TOKEN)).unwrap()
 }

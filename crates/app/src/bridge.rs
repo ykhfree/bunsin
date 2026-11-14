@@ -126,7 +126,12 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             Ok(())
         }
         (UiCommand::SavePrivacy { profile, privacy }, _) => {
-            let result = for_profile(selected, &profile, api.set_privacy(&profile, privacy)).await;
+            let result = for_profile(
+                selected,
+                &profile,
+                api.set_privacy(&profile, bunsin_api::PrivacyUpdate::unchecked(privacy)),
+            )
+            .await;
             state.privacy_result = Some(result);
             state.privacy_saves += 1;
             Ok(())

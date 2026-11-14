@@ -19,11 +19,16 @@ fn llm(base_url: &str, token: TokenChange) -> LlmUpdate {
         model: "m1".into(),
         timeout_secs: 120,
         token,
+        expected: bunsin_api::Expected::Unchecked,
     }
 }
 
 fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
-    ConnectorUpdate { url: url.into(), token }
+    ConnectorUpdate {
+        url: url.into(),
+        token,
+        expected: bunsin_api::Expected::Unchecked,
+    }
 }
 
 fn set(token: &str) -> TokenChange {

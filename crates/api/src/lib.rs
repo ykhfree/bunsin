@@ -51,7 +51,8 @@ impl ProfileConfig {
             principles: Vec::new(),
             policy: Policy::default(),
             approved_tools: BTreeMap::new(),
-            max_output_tokens: 4096,
+            // Room for the model's thinking and the JSON reply.
+            max_output_tokens: 16_000,
             token_budget: 200_000,
             llm: Value::Null,
             connectors: BTreeMap::new(),
@@ -144,6 +145,36 @@ pub enum TokenSource {
     None,
 }
 
+/// What the caller believes the server holds now. A save with `Value` is refused with
+/// `ApiError::Conflict` if the server holds something else, so that one person's change
+/// is not overwritten without notice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Expected<T> {
+    /// Save without a check.
+    #[default]
+    Unchecked,
+    /// Save only if the server still holds this value.
+    Value(T),
+}
+
+/// New privacy settings, with what the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivacyUpdate {
+    pub privacy: PrivacyConfig,
+    #[serde(default)]
+    pub expected: Expected<PrivacyConfig>,
+}
+
+impl PrivacyUpdate {
+    pub fn unchecked(privacy: PrivacyConfig) -> Self {
+        Self {
+            privacy,
+            expected: Expected::Unchecked,
+        }
+    }
+}
+
 /// What to do with the token when a connection is saved.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +225,9 @@ pub struct LlmUpdate {
     pub model: String,
     pub timeout_secs: u64,
     pub token: TokenChange,
+    /// The LLM connection the caller loaded, or `None` if there was none.
+    #[serde(default)]
+    pub expected: Expected<Option<LlmConnection>>,
 }
 
 /// A connector that is reached over HTTP. Other transports are set by the server operator.
@@ -201,6 +235,9 @@ pub struct LlmUpdate {
 pub struct ConnectorUpdate {
     pub url: String,
     pub token: TokenChange,
+    /// The connector the caller loaded, or `None` for a new connector.
+    #[serde(default)]
+    pub expected: Expected<Option<ConnectorConnection>>,
 }
 
 /// The tools a connector lists now, compared with the approved ones.
@@ -247,6 +284,9 @@ pub enum ApiError {
     /// The access token is missing, unknown, revoked or for another profile.
     #[error("not authorized: {0}")]
     Unauthorized(String),
+    /// The server holds another value than the caller expected. Nothing was saved.
+    #[error("the settings changed on the server: {0}")]
+    Conflict(String),
     /// The server did not answer. The request may or may not have run.
     #[error("the server cannot be reached: {0}")]
     Unreachable(String),
@@ -277,7 +317,7 @@ pub trait EngineApi: Send + Sync {
     -> BoxFuture<'a, ApiResult<()>>;
     fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>>;
     /// Replaces only the privacy part of the settings.
-    fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>>;
+    fn set_privacy<'a>(&'a self, profile: &'a str, update: PrivacyUpdate) -> BoxFuture<'a, ApiResult<()>>;
     /// The LLM endpoint and the connectors, with where each token comes from.
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>>;
     /// Saves the LLM endpoint and its token in one step.

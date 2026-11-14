@@ -61,6 +61,7 @@ fn update(url: &str, token: TokenChange) -> ConnectorUpdate {
     ConnectorUpdate {
         url: url.to_owned(),
         token,
+        expected: bunsin_api::Expected::Unchecked,
     }
 }
 

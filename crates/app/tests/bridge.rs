@@ -220,7 +220,10 @@ async fn the_bridge_task_ends_when_the_window_drops_its_command_sender() {
 async fn the_state_holds_the_privacy_settings_of_the_selected_profile() {
     let rig = common::rig().await;
     let lee = with_pattern("lee", "LEE-[0-9]+");
-    rig.engine.set_privacy("lee", lee.clone()).await.unwrap();
+    rig.engine
+        .set_privacy("lee", bunsin_api::PrivacyUpdate::unchecked(lee.clone()))
+        .await
+        .unwrap();
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     assert_eq!(state.privacy, Some(PrivacyConfig::default()));
@@ -229,7 +232,10 @@ async fn the_state_holds_the_privacy_settings_of_the_selected_profile() {
 
     // A timed refresh shows a change that another client made.
     let changed = with_pattern("other", "X+");
-    rig.engine.set_privacy("lee", changed.clone()).await.unwrap();
+    rig.engine
+        .set_privacy("lee", bunsin_api::PrivacyUpdate::unchecked(changed.clone()))
+        .await
+        .unwrap();
     refresh(&*rig.engine, &mut state).await;
     assert_eq!(state.privacy, Some(changed));
 }
@@ -326,11 +332,16 @@ fn llm(base_url: &str, token: TokenChange) -> LlmUpdate {
         model: "m1".into(),
         timeout_secs: 120,
         token,
+        expected: bunsin_api::Expected::Unchecked,
     }
 }
 
 fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
-    ConnectorUpdate { url: url.into(), token }
+    ConnectorUpdate {
+        url: url.into(),
+        token,
+        expected: bunsin_api::Expected::Unchecked,
+    }
 }
 
 /// One of each connection command for `profile`, on connector `slack`.

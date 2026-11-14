@@ -17,7 +17,7 @@
 //! | GET | `/v1/profiles/{p}/connectors/{c}/tools` | | `ToolsReport` |
 //! | POST | `/v1/profiles/{p}/connectors/{c}/tools/approve` | `ApproveToolsBody` | |
 //! | GET | `/v1/profiles/{p}/privacy` | | `PrivacyConfig` |
-//! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyConfig` | |
+//! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyUpdate` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
@@ -68,6 +68,7 @@ pub fn status_of(error: &ApiError) -> u16 {
         ApiError::Unauthorized(_) => 401,
         ApiError::NotFound(_) => 404,
         ApiError::NotAllowed(_) => 409,
+        ApiError::Conflict(_) => 412,
         ApiError::Internal(_) => 500,
         ApiError::Unreachable(_) => 502,
     }

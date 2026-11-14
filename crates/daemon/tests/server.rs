@@ -245,10 +245,10 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(
             kim.set_privacy(
                 other,
-                PrivacyConfig {
+                bunsin_api::PrivacyUpdate::unchecked(PrivacyConfig {
                     email: false,
                     ..PrivacyConfig::default()
-                },
+                }),
             )
             .await,
         );
@@ -260,11 +260,13 @@ async fn a_token_reaches_only_its_own_profile() {
             model: "m".into(),
             timeout_secs: 60,
             token: TokenChange::Set("t".into()),
+            expected: bunsin_api::Expected::Unchecked,
         };
         refused(kim.set_llm(other, llm).await);
         let connector = ConnectorUpdate {
             url: "https://attacker.example/mcp".into(),
             token: TokenChange::Keep,
+            expected: bunsin_api::Expected::Unchecked,
         };
         refused(kim.set_connector(other, "slack", connector).await);
         refused(kim.remove_connector(other, "slack").await);
@@ -452,14 +454,19 @@ async fn privacy_settings_and_tool_approval_work_through_the_server() {
         label: "employee id".into(),
         pattern: r"EMP-\d{6}".into(),
     });
-    kim.set_privacy("kim", privacy.clone()).await.unwrap();
+    kim.set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy.clone()))
+        .await
+        .unwrap();
     assert_eq!(kim.privacy("kim").await.unwrap(), privacy);
     // The server's reason for a refused pattern reaches the caller.
     privacy.custom.push(CustomPattern {
         label: "bad".into(),
         pattern: "(unclosed".into(),
     });
-    let error = kim.set_privacy("kim", privacy).await.unwrap_err();
+    let error = kim
+        .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy))
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, ApiError::Invalid(ref m) if m.contains("the pattern of `bad`")),
         "{error:?}"
@@ -571,11 +578,13 @@ async fn connections_and_their_tokens_are_saved_through_the_server_and_never_com
         model: "m1".into(),
         timeout_secs: 90,
         token: TokenChange::Set("sk-over-the-wire".into()),
+        expected: bunsin_api::Expected::Unchecked,
     };
     kim.set_llm("kim", llm).await.unwrap();
     let jira = ConnectorUpdate {
         url: "https://mcp.example.com/jira".into(),
         token: TokenChange::Set("jira-token".into()),
+        expected: bunsin_api::Expected::Unchecked,
     };
     kim.set_connector("kim", "jira", jira).await.unwrap();
 
@@ -594,6 +603,7 @@ async fn connections_and_their_tokens_are_saved_through_the_server_and_never_com
     let internal = ConnectorUpdate {
         url: "http://169.254.169.254/x".into(),
         token: TokenChange::Set("t".into()),
+        expected: bunsin_api::Expected::Unchecked,
     };
     let error = kim.set_connector("kim", "meta", internal).await.unwrap_err();
     assert!(
@@ -605,4 +615,36 @@ async fn connections_and_their_tokens_are_saved_through_the_server_and_never_com
     assert!(kim.connections("kim").await.unwrap().connectors.is_empty());
     // The other profile sees nothing of this.
     assert!(rig.engine.connections("lee").await.unwrap().llm.is_none());
+}
+
+#[tokio::test]
+async fn a_conflict_keeps_its_kind_across_the_network() {
+    use bunsin_api::{Expected, PrivacyUpdate};
+    let rig = rig().await;
+    let kim = rig.kim();
+    let loaded = kim.privacy("kim").await.unwrap();
+    let other = PrivacyConfig {
+        phone: false,
+        ..loaded.clone()
+    };
+    kim.set_privacy("kim", PrivacyUpdate::unchecked(other.clone()))
+        .await
+        .unwrap();
+
+    let mine = PrivacyConfig {
+        email: false,
+        ..loaded.clone()
+    };
+    let error = kim
+        .set_privacy(
+            "kim",
+            PrivacyUpdate {
+                privacy: mine,
+                expected: Expected::Value(loaded),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ApiError::Conflict(_)), "{error:?}");
+    assert_eq!(kim.privacy("kim").await.unwrap(), other);
 }

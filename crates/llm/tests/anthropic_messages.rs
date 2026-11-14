@@ -188,3 +188,29 @@ async fn maps_timeout_to_transport() {
     assert!(matches!(error, LlmError::Transport(_)), "{error:?}");
     assert_no_token(&error);
 }
+
+#[tokio::test]
+async fn the_workspace_id_is_sent_only_when_it_is_set() {
+    use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig};
+    let config = |base_url: String, workspace_id: Option<&str>| LlmConfig {
+        wire: Wire::AnthropicMessages,
+        base_url,
+        model: MODEL.into(),
+        timeout: Duration::from_secs(5),
+        workspace_id: workspace_id.map(str::to_owned),
+    };
+    let (base, captured) = serve_once(ok(reply(text("ok"), "end_turn"))).await;
+    let with_workspace = HttpLlmClient::new(config(base, Some("wrkspc_test123")), ApiToken::new("k")).unwrap();
+    with_workspace.complete(request("be brief", None)).await.unwrap();
+    assert_eq!(
+        captured.await.unwrap().header("anthropic-workspace-id"),
+        Some("wrkspc_test123")
+    );
+
+    let (base, captured) = serve_once(ok(reply(text("ok"), "end_turn"))).await;
+    client(Wire::AnthropicMessages, base)
+        .complete(request("be brief", None))
+        .await
+        .unwrap();
+    assert_eq!(captured.await.unwrap().header("anthropic-workspace-id"), None);
+}

@@ -27,6 +27,8 @@ pub struct LlmConfig {
     pub model: String,
     /// The limit for one whole request, from connect to the last body byte.
     pub timeout: Duration,
+    /// Sent as `anthropic-workspace-id` on the Anthropic wire, if set.
+    pub workspace_id: Option<String>,
 }
 
 /// The endpoint credential. `Debug` never shows the value.
@@ -96,6 +98,10 @@ impl HttpLlmClient {
                 .header("x-api-key", self.auth.clone())
                 .header("anthropic-version", anthropic::VERSION)
                 .body(anthropic::request_body(model, request).to_string()),
+        };
+        let builder = match (&self.config.wire, &self.config.workspace_id) {
+            (Wire::AnthropicMessages, Some(workspace)) => builder.header("anthropic-workspace-id", workspace),
+            _ => builder,
         };
         let response = builder
             .header(CONTENT_TYPE, "application/json")

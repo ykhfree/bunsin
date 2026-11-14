@@ -33,6 +33,12 @@ pub enum McpConfig {
     },
 }
 
+/// The address of the Claude API. Source: the API overview of the Claude docs
+/// (https://platform.claude.com/docs/en/api/overview), read on 2026-11-15.
+pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+/// The model the Claude docs say to start with (models overview, read on 2026-11-15).
+pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-opus-5-5";
+
 /// The `llm` section of the profile settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +50,10 @@ pub struct LlmSection {
     pub timeout_secs: u64,
     /// The key of the secret that holds the endpoint token.
     pub token_secret: String,
+    /// The workspace ID for the Claude API (`anthropic-workspace-id`). The API needs it
+    /// with a key that is not scoped to one workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 pub fn default_timeout_secs() -> u64 {
