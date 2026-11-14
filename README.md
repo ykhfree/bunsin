@@ -23,7 +23,8 @@ cargo test --workspace
 ```
 
 `rust-toolchain.toml` pins the Rust version. rustup installs it on first use.
-The window uses GPUI through the `gpui-kit` crate. Builds are tested on macOS only.
+The window uses GPUI through the `gpui-kit` crate and is tested on macOS only.
+CI builds and tests the server on Linux.
 
 ## Use
 

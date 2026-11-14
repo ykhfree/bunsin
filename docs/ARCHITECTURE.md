@@ -180,7 +180,7 @@
 | 엔진 파이프라인(중복 제거, 수리 1회, 정책, 승인, 1회 실행, 정지 스위치, 재현 평가의 제안 단계) | 구현, 테스트 있음 |
 | LLM 어댑터, MCP 커넥터, 코딩 위임 실행기 | 구현, 로컬 stub으로만 테스트 |
 | GPUI 창(접속 화면, 프로필, 승인함, 감사 로그, 정지 스위치) | 구현, headless 테스트만. 실제 창은 띄워 보지 않았다. |
-| `bunsind serve`(HTTPS 서버), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. Linux에서는 빌드해 보지 않았다. |
+| `bunsind serve`(HTTPS 서버), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. CI가 Linux(ubuntu)에서 빌드와 테스트를 돌린다. |
 | 이벤트 폴링 | 없음. 이벤트는 `ingest` 명령이나 API로 넣는다. |
 | 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 없음. 지금은 이벤트 하나에 제안 하나이다. |
 | 업무지식 검색, 원칙 후보 추출, 재현 평가의 채점 | 없음 |
@@ -194,7 +194,7 @@
 - 사용자의 LLM endpoint가 쓰는 wire 형식.
 - 코딩 백엔드의 편집 허용 설정(예: Claude Code의 permission mode, Codex의 sandbox 설정)을 opt-in으로 둘지.
 - stdio MCP 서버가 env로 받는 비밀 값. 지금 구조에서는 `McpConfig.env`에 들어가 설정과 함께 저장된다.
-- 서버의 Linux 빌드와 systemd 실행 설정.
+- 서버의 systemd 실행 설정.
 - MCP 서버의 인증 방식. OAuth이면 headless 환경의 흐름이 필요하다.
 - 임베딩 검색의 제공 여부.
 - 라이선스.
