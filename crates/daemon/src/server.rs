@@ -10,9 +10,12 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
-use bunsin_api::http::{ApproveBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
-use bunsin_api::{ApiError, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult};
+use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
+use bunsin_api::{
+    ApiError, EngineApi, Outcome, PollPreview, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
 use bunsin_engine::Engine;
 use std::net::SocketAddr;
@@ -156,6 +159,53 @@ async fn replay(
     Ok(Json(engine.replay(&profile, case).await?))
 }
 
+async fn connector_tools(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, connector)): Path<(String, String)>,
+) -> Reply<ToolsReport> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.connector_tools(&profile, &connector).await?))
+}
+
+async fn approve_tools(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, connector)): Path<(String, String)>,
+    Json(body): Json<ApproveToolsBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.approve_tools(&profile, &connector, body.shown).await?))
+}
+
+async fn get_privacy(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<PrivacyConfig> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.privacy(&profile).await?))
+}
+
+async fn put_privacy(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(privacy): Json<PrivacyConfig>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_privacy(&profile, privacy).await?))
+}
+
+async fn test_poll(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, index)): Path<(String, usize)>,
+) -> Reply<PollPreview> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.test_poll(&profile, index).await?))
+}
+
 pub fn router(engine: Arc<Engine>) -> Router {
     let profile = |rest: &str| format!("{PROFILES}/{{profile}}/{rest}");
     Router::new()
@@ -167,6 +217,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("inbox/{inbox_id}/reject"), post(reject))
         .route(&profile("kill-switch"), put(kill_switch))
         .route(&profile("replay"), post(replay))
+        .route(&profile("connectors/{connector}/tools"), get(connector_tools))
+        .route(&profile("connectors/{connector}/tools/approve"), post(approve_tools))
+        .route(&profile("privacy"), get(get_privacy).put(put_privacy))
+        .route(&profile("polls/{index}/test"), post(test_poll))
         .with_state(engine)
 }
 
@@ -245,5 +299,41 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
                 "the server stopped before it listened",
             ))),
         },
+    }
+}
+
+/// How often the server looks for polls that are due.
+const POLL_TICK: Duration = Duration::from_secs(5);
+
+/// The task that repeats the searches of all profiles.
+pub struct Poller {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Poller {
+    /// Starts polling. A failure of one profile is written to stderr and does not stop the task.
+    pub fn start(engine: Arc<Engine>) -> Self {
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            loop {
+                for (profile, error) in engine.poll_all().await {
+                    eprintln!("poll of profile {profile} failed: {error}");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL_TICK) => {}
+                    _ = stopped.changed() => break,
+                }
+            }
+        });
+        Self { stop, task }
+    }
+
+    /// Lets the running cycle finish, then ends the task.
+    pub async fn stop(self) {
+        let _ = self.stop.send(true);
+        if tokio::time::timeout(SHUTDOWN_GRACE, self.task).await.is_err() {
+            eprintln!("the poll task did not finish in {} s", SHUTDOWN_GRACE.as_secs());
+        }
     }
 }

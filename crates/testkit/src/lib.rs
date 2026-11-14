@@ -55,6 +55,7 @@ pub struct FakeConnector {
     tools: Mutex<Vec<ToolSpec>>,
     calls: Mutex<Vec<(String, Map<String, Value>)>>,
     failure: Mutex<Option<String>>,
+    results: Mutex<std::collections::BTreeMap<String, Value>>,
 }
 
 pub fn tool(name: &str, description: &str) -> ToolSpec {
@@ -72,11 +73,17 @@ impl FakeConnector {
             tools: Mutex::new(tools),
             calls: Mutex::new(Vec::new()),
             failure: Mutex::new(None),
+            results: Mutex::new(Default::default()),
         }
     }
 
     pub fn set_tools(&self, tools: Vec<ToolSpec>) {
         *self.tools.lock().unwrap() = tools;
+    }
+
+    /// Makes later calls of `tool` return `result`.
+    pub fn set_result(&self, tool: &str, result: Value) {
+        self.results.lock().unwrap().insert(tool.to_owned(), result);
     }
 
     /// Makes every later call fail with `message`.
@@ -103,7 +110,10 @@ impl Connector for FakeConnector {
         self.calls.lock().unwrap().push((tool.to_owned(), args.clone()));
         let result = match self.failure.lock().unwrap().clone() {
             Some(message) => Err(ConnectorError::Failed(message)),
-            None => Ok(json!({"ok": true, "tool": tool, "echo": args})),
+            None => match self.results.lock().unwrap().get(tool) {
+                Some(result) => Ok(result.clone()),
+                None => Ok(json!({"ok": true, "tool": tool, "echo": args})),
+            },
         };
         Box::pin(async move { result })
     }

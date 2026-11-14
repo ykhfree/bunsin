@@ -1,12 +1,15 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
-use bunsin_api::http::{ApproveBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
+use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
-    ApiError, ApiResult, Edit, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
+    ApiError, ApiResult, Edit, EngineApi, Outcome, PollPreview, ProfileConfig, ProfileSnapshot, ReplayCase,
+    ReplayResult, ToolsReport,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
+use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
+use bunsin_core::tool::PinSet;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, Url};
 use serde::Serialize;
@@ -212,6 +215,48 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "replay"), Some(&case))
                 .await
+        })
+    }
+
+    fn connector_tools<'a>(&'a self, profile: &'a str, connector: &'a str) -> BoxFuture<'a, ApiResult<ToolsReport>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connectors/{connector}/tools"));
+            self.call(Method::GET, &path, NO_BODY).await
+        })
+    }
+
+    fn approve_tools<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        shown: PinSet,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connectors/{connector}/tools/approve"));
+            self.send_only(Method::POST, &path, Some(&ApproveToolsBody { shown }))
+                .await
+        })
+    }
+
+    fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "privacy"), NO_BODY).await })
+    }
+
+    fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::PUT, &profile_path(profile, "privacy"), Some(&privacy))
+                .await
+        })
+    }
+
+    fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {
+        Box::pin(async move {
+            self.call(
+                Method::POST,
+                &profile_path(profile, &format!("polls/{index}/test")),
+                NO_BODY,
+            )
+            .await
         })
     }
 }

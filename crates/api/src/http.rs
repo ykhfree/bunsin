@@ -14,6 +14,11 @@
 //! | POST | `/v1/profiles/{p}/inbox/{id}/reject` | `RejectBody` | |
 //! | PUT | `/v1/profiles/{p}/kill-switch` | `KillSwitchBody` | `KillSwitchBody` |
 //! | POST | `/v1/profiles/{p}/replay` | `ReplayCase` | `ReplayResult` |
+//! | GET | `/v1/profiles/{p}/connectors/{c}/tools` | | `ToolsReport` |
+//! | POST | `/v1/profiles/{p}/connectors/{c}/tools/approve` | `ApproveToolsBody` | |
+//! | GET | `/v1/profiles/{p}/privacy` | | `PrivacyConfig` |
+//! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyConfig` | |
+//! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 
@@ -29,6 +34,12 @@ pub fn profile_path(profile: &str, rest: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApproveBody {
     pub edit: Option<Edit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApproveToolsBody {
+    /// Tool name to fingerprint, as the caller saw them.
+    pub shown: bunsin_core::tool::PinSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

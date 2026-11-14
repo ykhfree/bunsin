@@ -2,22 +2,26 @@
 //!
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
+mod polling;
+
 use bunsin_api::{
-    ApiError, ApiResult, Edit, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
+    ApiError, ApiResult, Edit, EngineApi, Outcome, PollPreview, ProfileConfig, ProfileSnapshot, ReplayCase,
+    ReplayResult, ToolsReport,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
-use bunsin_core::policy::Decision;
+use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_proposal, split_tool_id};
 use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo};
-use bunsin_core::tool::{pin, pin_holds};
-use bunsin_store::{AppStore, ProfileStore, StoreError};
+use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
+use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -25,6 +29,8 @@ use std::sync::{Arc, Mutex};
 const CONFIG_KEY: &str = "config";
 const LIST_LIMIT: u32 = 200;
 const CORRECTIONS_IN_PROMPT: u32 = 5;
+/// How many times the handling of one event is tried before the owner is asked.
+const MAX_EVENT_ATTEMPTS: u32 = 3;
 
 /// The live clients of one profile.
 pub struct Runtime {
@@ -61,6 +67,7 @@ struct Ctx {
     store: Arc<ProfileStore>,
     config: ProfileConfig,
     runtime: Arc<Runtime>,
+    redactor: Redactor,
 }
 
 pub struct Engine {
@@ -69,6 +76,10 @@ pub struct Engine {
     clock: Clock,
     stores: Mutex<HashMap<String, Arc<ProfileStore>>>,
     runtimes: Mutex<HashMap<String, Arc<Runtime>>>,
+    /// The profiles that are being polled now. A profile is polled by one task at a time.
+    polling: Mutex<HashSet<String>>,
+    /// When each poll last ran: profile and poll identity to Unix seconds.
+    last_polls: Mutex<HashMap<(String, String), i64>>,
     /// Held for the life of the engine. A second engine on the same directory fails to open.
     _lock: File,
 }
@@ -130,6 +141,8 @@ impl Engine {
             clock,
             stores: Mutex::new(HashMap::new()),
             runtimes: Mutex::new(HashMap::new()),
+            polling: Mutex::new(HashSet::new()),
+            last_polls: Mutex::new(HashMap::new()),
             _lock: lock,
         })
     }
@@ -168,11 +181,48 @@ impl Engine {
         Ok(runtime)
     }
 
+    /// Compiles the privacy filter. With broken settings nothing is stored and the LLM is
+    /// not called: text must never pass without the filter.
+    fn redactor(config: &ProfileConfig) -> ApiResult<Redactor> {
+        Redactor::new(&config.privacy).map_err(|e| ApiError::Invalid(format!("the privacy settings are invalid: {e}")))
+    }
+
+    /// Checks the parts of new settings that the engine itself relies on.
+    fn check_config(config: &ProfileConfig) -> ApiResult<()> {
+        Self::redactor(config)?;
+        for poll in &config.polls {
+            poll.check().map_err(ApiError::Invalid)?;
+            let tool_id = poll.tool_id();
+            // A poll runs without the owner. It may use only a tool that reads.
+            match config.policy.rules.get(&tool_id) {
+                Some(rule) if rule.class == ToolClass::Read => {}
+                Some(_) => {
+                    return Err(ApiError::Invalid(format!(
+                        "poll `{tool_id}` needs a rule with the class `read`"
+                    )));
+                }
+                None => return Err(ApiError::Invalid(format!("poll `{tool_id}` has no permission rule"))),
+            }
+        }
+        Ok(())
+    }
+
+    fn save_config(store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
+        let text = serde_json::to_string(config).map_err(internal)?;
+        store.set_setting(CONFIG_KEY, &text).map_err(store_error)
+    }
+
     async fn ctx(&self, profile: &str) -> ApiResult<Ctx> {
         let store = self.store(profile)?;
         let config = Self::config(&store)?;
+        let redactor = Self::redactor(&config)?;
         let runtime = self.runtime(profile, &config).await?;
-        Ok(Ctx { store, config, runtime })
+        Ok(Ctx {
+            store,
+            config,
+            runtime,
+            redactor,
+        })
     }
 
     fn audit(&self, store: &ProfileStore, kind: &str, event_key: Option<&str>, detail: Value) -> ApiResult<()> {
@@ -206,18 +256,28 @@ impl Engine {
     /// Asks the LLM for a proposal. An invalid reply gets one repair request.
     /// Returns the proposal or the reason there is none, and every raw LLM reply.
     async fn propose(&self, ctx: &Ctx, event: &InboundEvent) -> ApiResult<(Result<Proposal, String>, Vec<String>)> {
-        let Ctx { store, config, runtime } = ctx;
+        let Ctx {
+            store,
+            config,
+            runtime,
+            redactor,
+        } = ctx;
         let corrections = store.recent_corrections(CORRECTIONS_IN_PROMPT).map_err(store_error)?;
         let tools = Self::tool_hints(config);
-        let mut request: CompletionRequest = assemble(&ContextInput {
-            owner_name: &config.owner_name,
-            principles: &config.principles,
-            corrections: &corrections,
-            knowledge: &[],
-            tools: &tools,
-            event,
-            max_output_tokens: config.max_output_tokens,
-        });
+        let mut counts = RedactionCounts::new();
+        let mut request: CompletionRequest = assemble(
+            &ContextInput {
+                owner_name: &config.owner_name,
+                principles: &config.principles,
+                corrections: &corrections,
+                knowledge: &[],
+                tools: &tools,
+                event,
+                max_output_tokens: config.max_output_tokens,
+                redactor,
+            },
+            &mut counts,
+        );
 
         let mut replies = Vec::new();
         let mut used_tokens = 0;
@@ -231,7 +291,15 @@ impl Engine {
             if response.stop == StopReason::Refusal {
                 return Ok((Err("the LLM refused the request".into()), replies));
             }
-            let error = match parse_proposal(&response.content) {
+            let error = match parse_proposal(&response.content).map_err(|e| e.to_string()) {
+                // A placeholder stands for removed text. Sending it to other people makes no sense.
+                Ok(Proposal::ToolCall { args, .. })
+                    if Value::Object(args.clone()).to_string().contains(PLACEHOLDER_PREFIX) =>
+                {
+                    "the tool arguments contain a [REDACTED:...] placeholder; the removed value is not known. \
+                     Write the arguments without it, or choose `escalate`"
+                        .to_owned()
+                }
                 Ok(proposal) => return Ok((Ok(proposal), replies)),
                 Err(error) => error,
             };
@@ -262,7 +330,9 @@ impl Engine {
     }
 
     async fn decide(&self, ctx: &Ctx, tool_id: &str) -> ApiResult<Decision> {
-        let Ctx { store, config, runtime } = ctx;
+        let Ctx {
+            store, config, runtime, ..
+        } = ctx;
         let kill_switch = store.kill_switch().map_err(store_error)?;
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
@@ -376,42 +446,86 @@ impl Engine {
         }
     }
 
+    /// Removes personal data from the parts of an event that are stored and sent on.
+    fn redact_event(redactor: &Redactor, mut event: InboundEvent, counts: &mut RedactionCounts) -> InboundEvent {
+        event.text = redactor.redact(&event.text, counts);
+        // An author is often an email address.
+        event.author = redactor.redact(&event.author, counts);
+        event
+    }
+
     async fn ingest_event(&self, profile: &str, event: InboundEvent) -> ApiResult<Outcome> {
         let store = self.store(profile)?;
+        let config = Self::config(&store)?;
+        // The filter runs before anything is stored, so removed text is in no table or file.
+        let mut counts = RedactionCounts::new();
+        let event = Self::redact_event(&Self::redactor(&config)?, event, &mut counts);
         let key = event.dedupe_key();
         let payload = serde_json::to_value(&event).map_err(internal)?;
-        if !store.record_event(&key, &payload, self.now()).map_err(store_error)? {
-            return Ok(Outcome::Duplicate);
+        let start = store
+            .begin_event(&key, &payload, self.now(), MAX_EVENT_ATTEMPTS)
+            .map_err(store_error)?;
+        let detail = json!({"source": event.source, "author": event.author, "redacted": counts});
+        match start {
+            EventStart::Done => return Ok(Outcome::Duplicate),
+            EventStart::New => self.audit(&store, "event_received", Some(&key), detail)?,
+            EventStart::Retry { attempt } => {
+                self.audit(&store, "event_retry", Some(&key), json!({"attempt": attempt}))?;
+            }
+            EventStart::GaveUp => {
+                let summary = format!(
+                    "Bunsin could not handle an event from {} by {} after {MAX_EVENT_ATTEMPTS} tries. Handle it yourself.",
+                    event.source, event.author
+                );
+                let body = InboxBody::Escalation { summary };
+                let rationale = "the handling of this event failed each time";
+                store
+                    .add_inbox_item(&key, &body, rationale, ApprovalState::Draft, self.now())
+                    .map_err(store_error)?;
+                self.audit(&store, "event_given_up", Some(&key), json!({}))?;
+                return Ok(Outcome::Failed {
+                    error: format!("the event failed {MAX_EVENT_ATTEMPTS} times"),
+                });
+            }
         }
-        self.audit(
-            &store,
-            "event_received",
-            Some(&key),
-            json!({"source": event.source, "author": event.author}),
-        )?;
 
+        let outcome = self.handle_event(profile, &store, &key, &event).await;
+        // A failure leaves the event open, so that a later delivery of it is a retry.
+        if !matches!(outcome, Ok(Outcome::Failed { .. }) | Err(_)) {
+            store.finish_event(&key).map_err(store_error)?;
+        }
+        outcome
+    }
+
+    async fn handle_event(
+        &self,
+        profile: &str,
+        store: &ProfileStore,
+        key: &str,
+        event: &InboundEvent,
+    ) -> ApiResult<Outcome> {
         let ctx = self.ctx(profile).await?;
-        let (proposal, replies) = self.propose(&ctx, &event).await?;
+        let (proposal, replies) = self.propose(&ctx, event).await?;
         for reply in &replies {
             store
-                .put_artifact("llm_reply", reply.as_bytes(), self.now(), Some(&key), None)
+                .put_artifact("llm_reply", reply.as_bytes(), self.now(), Some(key), None)
                 .map_err(store_error)?;
         }
         let proposal = match proposal {
             Ok(proposal) => proposal,
             Err(error) => {
-                self.audit(&store, "proposal_failed", Some(&key), json!({"error": error}))?;
+                self.audit(store, "proposal_failed", Some(key), json!({"error": error}))?;
                 return Ok(Outcome::Failed { error });
             }
         };
         let content = serde_json::to_vec_pretty(&proposal).map_err(internal)?;
         store
-            .put_artifact("proposal", &content, self.now(), Some(&key), None)
+            .put_artifact("proposal", &content, self.now(), Some(key), None)
             .map_err(store_error)?;
         self.audit(
-            &store,
+            store,
             "proposal",
-            Some(&key),
+            Some(key),
             serde_json::to_value(&proposal).map_err(internal)?,
         )?;
 
@@ -420,12 +534,12 @@ impl Engine {
             Proposal::Escalate { rationale, summary } => {
                 let body = InboxBody::Escalation { summary };
                 let item = store
-                    .add_inbox_item(&key, &body, &rationale, ApprovalState::Draft, self.now())
+                    .add_inbox_item(key, &body, &rationale, ApprovalState::Draft, self.now())
                     .map_err(store_error)?;
                 Ok(Outcome::Escalated { inbox_id: item.id })
             }
             Proposal::ToolCall { rationale, tool, args } => {
-                self.handle_tool_call(&ctx, &key, &rationale, tool, args).await
+                self.handle_tool_call(&ctx, key, &rationale, tool, args).await
             }
         }
     }
@@ -538,8 +652,9 @@ impl Engine {
         let ctx = self.ctx(profile).await?;
         let store = &ctx.store;
         // Only the event goes to the LLM. The real reply is kept for the comparison.
-        let (proposal, replies) = self.propose(&ctx, &case.event).await?;
-        let key = case.event.dedupe_key();
+        let event = Self::redact_event(&ctx.redactor, case.event, &mut RedactionCounts::new());
+        let (proposal, replies) = self.propose(&ctx, &event).await?;
+        let key = event.dedupe_key();
         for reply in &replies {
             store
                 .put_artifact("replay_reply", reply.as_bytes(), self.now(), Some(&key), None)
@@ -554,6 +669,55 @@ impl Engine {
             error,
             actual_reply: case.actual_reply,
         })
+    }
+
+    async fn tools_report(&self, profile: &str, connector: &str) -> ApiResult<ToolsReport> {
+        let ctx = self.ctx(profile).await?;
+        let live = ctx
+            .runtime
+            .connectors
+            .get(connector)
+            .ok_or_else(|| ApiError::NotFound(format!("connector `{connector}`")))?
+            .list_tools()
+            .await
+            .map_err(|e| ApiError::Internal(format!("connector `{connector}` cannot list its tools: {e}")))?;
+        let approved = ctx.config.approved_tools.get(connector).cloned().unwrap_or_default();
+        Ok(ToolsReport {
+            diff: diff_pins(&pin(&approved), &live),
+            tools: live,
+        })
+    }
+
+    async fn approve_shown_tools(&self, profile: &str, connector: &str, shown: PinSet) -> ApiResult<()> {
+        let live = self.tools_report(profile, connector).await?.tools;
+        // The owner approves what was on screen. A list that changed meanwhile is not approved.
+        if pin(&live) != shown {
+            return Err(ApiError::NotAllowed(format!(
+                "connector `{connector}` lists other tools now than the ones shown; list them again"
+            )));
+        }
+        let store = self.store(profile)?;
+        let mut config = Self::config(&store)?;
+        let count = live.len();
+        config.approved_tools.insert(connector.to_owned(), live);
+        Self::save_config(&store, &config)?;
+        self.audit(
+            &store,
+            "tools_approved",
+            None,
+            json!({"connector": connector, "tools": count}),
+        )
+    }
+
+    fn replace_privacy(&self, profile: &str, privacy: PrivacyConfig) -> ApiResult<()> {
+        let store = self.store(profile)?;
+        let mut config = Self::config(&store)?;
+        config.privacy = privacy;
+        Self::check_config(&config)?;
+        Self::save_config(&store, &config)?;
+        // Counts only. The patterns can describe what the owner wants hidden.
+        let detail = json!({"custom_patterns": config.privacy.custom.len()});
+        self.audit(&store, "privacy_changed", None, detail)
     }
 }
 
@@ -570,8 +734,8 @@ impl EngineApi for Engine {
         Box::pin(async move {
             let store = self.store(profile)?;
             self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
-            let text = serde_json::to_string(&config).map_err(internal)?;
-            store.set_setting(CONFIG_KEY, &text).map_err(store_error)?;
+            Self::check_config(&config)?;
+            Self::save_config(&store, &config)?;
             // The next use builds the clients again from the new settings.
             self.runtimes.lock().expect("engine lock").remove(profile);
             self.audit(&store, "config_changed", None, json!({}))
@@ -592,6 +756,7 @@ impl EngineApi for Engine {
                 inbox: store.list_inbox(LIST_LIMIT).map_err(store_error)?,
                 audit: store.list_audit(LIST_LIMIT).map_err(store_error)?,
                 artifacts: store.list_artifacts(LIST_LIMIT).map_err(store_error)?,
+                polls: self.poll_statuses(&store)?,
             })
         })
     }
@@ -619,5 +784,30 @@ impl EngineApi for Engine {
 
     fn replay<'a>(&'a self, profile: &'a str, case: ReplayCase) -> BoxFuture<'a, ApiResult<ReplayResult>> {
         Box::pin(self.replay_case(profile, case))
+    }
+
+    fn connector_tools<'a>(&'a self, profile: &'a str, connector: &'a str) -> BoxFuture<'a, ApiResult<ToolsReport>> {
+        Box::pin(self.tools_report(profile, connector))
+    }
+
+    fn approve_tools<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        shown: PinSet,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(self.approve_shown_tools(profile, connector, shown))
+    }
+
+    fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>> {
+        Box::pin(async move { Ok(Self::config(&*self.store(profile)?)?.privacy) })
+    }
+
+    fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_privacy(profile, privacy) })
+    }
+
+    fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {
+        Box::pin(self.preview_poll(profile, index))
     }
 }

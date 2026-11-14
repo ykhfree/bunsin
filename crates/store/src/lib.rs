@@ -3,7 +3,7 @@
 
 mod profile;
 
-pub use profile::ProfileStore;
+pub use profile::{EventStart, ProfileStore};
 
 use bunsin_core::records::ProfileInfo;
 use rusqlite::Connection;

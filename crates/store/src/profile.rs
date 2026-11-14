@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS events (
     dedupe_key TEXT PRIMARY KEY,
     received_at INTEGER NOT NULL,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'done',
+    attempts INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +61,19 @@ BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 
 const KILL_SWITCH: &str = "kill_switch";
 
+/// What `begin_event` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventStart {
+    /// The event is new. This is its first try.
+    New,
+    /// An earlier try did not finish. This is try number `attempt`.
+    Retry { attempt: u32 },
+    /// The event was handled before.
+    Done,
+    /// The event used all its tries. It is closed now.
+    GaveUp,
+}
+
 /// The private store of one profile.
 pub struct ProfileStore {
     dir: PathBuf,
@@ -98,6 +113,18 @@ impl ProfileStore {
         let db = Connection::open(dir.join("agent.db"))?;
         db.busy_timeout(crate::BUSY_TIMEOUT)?;
         db.execute_batch(SCHEMA)?;
+        // A database from before events could be retried lacks two columns.
+        let has_status: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('events') WHERE name = 'status')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_status {
+            db.execute_batch(
+                "ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'done';
+                 ALTER TABLE events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
         Ok(Self {
             dir: dir.to_owned(),
             db: Mutex::new(db),
@@ -137,10 +164,53 @@ impl ProfileStore {
 
     // --- events ---
 
-    /// Records an event. Returns false if an event with this key was recorded before.
-    pub fn record_event(&self, dedupe_key: &str, payload: &Value, now: i64) -> Result<bool> {
+    /// Starts the handling of an event and says which try this is.
+    ///
+    /// An event stays open until `finish_event`. An open event may be started again,
+    /// up to `max_attempts` times in total. After that it is closed and `GaveUp` is
+    /// returned once.
+    pub fn begin_event(&self, dedupe_key: &str, payload: &Value, now: i64, max_attempts: u32) -> Result<EventStart> {
+        let db = self.db();
+        let inserted = db.execute(
+            "INSERT OR IGNORE INTO events (dedupe_key, received_at, payload, status, attempts)
+             VALUES (?1, ?2, ?3, 'open', 1)",
+            (dedupe_key, now, payload.to_string()),
+        )?;
+        if inserted == 1 {
+            return Ok(EventStart::New);
+        }
+        let (status, attempts): (String, u32) = db.query_row(
+            "SELECT status, attempts FROM events WHERE dedupe_key = ?1",
+            [dedupe_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if status != "open" {
+            return Ok(EventStart::Done);
+        }
+        if attempts >= max_attempts {
+            db.execute("UPDATE events SET status = 'done' WHERE dedupe_key = ?1", [dedupe_key])?;
+            return Ok(EventStart::GaveUp);
+        }
+        db.execute(
+            "UPDATE events SET attempts = attempts + 1 WHERE dedupe_key = ?1",
+            [dedupe_key],
+        )?;
+        Ok(EventStart::Retry { attempt: attempts + 1 })
+    }
+
+    /// Closes an event. It is not handled again.
+    pub fn finish_event(&self, dedupe_key: &str) -> Result<()> {
+        self.db()
+            .execute("UPDATE events SET status = 'done' WHERE dedupe_key = ?1", [dedupe_key])?;
+        Ok(())
+    }
+
+    /// Records an event as already handled, without handling it.
+    /// Returns false if an event with this key was recorded before.
+    pub fn mark_event_seen(&self, dedupe_key: &str, payload: &Value, now: i64) -> Result<bool> {
         let inserted = self.db().execute(
-            "INSERT OR IGNORE INTO events (dedupe_key, received_at, payload) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO events (dedupe_key, received_at, payload, status, attempts)
+             VALUES (?1, ?2, ?3, 'done', 0)",
             (dedupe_key, now, payload.to_string()),
         )?;
         Ok(inserted == 1)
@@ -382,11 +452,72 @@ mod tests {
     }
 
     #[test]
-    fn an_event_is_recorded_once() {
+    fn a_finished_event_is_not_started_again() {
         let (_dir, s) = store();
-        assert!(s.record_event("k1", &json!({"text": "a"}), 1).unwrap());
-        assert!(!s.record_event("k1", &json!({"text": "a again"}), 2).unwrap());
-        assert!(s.record_event("k2", &json!({"text": "b"}), 3).unwrap());
+        assert_eq!(
+            s.begin_event("k1", &json!({"text": "a"}), 1, 3).unwrap(),
+            EventStart::New
+        );
+        s.finish_event("k1").unwrap();
+        assert_eq!(
+            s.begin_event("k1", &json!({"text": "a again"}), 2, 3).unwrap(),
+            EventStart::Done
+        );
+        assert_eq!(
+            s.begin_event("k2", &json!({"text": "b"}), 3, 3).unwrap(),
+            EventStart::New
+        );
+    }
+
+    #[test]
+    fn an_unfinished_event_is_retried_a_limited_number_of_times() {
+        let (_dir, s) = store();
+        let payload = json!({});
+        assert_eq!(s.begin_event("k1", &payload, 1, 3).unwrap(), EventStart::New);
+        assert_eq!(
+            s.begin_event("k1", &payload, 2, 3).unwrap(),
+            EventStart::Retry { attempt: 2 }
+        );
+        assert_eq!(
+            s.begin_event("k1", &payload, 3, 3).unwrap(),
+            EventStart::Retry { attempt: 3 }
+        );
+        // The tries are used up. This is reported once, then the event is closed.
+        assert_eq!(s.begin_event("k1", &payload, 4, 3).unwrap(), EventStart::GaveUp);
+        assert_eq!(s.begin_event("k1", &payload, 5, 3).unwrap(), EventStart::Done);
+    }
+
+    #[test]
+    fn an_event_marked_as_seen_is_never_handled() {
+        let (_dir, s) = store();
+        assert!(s.mark_event_seen("k1", &json!({}), 1).unwrap());
+        assert!(!s.mark_event_seen("k1", &json!({}), 2).unwrap());
+        assert_eq!(s.begin_event("k1", &json!({}), 3, 3).unwrap(), EventStart::Done);
+        // Marking does not close an event that is being handled.
+        assert_eq!(s.begin_event("k2", &json!({}), 4, 3).unwrap(), EventStart::New);
+        assert!(!s.mark_event_seen("k2", &json!({}), 5).unwrap());
+        assert_eq!(
+            s.begin_event("k2", &json!({}), 6, 3).unwrap(),
+            EventStart::Retry { attempt: 2 }
+        );
+    }
+
+    #[test]
+    fn a_database_from_an_older_version_gets_the_new_event_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_dir = dir.path().join("profiles/kim");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let old = Connection::open(profile_dir.join("agent.db")).unwrap();
+        old.execute_batch(
+            "CREATE TABLE events (dedupe_key TEXT PRIMARY KEY, received_at INTEGER NOT NULL, payload TEXT NOT NULL);
+             INSERT INTO events VALUES ('old', 1, '{}');",
+        )
+        .unwrap();
+        drop(old);
+        let s = ProfileStore::open(&profile_dir).unwrap();
+        // An event from the old database counts as handled.
+        assert_eq!(s.begin_event("old", &json!({}), 2, 3).unwrap(), EventStart::Done);
+        assert_eq!(s.begin_event("new", &json!({}), 3, 3).unwrap(), EventStart::New);
     }
 
     #[test]

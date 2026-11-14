@@ -4,10 +4,12 @@ pub mod http;
 
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{DenyReason, Policy};
+use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
+use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, ProfileInfo};
-use bunsin_core::tool::ToolSpec;
+use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -30,6 +32,13 @@ pub struct ProfileConfig {
     pub llm: Value,
     /// Connector settings by connector name. The backend that builds the connector reads them.
     pub connectors: BTreeMap<String, Value>,
+    /// What is removed from text before it is stored or sent to the LLM.
+    /// Settings from before this field existed get the default: every built-in kind on.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
+    /// The searches the server repeats to find new events.
+    #[serde(default)]
+    pub polls: Vec<PollConfig>,
 }
 
 impl ProfileConfig {
@@ -45,6 +54,8 @@ impl ProfileConfig {
             token_budget: 200_000,
             llm: Value::Null,
             connectors: BTreeMap::new(),
+            privacy: PrivacyConfig::default(),
+            polls: Vec::new(),
         }
     }
 }
@@ -100,6 +111,41 @@ pub struct ProfileSnapshot {
     pub inbox: Vec<InboxItem>,
     pub audit: Vec<AuditEntry>,
     pub artifacts: Vec<ArtifactMeta>,
+    /// One entry per poll in the settings, in the same order.
+    #[serde(default)]
+    pub polls: Vec<PollStatus>,
+}
+
+/// What the last run of one poll did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollStatus {
+    /// `<connector>/<tool>`.
+    pub tool: String,
+    /// Unix seconds. `None` if the poll has not run.
+    pub last_run_at: Option<i64>,
+    /// How many items the tool result held.
+    pub items: u32,
+    /// How many of them had an ID, text and an author. If `items` is above zero and this
+    /// is zero, the mapping in the settings does not fit the result.
+    pub usable: u32,
+    pub new_events: u32,
+    pub error: Option<String>,
+}
+
+/// The tools a connector lists now, compared with the approved ones.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolsReport {
+    pub tools: Vec<ToolSpec>,
+    /// Tools that are new, changed or gone since the owner approved the list.
+    pub diff: PinDiff,
+}
+
+/// What a poll would hand to the agent. Nothing is stored and no event is handled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollPreview {
+    pub items: u32,
+    /// The usable items after the privacy filter, without the skipped authors.
+    pub events: Vec<InboundEvent>,
 }
 
 /// One past case for replay evaluation.
@@ -152,4 +198,15 @@ pub trait EngineApi: Send + Sync {
     /// Returns the state the engine stored.
     fn set_kill_switch<'a>(&'a self, profile: &'a str, on: bool) -> BoxFuture<'a, ApiResult<bool>>;
     fn replay<'a>(&'a self, profile: &'a str, case: ReplayCase) -> BoxFuture<'a, ApiResult<ReplayResult>>;
+    /// Lists the tools of a connector as its server describes them now.
+    fn connector_tools<'a>(&'a self, profile: &'a str, connector: &'a str) -> BoxFuture<'a, ApiResult<ToolsReport>>;
+    /// Approves the tool list that was shown. `shown` holds the fingerprint of each tool.
+    /// The call fails if the connector lists something else by now.
+    fn approve_tools<'a>(&'a self, profile: &'a str, connector: &'a str, shown: PinSet)
+    -> BoxFuture<'a, ApiResult<()>>;
+    fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>>;
+    /// Replaces only the privacy part of the settings.
+    fn set_privacy<'a>(&'a self, profile: &'a str, privacy: PrivacyConfig) -> BoxFuture<'a, ApiResult<()>>;
+    /// Runs poll number `index` of the settings once, without handling its events.
+    fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
 }

@@ -7,7 +7,7 @@ use bunsin_api::{Edit, EngineApi, ProfileConfig};
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
-use bunsin_daemon::server::{ServeConfig, serve};
+use bunsin_daemon::server::{Poller, ServeConfig, serve};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::Engine;
 use bunsin_store::AppStore;
@@ -156,6 +156,28 @@ enum Command {
         #[arg(long, requires = "args")]
         reason: Option<String>,
     },
+    /// List the tools of a connector as its MCP server describes them now.
+    /// With --approve, approve exactly that list.
+    Tools {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        connector: String,
+        #[arg(long)]
+        approve: bool,
+        /// Print the full tool descriptions and input schemas as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one poll of the settings once and print the events it would hand to the agent.
+    /// Nothing is stored and no event is handled.
+    PollTest {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// The position of the poll in the `polls` list of the settings, from 0.
+        index: usize,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -209,9 +231,11 @@ async fn run_server(
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
     let engine = Engine::open(&local.data_dir, backends, Arc::new(now)).map_err(|e| e.to_string())?;
-    let running = serve(Arc::new(engine), ServeConfig { listen, tls })
+    let engine = Arc::new(engine);
+    let running = serve(engine.clone(), ServeConfig { listen, tls })
         .await
         .map_err(|e| e.to_string())?;
+    let poller = Poller::start(engine);
     // The handler is installed before the address is announced, so a stop request
     // that follows the announcement is never lost.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -225,6 +249,7 @@ async fn run_server(
         _ = terminate.recv() => {}
     }
     let _ = writeln!(stdout, "stopping: waiting for running requests");
+    poller.stop().await;
     running.shutdown().await.map_err(|e| e.to_string())
 }
 
@@ -293,6 +318,18 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::Status { remote, profile } => {
             let snapshot = connect(&remote)?.snapshot(&profile).await.map_err(text)?;
             println!("kill switch: {}", if snapshot.kill_switch { "on" } else { "off" });
+            for poll in &snapshot.polls {
+                let state = match (&poll.error, poll.last_run_at) {
+                    (Some(error), _) => format!("error: {error}"),
+                    (None, None) => "has not run yet".to_owned(),
+                    // Items came back, but none had an ID, text and an author.
+                    (None, Some(_)) if poll.items > 0 && poll.usable == 0 => {
+                        format!("{} item(s), none usable: check the mapping in the settings", poll.items)
+                    }
+                    (None, Some(_)) => format!("{} item(s), {} new event(s)", poll.items, poll.new_events),
+                };
+                println!("poll {}: {state}", poll.tool);
+            }
             println!("inbox: {} item(s)", snapshot.inbox.len());
             for item in &snapshot.inbox {
                 let what = match &item.body {
@@ -355,6 +392,52 @@ async fn run(cli: Cli) -> Result<(), String> {
                         .map_err(text)?
                 )
             );
+        }
+        Command::Tools {
+            remote,
+            profile,
+            connector,
+            approve,
+            json: as_json,
+        } => {
+            let engine = connect(&remote)?;
+            let report = engine.connector_tools(&profile, &connector).await.map_err(text)?;
+            if as_json {
+                println!("{}", json(&report.tools));
+            } else {
+                for tool in &report.tools {
+                    let state = if report.diff.added.contains(&tool.name) {
+                        "new"
+                    } else if report.diff.changed.contains(&tool.name) {
+                        "changed"
+                    } else {
+                        "approved"
+                    };
+                    let summary = tool.description.lines().next().unwrap_or_default();
+                    println!("{state}\t{connector}/{}\t{summary}", tool.name);
+                }
+                for name in &report.diff.removed {
+                    println!("gone\t{connector}/{name}");
+                }
+            }
+            if approve {
+                let shown = bunsin_core::tool::pin(&report.tools);
+                engine.approve_tools(&profile, &connector, shown).await.map_err(text)?;
+                eprintln!(
+                    "approved {} tool(s) of {connector}. A tool also needs a rule in `policy.rules` \
+                     before the agent can use it.",
+                    report.tools.len()
+                );
+            }
+        }
+        Command::PollTest { remote, profile, index } => {
+            let preview = connect(&remote)?.test_poll(&profile, index).await.map_err(text)?;
+            println!(
+                "{} item(s) in the result, {} usable event(s)",
+                preview.items,
+                preview.events.len()
+            );
+            println!("{}", json(&preview.events));
         }
         Command::Reject {
             remote,
