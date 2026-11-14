@@ -222,15 +222,18 @@ impl Render for Shell {
                     .p_2()
                     .border_1()
                     .child(labelled(format!("inbox-{id}"), inbox_title(item)))
-                    // A long text scrolls in its own box, so the buttons below stay close.
-                    .child(
-                        div()
+                    .child(match item.body {
+                        // A long page scrolls in its own box, so its buttons stay close.
+                        InboxBody::WikiChange { .. } => div()
                             .id(SharedString::from(format!("detail-box-{id}")))
                             .test_support()
                             .max_h(px(220.))
                             .overflow_y_scroll()
-                            .child(labelled(format!("detail-{id}"), inbox_detail(item))),
-                    )
+                            .child(labelled(format!("detail-{id}"), inbox_detail(item)))
+                            .into_any_element(),
+                        // An action shows every argument at full height. None is hidden in a box.
+                        _ => labelled(format!("detail-{id}"), inbox_detail(item)).into_any_element(),
+                    })
                     .child(div().child(SharedString::from(format!("Why: {}", item.rationale))))
                     .children(inbox_basis(item).map(|basis| labelled(format!("basis-{id}"), basis)));
                 let mut buttons = div().flex().gap_2();

@@ -682,9 +682,12 @@ fn a_note_is_approved_in_the_inbox_and_stored_on_the_server(cx: &mut TestAppCont
         let detail = label(window, "detail-2");
         assert!(detail.contains("LAST-LINE-OF-THE-PAGE"), "{detail}");
         assert!(detail.contains("- slack/search:"), "{detail}");
-        // The long page scrolls in its own box. Its row stays shorter than the inbox.
+        // The long page scrolls in its own box. The arguments of an action have no such box.
         let page = window.find("detail-box-2").bounds().size.height;
         assert!(page <= px(220.), "{page:?}");
+        assert!(window.try_find("detail-box-3").is_none());
+        assert_eq!(label(window, "approve-2"), "Approve and keep");
+        assert_eq!(label(window, "approve-3"), "Approve and run");
         window.scroll("inbox-2", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
     });
     on_screen(cx, window, |window, cx| {
