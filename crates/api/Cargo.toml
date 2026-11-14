@@ -1,0 +1,11 @@
+[package]
+name = "bunsin-api"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bunsin-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

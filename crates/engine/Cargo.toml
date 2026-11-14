@@ -1,0 +1,17 @@
+[package]
+name = "bunsin-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bunsin-api.workspace = true
+bunsin-core.workspace = true
+bunsin-store.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bunsin-testkit.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

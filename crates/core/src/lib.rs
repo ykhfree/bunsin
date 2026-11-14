@@ -8,6 +8,7 @@ pub mod marker;
 pub mod policy;
 pub mod ports;
 pub mod proposal;
+pub mod records;
 pub mod tool;
 
 use sha2::{Digest, Sha256};
