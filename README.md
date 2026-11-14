@@ -23,8 +23,9 @@ Bunsin is in early development. Read this list before you use it.
   against test servers. There is no webhook intake.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
   tools with the class `read` (for example a search) up to five times and use the
-  results. There is no index of your Confluence or Jira content and no ranking of what
-  to read; the quality depends on the search tools of your MCP servers.
+  results. Facts it keeps go into its notes, which you approve page by page (see
+  [Notes](#notes)). Nothing is loaded in advance: the notes fill only with what the
+  agent read while it handled events, and the search quality depends on your MCP servers.
 - **The privacy filter works on patterns.** It finds email addresses, phone numbers and
   the other listed forms. It does not find names or postal addresses.
 - **There is no setup wizard.** The window and the command line set the connections and
@@ -278,6 +279,34 @@ file or log; the audit log holds counts only.
   The server refuses a pattern that does not compile or that matches empty text.
 - The desktop window has a form for these settings.
 - Your own `principles` and your own edits are not filtered.
+
+### Notes
+
+The agent keeps durable facts in notes: pages with a title, a one-line summary, a body
+and the sources of its facts. It works like a small wiki that the agent writes.
+
+- When the agent has read something with a tool and wants to keep a fact (a schedule, an
+  owner, a decision), it proposes a page. The proposal appears in the inbox as
+  `note <page> (new page)` or `(change)`, with the new text, its sources and the text it
+  replaces. Nothing is kept until you approve it.
+- In later events the agent sees the list of pages and reads the ones it needs before it
+  searches again.
+- A page is reference material. Whatever a page says, the permission table decides what
+  the agent may do.
+- The agent proposes a page only from something it read in that event, changes an
+  existing page only after it read that page, and cannot delete pages.
+- You can write and delete pages yourself:
+
+```sh
+bunsind wiki-list kim
+bunsind wiki-show kim deploy-schedule
+bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
+bunsind wiki-delete kim team
+bunsind wiki-export kim ./notes        # index.md and pages/*.md
+```
+
+Not built yet: a periodic check for stale or conflicting pages, applying changes without
+approval, loading a Confluence space in advance, and a page browser in the window.
 
 ### Work with the agent
 
