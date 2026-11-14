@@ -64,7 +64,8 @@ pub async fn rig() -> Rig {
     }
     let proposal = json!({
         "kind": "tool_call", "rationale": "Lee asked for the time", "summary": null,
-        "tool": "slack/post", "args": {"channel": "C1", "text": "We deploy at 3 pm."}
+        "tool": "slack/post",
+        "args_json": json!({"channel": "C1", "text": "We deploy at 3 pm."}).to_string()
     });
     llm.reply(&proposal.to_string(), 10);
     let event = InboundEvent {

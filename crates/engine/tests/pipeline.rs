@@ -129,7 +129,7 @@ fn event(id: &str, text: &str) -> InboundEvent {
 }
 
 fn call(tool: &str, args: Value) -> String {
-    json!({"kind": "tool_call", "rationale": "the thread asks for it", "summary": null, "tool": tool, "args": args})
+    json!({"kind": "tool_call", "rationale": "the thread asks for it", "summary": null, "tool": tool, "args_json": args.to_string()})
         .to_string()
 }
 
@@ -539,7 +539,7 @@ async fn a_lowered_tier_blocks_an_item_that_was_waiting() {
 #[tokio::test]
 async fn an_escalation_can_be_dismissed_but_not_approved() {
     let rig = rig().await;
-    let reply = json!({"kind": "escalate", "rationale": "budget question", "summary": "Lee asks for approval of a purchase.", "tool": null, "args": null});
+    let reply = json!({"kind": "escalate", "rationale": "budget question", "summary": "Lee asks for approval of a purchase.", "tool": null, "args_json": null});
     rig.llm.reply(&reply.to_string(), 10);
     let Outcome::Escalated { inbox_id } = rig
         .engine

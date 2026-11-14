@@ -45,6 +45,8 @@ pub enum ProposalError {
     },
     #[error("`tool` must be `<connector>/<tool>`")]
     BadToolId,
+    #[error("`args_json` is not a JSON object: {0}")]
+    BadArgs(String),
 }
 
 /// The flat object the LLM returns. Every field is present; unused ones are null.
@@ -55,7 +57,9 @@ struct Raw {
     rationale: String,
     summary: Option<String>,
     tool: Option<String>,
-    args: Option<Map<String, Value>>,
+    /// The tool arguments: a JSON object encoded as a string.
+    /// A free-form object cannot be part of a strict reply schema, so it travels as text.
+    args_json: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -71,13 +75,16 @@ pub fn proposal_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "rationale", "summary", "tool", "args"],
+        "required": ["kind", "rationale", "summary", "tool", "args_json"],
         "properties": {
             "kind": {"type": "string", "enum": ["ignore", "escalate", "tool_call"]},
             "rationale": {"type": "string"},
             "summary": {"type": ["string", "null"]},
             "tool": {"type": ["string", "null"]},
-            "args": {"type": ["object", "null"]}
+            "args_json": {
+                "type": ["string", "null"],
+                "description": "The tool arguments: one JSON object, encoded as a string."
+            }
         }
     })
 }
@@ -100,7 +107,7 @@ pub fn parse_proposal(reply: &str) -> Result<Proposal, ProposalError> {
     match raw.kind {
         Kind::Ignore => {
             unexpected("ignore", "tool", raw.tool.is_some())?;
-            unexpected("ignore", "args", raw.args.is_some())?;
+            unexpected("ignore", "args_json", raw.args_json.is_some())?;
             unexpected("ignore", "summary", raw.summary.is_some())?;
             Ok(Proposal::Ignore {
                 rationale: raw.rationale,
@@ -108,7 +115,7 @@ pub fn parse_proposal(reply: &str) -> Result<Proposal, ProposalError> {
         }
         Kind::Escalate => {
             unexpected("escalate", "tool", raw.tool.is_some())?;
-            unexpected("escalate", "args", raw.args.is_some())?;
+            unexpected("escalate", "args_json", raw.args_json.is_some())?;
             if !filled(&raw.summary) {
                 return Err(ProposalError::MissingField {
                     kind: "escalate",
@@ -126,10 +133,12 @@ pub fn parse_proposal(reply: &str) -> Result<Proposal, ProposalError> {
                 kind: "tool_call",
                 field: "tool",
             })?;
-            let args = raw.args.ok_or(ProposalError::MissingField {
+            let args = raw.args_json.ok_or(ProposalError::MissingField {
                 kind: "tool_call",
-                field: "args",
+                field: "args_json",
             })?;
+            let args: Map<String, Value> =
+                serde_json::from_str(&args).map_err(|e| ProposalError::BadArgs(e.to_string()))?;
             split_tool_id(&tool).ok_or(ProposalError::BadToolId)?;
             Ok(Proposal::ToolCall {
                 rationale: raw.rationale,
@@ -151,7 +160,14 @@ mod tests {
     use super::*;
 
     fn reply(kind: &str, summary: Value, tool: Value, args: Value) -> String {
-        json!({"kind": kind, "rationale": "because", "summary": summary, "tool": tool, "args": args}).to_string()
+        // `args` is a JSON value or null. It is sent as a string, like the LLM sends it.
+        let args_json = if args.is_null() {
+            Value::Null
+        } else {
+            Value::String(args.to_string())
+        };
+        json!({"kind": kind, "rationale": "because", "summary": summary, "tool": tool, "args_json": args_json})
+            .to_string()
     }
 
     #[test]
@@ -198,20 +214,29 @@ mod tests {
             (reply("launch", n.clone(), n.clone(), n.clone()), |e| matches!(e, ProposalError::Json(_))),
             // An extra field is rejected, not ignored.
             (
-                json!({"kind": "ignore", "rationale": "r", "summary": null, "tool": null, "args": null, "tier": "autonomous"})
+                json!({"kind": "ignore", "rationale": "r", "summary": null, "tool": null, "args_json": null, "tier": "autonomous"})
                     .to_string(),
                 |e| matches!(e, ProposalError::Json(_)),
             ),
             (
-                json!({"kind": "ignore", "rationale": "  ", "summary": null, "tool": null, "args": null}).to_string(),
+                json!({"kind": "ignore", "rationale": "  ", "summary": null, "tool": null, "args_json": null}).to_string(),
                 |e| *e == ProposalError::EmptyRationale,
             ),
             (reply("tool_call", n.clone(), n.clone(), json!({})), |e| {
                 *e == ProposalError::MissingField { kind: "tool_call", field: "tool" }
             }),
             (reply("tool_call", n.clone(), json!("slack/post"), n.clone()), |e| {
-                *e == ProposalError::MissingField { kind: "tool_call", field: "args" }
+                *e == ProposalError::MissingField { kind: "tool_call", field: "args_json" }
             }),
+            // The arguments must be an object, not another JSON value and not prose.
+            (reply("tool_call", n.clone(), json!("slack/post"), json!(["a"])), |e| {
+                matches!(e, ProposalError::BadArgs(_))
+            }),
+            (
+                json!({"kind": "tool_call", "rationale": "r", "summary": null, "tool": "slack/post", "args_json": "channel C1"})
+                    .to_string(),
+                |e| matches!(e, ProposalError::BadArgs(_)),
+            ),
             (reply("tool_call", n.clone(), json!("post"), json!({})), |e| *e == ProposalError::BadToolId),
             (reply("tool_call", n.clone(), json!("/post"), json!({})), |e| *e == ProposalError::BadToolId),
             // "ignore" that still carries a tool call is contradictory.

@@ -15,6 +15,7 @@ bunsin-connectors = { path = "crates/connectors" }
 bunsin-coding = { path = "crates/coding" }
 bunsin-engine = { path = "crates/engine" }
 bunsin-api = { path = "crates/api" }
+bunsin-daemon = { path = "crates/daemon" }
 bunsin-testkit = { path = "crates/testkit" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
