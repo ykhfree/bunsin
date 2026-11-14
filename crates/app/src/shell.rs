@@ -71,7 +71,11 @@ pub fn inbox_detail(item: &InboxItem) -> String {
     }
 }
 
-fn labelled(id: impl Into<SharedString>, text: impl Into<SharedString>) -> impl IntoElement {
+/// Text that tests can read through its accessibility label. Never pass a secret.
+pub(crate) fn labelled(
+    id: impl Into<SharedString>,
+    text: impl Into<SharedString>,
+) -> impl IntoElement {
     let text = text.into();
     div()
         .id(id.into())

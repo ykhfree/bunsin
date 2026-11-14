@@ -83,5 +83,8 @@ approved tools and permission rules. Example of the `llm` and `connectors` setti
 }
 ```
 
+The desktop window asks for the server address and the access token on first start.
+It keeps the token in the macOS Keychain.
+
 `wire` is `anthropic-messages` or `openai-chat`. For a server with a private CA,
 set `BUNSIN_CA_CERT` to the CA certificate file.

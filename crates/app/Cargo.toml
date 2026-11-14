@@ -8,12 +8,17 @@ publish.workspace = true
 bunsin-api.workspace = true
 bunsin-core.workspace = true
 bunsin-client.workspace = true
+dirs = "6"
 # GPUI comes from gpui-kit, which bundles a gpui-pre snapshot. The version is exact on purpose.
 gpui-kit = "=0.9.1"
+# The default `v1` feature keeps secrets in the macOS Keychain.
+keyring = "4"
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+bunsin-daemon.workspace = true
 bunsin-engine.workspace = true
 bunsin-testkit.workspace = true
 gpui-kit = { version = "=0.9.1", features = ["test-support"] }
