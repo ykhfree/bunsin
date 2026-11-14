@@ -3,7 +3,7 @@
 use bunsin_api::{ApiError, Edit, EngineApi, Outcome, ProfileConfig, ReplayCase};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
-use bunsin_core::policy::{DenyReason, Tier, ToolClass, ToolRule};
+use bunsin_core::policy::{DenyReason, OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::records::InboxBody;
 use bunsin_engine::{Backends, Engine, OpenError, Runtime};
@@ -75,11 +75,11 @@ fn config() -> ProfileConfig {
         .insert("slack/search".into(), ToolRule::read());
     config.policy.rules.insert(
         "slack/post".into(),
-        ToolRule::write(ToolClass::Write, Some("text")),
+        ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
     );
     config.policy.rules.insert(
         "slack/delete_message".into(),
-        ToolRule::write(ToolClass::Delete, None),
+        ToolRule::write(ToolClass::Delete, OutgoingText::None),
     );
     config
 }
@@ -765,4 +765,23 @@ async fn unknown_profiles_and_items_are_reported() {
         rig.engine.create_profile("../x", config()).await,
         Err(ApiError::Invalid(_))
     ));
+}
+
+#[tokio::test]
+async fn the_llm_sees_the_approved_argument_schema_of_each_allowed_tool() {
+    let mut config = config();
+    let schema = json!({"type": "object", "properties": {"channel": {"type": "string"}, "text": {"type": "string"}}});
+    config.approved_tools.get_mut("slack").unwrap()[1].input_schema = schema;
+    // A tool the user approved but gave no rule is not offered.
+    config.policy.rules.remove("slack/delete_message");
+    let rig = rig_with(config).await;
+    rig.llm.reply(&post("hello"), 10);
+    rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
+    let prompt = &rig.llm.requests()[0].messages[0].content;
+    assert!(prompt.contains("slack/post: Post a message"), "{prompt}");
+    assert!(
+        prompt.contains("\"channel\"") && prompt.contains("\"text\""),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("delete_message"), "{prompt}");
 }

@@ -68,6 +68,7 @@
 - `bunsin-llm`의 `LlmClient` trait이 프로필마다 `Arc<dyn LlmClient>`로 쓰인다.
 - wire 형식은 프로필 설정값이다: `openai-chat`, `anthropic-messages`. `openai-responses`는 아직 없다.
 - 행동 제안은 구조화 출력으로 받는다. 도구 호출을 강제할 수 없는 모델이 있기 때문이다.
+- LLM은 허용된 도구마다 ID, 사용자가 승인한 설명, 인자 스키마를 인용 데이터로 받는다.
 - 제안의 도구 인자는 `args_json` 필드에 JSON 문자열로 담는다. 자유 형식 object는 엄격한 응답 스키마에 넣을 수 없기 때문이다.
 - LLM client는 redirect를 따르지 않는다. redirect된 요청에 인증 header가 실릴 수 있기 때문이다.
 - 실제 LLM endpoint로는 아직 호출해 보지 않았다. 테스트는 로컬 stub 서버를 쓴다.
@@ -91,7 +92,15 @@
 - 인바운드 요청은 신뢰하지 않는 데이터로 수신 단계에 들어간다. 승인함을 우회하지 않는다.
 - 인증은 프로필별 호출자 bearer token이다. token은 해시로 저장한다. OAuth는 다음 단계이다.
 
-## 8. MCP 커넥터
+## 8. AI 표시
+
+- 권한 표의 모든 규칙은 `outgoing_text`를 반드시 가진다. 값은 `"none"`(다른 사람에게 글을 보내지 않음) 또는 `{"arg": "<인자 이름>"}`이다.
+  이 필드가 없거나 이름이 틀린 규칙은 설정을 읽을 때 거부된다.
+- 엔진은 그 인자에 AI 표시를 붙인다. 인자가 없거나 문자열이 아니면 호출을 만들지 않는다.
+- 한계: 표시는 문자열 인자 하나만 다룬다. `text`와 `blocks`를 함께 받는 도구에서는 `blocks`의 글에 표시가 붙지 않는다.
+- 한계: 규칙에 `"none"`을 잘못 적으면 표시 없이 나간다. 이 선택은 사용자의 책임이다.
+
+## 9. MCP 커넥터
 
 - `McpConnector`는 공식 Rust SDK `rmcp =3.10.0`의 client이다. transport는 streamable HTTP와 stdio 자식 프로세스이다.
 - stdio 명령은 절대 경로만 받는다.
@@ -101,7 +110,7 @@
 - OAuth는 아직 없다. HTTP transport는 bearer token만 보낸다.
 - 실제 Slack, Jira, Confluence MCP 서버로는 아직 연결해 보지 않았다. 테스트는 로컬 rmcp 서버를 쓴다.
 
-## 9. 구현 상태 (PLAN 6절의 단계 기준)
+## 10. 구현 상태 (PLAN 6절의 단계 기준)
 
 | 항목 | 상태 |
 |---|---|
@@ -119,7 +128,7 @@
 | ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
 | 승인 후 실행 전에 중단된 항목의 재개 | 없음. 항목은 `approved` 또는 `executing` 상태로 남고 다시 실행되지 않는다. |
 
-## 10. 미해결
+## 11. 미해결
 
 - 사용자의 LLM endpoint가 쓰는 wire 형식.
 - 코딩 백엔드의 편집 허용 설정(예: Claude Code의 permission mode, Codex의 sandbox 설정)을 opt-in으로 둘지.

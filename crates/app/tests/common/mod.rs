@@ -2,7 +2,7 @@
 
 use bunsin_api::{EngineApi, ProfileConfig};
 use bunsin_core::event::InboundEvent;
-use bunsin_core::policy::{ToolClass, ToolRule};
+use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_engine::{Backends, Engine, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
@@ -55,7 +55,7 @@ pub async fn rig() -> Rig {
         config.approved_tools.insert("slack".into(), tools.clone());
         config.policy.rules.insert(
             "slack/post".into(),
-            ToolRule::write(ToolClass::Write, Some("text")),
+            ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
         );
         engine
             .create_profile(&owner.to_lowercase(), config)

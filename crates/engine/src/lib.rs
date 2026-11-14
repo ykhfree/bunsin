@@ -201,6 +201,7 @@ impl Engine {
                 Some(ToolHint {
                     tool_id: tool_id.clone(),
                     description: spec.description.clone(),
+                    input_schema: spec.input_schema.clone(),
                 })
             })
             .collect()
@@ -406,7 +407,7 @@ impl Engine {
             .policy
             .rules
             .get(&tool_id)
-            .and_then(|rule| rule.text_arg.as_deref());
+            .and_then(|rule| rule.text_arg());
         if let Some(text_arg) = text_arg
             && let Err(error) = mark_args(&mut args, text_arg, &config.ai_marker)
         {
@@ -531,7 +532,7 @@ impl Engine {
             .policy
             .rules
             .get(&tool_id)
-            .and_then(|rule| rule.text_arg.as_deref());
+            .and_then(|rule| rule.text_arg());
 
         if let Some(Edit {
             args: mut edited,

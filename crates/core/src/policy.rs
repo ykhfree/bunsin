@@ -23,12 +23,24 @@ pub enum ToolClass {
     Delete,
 }
 
+/// Where a tool carries text that other people will read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutgoingText {
+    /// The tool sends no text to other people.
+    None,
+    /// The named string argument holds the text. The AI marker is added to it.
+    Arg(String),
+}
+
+/// One row of the permission table. Every field is required, so a rule cannot
+/// leave out by accident where the AI marker goes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolRule {
     pub class: ToolClass,
     pub tier: Tier,
-    /// The argument that holds text other people will read. The AI marker goes there.
-    pub text_arg: Option<String>,
+    pub outgoing_text: OutgoingText,
 }
 
 impl ToolRule {
@@ -36,16 +48,24 @@ impl ToolRule {
         Self {
             class: ToolClass::Read,
             tier: Tier::Autonomous,
-            text_arg: None,
+            outgoing_text: OutgoingText::None,
         }
     }
 
     /// A new write or delete rule starts at "run after approval".
-    pub fn write(class: ToolClass, text_arg: Option<&str>) -> Self {
+    pub fn write(class: ToolClass, outgoing_text: OutgoingText) -> Self {
         Self {
             class,
             tier: Tier::Approve,
-            text_arg: text_arg.map(str::to_owned),
+            outgoing_text,
+        }
+    }
+
+    /// The argument that gets the AI marker, if the tool sends text.
+    pub fn text_arg(&self) -> Option<&str> {
+        match &self.outgoing_text {
+            OutgoingText::None => None,
+            OutgoingText::Arg(name) => Some(name),
         }
     }
 }
@@ -120,7 +140,7 @@ mod tests {
                         ToolRule {
                             class: *class,
                             tier: *tier,
-                            text_arg: None,
+                            outgoing_text: OutgoingText::None,
                         },
                     )
                 })
@@ -208,8 +228,28 @@ mod tests {
         let mut p = Policy::default();
         p.rules.insert(
             "slack/post".into(),
-            ToolRule::write(ToolClass::Write, Some("text")),
+            ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
         );
         assert_eq!(p.decide("slack/post", true, false), Decision::NeedsApproval);
+    }
+
+    #[test]
+    fn a_rule_must_say_where_the_outgoing_text_is() {
+        let parse = |text: &str| serde_json::from_str::<ToolRule>(text);
+        let rule =
+            parse(r#"{"class": "write", "tier": "approve", "outgoing_text": {"arg": "text"}}"#)
+                .unwrap();
+        assert_eq!(rule.text_arg(), Some("text"));
+        let silent =
+            parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none"}"#).unwrap();
+        assert_eq!(silent.text_arg(), None);
+        // Leaving the field out is an error, not "no marker".
+        assert!(parse(r#"{"class": "write", "tier": "approve"}"#).is_err());
+        // A misspelled field is an error too.
+        assert!(parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none", "text_args": "text"}"#).is_err());
+        assert!(
+            parse(r#"{"class": "write", "tier": "approve", "outgoing_txt": {"arg": "text"}}"#)
+                .is_err()
+        );
     }
 }
