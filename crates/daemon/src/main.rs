@@ -7,8 +7,8 @@ use bunsin_api::{Edit, EngineApi, ProfileConfig};
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
-use bunsin_daemon::RealBackends;
 use bunsin_daemon::server::{ServeConfig, serve};
+use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::Engine;
 use bunsin_store::AppStore;
 use clap::{Args, Parser, Subcommand};
@@ -60,6 +60,11 @@ enum Command {
         /// Let profile settings name commands that run on this machine as MCP servers.
         #[arg(long)]
         allow_stdio_connectors: bool,
+        /// An LLM or MCP host that profile settings may name. Repeat it for more hosts.
+        /// With this option, only the listed hosts are allowed. Without it, any public
+        /// https:// address is allowed and addresses inside this network are refused.
+        #[arg(long = "allow-upstream-host")]
+        allow_upstream_hosts: Vec<String>,
     },
     /// Operator: create a profile that can do nothing until it gets settings.
     ProfileAdd {
@@ -202,11 +207,11 @@ async fn run_server(
     local: Local,
     listen: SocketAddr,
     tls: Option<(PathBuf, PathBuf)>,
-    allow_stdio: bool,
+    backends: RealBackends,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&local.data_dir)
         .map_err(|e| format!("cannot create the data directory: {e}"))?;
-    let backends = Arc::new(RealBackends::from_env(allow_stdio));
+    let backends = Arc::new(backends);
     let engine =
         Engine::open(&local.data_dir, backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let running = serve(Arc::new(engine), ServeConfig { listen, tls })
@@ -237,8 +242,15 @@ async fn run(cli: Cli) -> Result<(), String> {
             tls_cert,
             tls_key,
             allow_stdio_connectors,
+            allow_upstream_hosts,
         } => {
-            run_server(local, listen, tls_cert.zip(tls_key), allow_stdio_connectors).await?;
+            let allowed_hosts = allow_upstream_hosts
+                .iter()
+                .map(|host| host.to_ascii_lowercase())
+                .collect();
+            let backends =
+                RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
+            run_server(local, listen, tls_cert.zip(tls_key), backends).await?;
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;

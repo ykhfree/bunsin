@@ -6,8 +6,8 @@ use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
-use bunsin_daemon::RealBackends;
 use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve};
+use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Backends, Engine, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
 use serde_json::json;
@@ -86,7 +86,7 @@ async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig 
         "slack",
         vec![tool("post", "Post a message")],
     ));
-    let real = RealBackends::new(Arc::new(|_| None), false);
+    let real = RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default());
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
         slack: slack.clone(),
@@ -377,7 +377,25 @@ async fn settings_that_break_isolation_are_refused_and_not_stored() {
     // The profile's own secret key is accepted.
     let mut own = before.clone();
     own.llm = json!({"wire": "openai-chat", "base_url": "https://llm.example", "model": "m", "token_secret": "LLM"});
-    kim.set_profile_config("kim", own).await.unwrap();
+    kim.set_profile_config("kim", own.clone()).await.unwrap();
+
+    // An address inside the server's own network is refused, for the LLM and for a connector.
+    let mut internal = own.clone();
+    internal.llm["base_url"] = json!("https://169.254.169.254/latest");
+    assert!(matches!(
+        kim.set_profile_config("kim", internal).await,
+        Err(ApiError::Invalid(_))
+    ));
+    let mut internal = own.clone();
+    internal.connectors.insert(
+        "jira".into(),
+        json!({"mcp": {"transport": "http", "url": "http://localhost:9000"}}),
+    );
+    assert!(matches!(
+        kim.set_profile_config("kim", internal).await,
+        Err(ApiError::Invalid(_))
+    ));
+    assert_eq!(kim.profile_config("kim").await.unwrap(), own);
 }
 
 #[tokio::test]
@@ -397,7 +415,11 @@ async fn a_stopped_server_is_reported_as_unreachable() {
 #[tokio::test]
 async fn a_public_address_needs_tls() {
     let dir = tempfile::tempdir().unwrap();
-    let backends = Arc::new(RealBackends::new(Arc::new(|_| None), false));
+    let backends = Arc::new(RealBackends::new(
+        Arc::new(|_| None),
+        false,
+        UpstreamPolicy::default(),
+    ));
     let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1)).unwrap());
     let config = ServeConfig {
         listen: "0.0.0.0:0".parse().unwrap(),

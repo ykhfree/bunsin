@@ -55,7 +55,15 @@ impl McpConnector {
                     // rmcp sends this value as `Authorization: Bearer <token>`.
                     transport = transport.auth_header(token);
                 }
-                ().serve(StreamableHttpClientTransport::from_config(transport))
+                // A redirect could carry the bearer token to another host, and could reach a host
+                // that the server's address rules refused. The client therefore follows none.
+                let http = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| {
+                        ConnectorError::Transport(format!("the HTTP client cannot start: {e}"))
+                    })?;
+                ().serve(StreamableHttpClientTransport::with_client(http, transport))
                     .await
             }
             McpConfig::Stdio { command, args, env } => {

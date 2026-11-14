@@ -328,3 +328,53 @@ fn config_round_trips_through_json_and_has_no_token_field() {
     let with_token = json!({"transport": "http", "url": "https://mcp.example/mcp", "token": "x"});
     assert!(serde_json::from_value::<McpConfig>(with_token).is_err());
 }
+
+#[tokio::test]
+async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The target is a working MCP server. It counts the requests that carry a bearer token.
+    let with_token = Arc::new(AtomicUsize::new(0));
+    let service = StreamableHttpService::new(
+        || Ok(TestServer::default()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let counter = with_token.clone();
+    let target = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(from_fn(move |request: Request, next: Next| {
+            if request.headers().contains_key(AUTHORIZATION) {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            next.run(request)
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, target).await });
+
+    // The configured server answers every request with a redirect to the target.
+    let location = target_url.clone();
+    let redirector = axum::Router::new().fallback(move || {
+        let location = location.clone();
+        async move { (StatusCode::TEMPORARY_REDIRECT, [("location", location)]).into_response() }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, redirector).await });
+
+    // The target itself works, so only the refusal to follow the redirect can fail the connect.
+    // This direct connection sends no token, so it does not count.
+    let direct = McpConnector::connect("slack", McpConfig::Http { url: target_url }, None).await;
+    assert!(direct.is_ok());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        McpConnector::connect("slack", McpConfig::Http { url }, Some(TOKEN)),
+    )
+    .await
+    .expect("connect returns");
+    let error = connect_error(result);
+    assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
+    assert_eq!(with_token.load(Ordering::SeqCst), 0);
+}
