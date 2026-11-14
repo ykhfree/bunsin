@@ -90,10 +90,31 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     }
 }
 
-/// Starts the task that serves the window. It ends when either channel closes.
+/// Reloads the state without a command, to show what happened on the server meanwhile.
+/// The failure of the last command stays on screen. A connection failure does not,
+/// once the server answers again.
+pub async fn refresh(api: &dyn EngineApi, state: &mut UiState) {
+    let command_error = if state.connected {
+        state.error.take()
+    } else {
+        None
+    };
+    state.error = None;
+    reload(api, state).await;
+    if state.error.is_none() {
+        state.error = command_error;
+    }
+}
+
+/// How often the window reloads by itself.
+pub const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Starts the task that serves the window. It reloads the state after each command and
+/// every `refresh_every`. It ends when either channel closes.
 pub fn spawn_bridge(
     runtime: &tokio::runtime::Handle,
     api: Arc<dyn EngineApi>,
+    refresh_every: std::time::Duration,
 ) -> (
     mpsc::UnboundedSender<UiCommand>,
     mpsc::UnboundedReceiver<UiState>,
@@ -102,8 +123,25 @@ pub fn spawn_bridge(
     let (state_tx, state_rx) = mpsc::unbounded_channel();
     runtime.spawn(async move {
         let mut state = UiState::default();
-        while let Some(command) = command_rx.recv().await {
-            apply(&*api, &mut state, command).await;
+        // The timer runs on tokio. A tokio timer must not be polled on the GPUI executor.
+        let mut timer = tokio::time::interval(refresh_every);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let before = state.clone();
+            tokio::select! {
+                command = command_rx.recv() => match command {
+                    Some(command) => apply(&*api, &mut state, command).await,
+                    // The window closed or disconnected.
+                    None => break,
+                },
+                _ = timer.tick() => {
+                    refresh(&*api, &mut state).await;
+                    // An unchanged state is not sent, so the window does not redraw for nothing.
+                    if state == before {
+                        continue;
+                    }
+                }
+            }
             if state_tx.send(state.clone()).is_err() {
                 break;
             }

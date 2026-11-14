@@ -43,7 +43,8 @@ fn the_window_shows_engine_state_and_sends_commands(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (commands, states) = spawn_bridge(rt.handle(), rig.engine.clone());
+    let (commands, states) =
+        spawn_bridge(rt.handle(), rig.engine.clone(), Duration::from_millis(50));
 
     cx.update(gpui_kit::init);
     let (window, shell) = cx.update(|cx| {
@@ -138,4 +139,34 @@ fn the_window_shows_engine_state_and_sends_commands(cx: &mut TestAppContext) {
         assert!(window.try_find("inbox-1").is_none());
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_window_shows_a_new_item_without_a_click(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (commands, states) =
+        spawn_bridge(rt.handle(), rig.engine.clone(), Duration::from_millis(50));
+    cx.update(gpui_kit::init);
+    let (_window, shell) = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+            cx.new(|cx| Shell::new(states, commands, cx))
+        })
+        .unwrap()
+    });
+    wait_until(cx, &shell, "the first snapshot", |s| {
+        s.state.snapshot.is_some()
+    });
+    let inbox = |s: &Shell| {
+        s.state
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.inbox.len())
+    };
+    assert_eq!(shell.read_with(cx, |s, _| inbox(s)), 1);
+
+    // An event reaches the server while the window is only open.
+    rt.block_on(common::ingest_second_event(&rig));
+    wait_until(cx, &shell, "the new item", |s| inbox(s) == 2);
 }

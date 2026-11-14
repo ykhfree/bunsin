@@ -19,7 +19,9 @@
 - data dir 하나에 엔진 하나만 뜬다. `engine.lock` 파일의 배타 잠금이 이중 폴링과 이중 실행을 막는다.
 - 서버 운영자의 명령(`profile-add`, `token-add`, `token-list`, `token-revoke`)은 저장소 파일을 직접 다룬다.
   엔진 잠금이 필요 없으므로 서버가 도는 동안에도 실행된다. 두 프로세스가 같은 SQLite 파일을 쓰므로 busy timeout을 둔다.
-- 서버는 SIGTERM이나 Ctrl-C를 받으면 새 요청을 받지 않고, 실행 중인 요청이 끝난 뒤에 종료한다.
+- 서버는 SIGTERM이나 Ctrl-C를 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다린 뒤에 종료한다.
+  그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다.
+  서비스 관리자의 종료 대기 시간(systemd의 기본값은 90초)이 더 짧으면 그 시간에 끊긴다.
 - 공개 리스너(ARD, 인바운드 MCP)는 아직 없다. 만들 때 제어 API와 분리한다.
 - 기각한 안: GPUI 바이너리 하나에 엔진을 넣는 구조. 창을 닫으면 agent가 멈추고, Linux 서버에 디스플레이가 필요하다.
 
@@ -62,14 +64,17 @@
 - token 입력칸은 가려져 있고, 값을 보여 주는 토글이 없다.
 - Disconnect는 Keychain의 token을 지우고 접속 화면으로 돌아간다.
 - 개발할 때는 환경 변수 `BUNSIN_SERVER`와 `BUNSIN_TOKEN`이 저장된 접속보다 우선한다.
-- 한계: 저장된 접속으로 시작했는데 서버가 응답하지 않으면, 사용자가 token을 다시 입력해야 한다.
+- 저장된 접속으로 시작했는데 서버가 응답하지 않으면 app은 접속 화면에 오류를 보여 준다. 저장된 token은 그대로 둔다.
+  token 칸을 비우고 Connect를 누르면 app은 저장된 token을 쓴다. token은 발급할 때 한 번만 보이기 때문이다.
+- 창은 5초마다 서버에서 상태를 다시 읽는다. 그래서 창을 열어 둔 동안 생긴 승인 항목이 클릭 없이 보인다.
+  서버가 응답하지 않으면 창은 이전 상태를 지우고 "Not connected to the server"를 표시한다.
 - Keychain 구현(`KeychainTokenStore`)은 테스트하지 않았다. 테스트는 메모리 저장소를 쓴다.
 - 실제 창의 표시와 Linux 빌드는 확인하지 않았다.
 
 ## 4. 저장소
 
 - SQLite는 `rusqlite`의 `bundled` 기능으로 쓴다 (검증: 빌드).
-- 프로필마다 DB 파일을 따로 둔다: `profiles/<id>/agent.db`. 공용 `app.db`는 프로필 목록만 가진다.
+- 프로필마다 DB 파일을 따로 둔다: `profiles/<id>/agent.db`. 공용 `app.db`는 프로필 목록과 접속 token의 해시만 가진다.
   기각한 안: DB 하나에 `profile_id` 컬럼. `WHERE` 조건 하나를 빠뜨리면 다른 프로필의 데이터가 샌다.
 - 산출물은 `profiles/<id>/artifacts/sha256/<해시>` 파일로 저장하고, DB에 메타 행을 둔다.
 - 감사 로그 테이블은 트리거로 UPDATE와 DELETE를 거부한다.
@@ -143,9 +148,10 @@
 - **비밀 값**: 설정은 비밀 값의 key만 가진다(`token_secret`). 서버는 환경 변수 `BUNSIN_SECRET_<프로필>__<KEY>`에서 값을 읽는다.
   key에는 `__`를 쓸 수 없다. 그래서 한 프로필은 다른 프로필의 비밀 값이나 서버의 다른 환경 변수를 가리킬 수 없다.
 - **stdio 커넥터**: 서버에서 명령을 실행하므로 기본으로 거부한다. 운영자가 `--allow-stdio-connectors`로 켠다.
-- **LLM과 MCP 주소**: 기본 규칙은 공개 `https://` 주소만 허용한다. `localhost`와 loopback, 사설, link-local 같은 내부 IP 주소는 거부한다.
+- **LLM과 MCP 주소**: 기본 규칙은 `https://` 주소만 받고, `localhost`와 내부 IP 주소(loopback, 사설, link-local 등)로 적힌 host를 거부한다.
+  도메인 이름은 모두 통과한다. 사내 DNS 이름도 통과하므로, 기본 규칙은 내부망 접근을 완전히 막지 못한다.
   운영자가 `--allow-upstream-host <host>`를 주면 그 목록의 host만 허용한다. 사내 LLM gateway는 이 옵션으로 허용한다.
-  - 한계: 기본 규칙은 이름을 조회하지 않는다. 내부 주소로 풀리는 공개 도메인 이름은 통과한다. 이를 막아야 하는 운영자는 목록을 준다.
+  - 여러 사람이 쓰는 서버나 사외에 노출된 서버의 운영자는 이 목록을 주어야 한다.
 - LLM client와 MCP HTTP client는 redirect를 따르지 않는다. redirect로 위 규칙을 우회할 수 없다.
 
 **아직 없는 것**

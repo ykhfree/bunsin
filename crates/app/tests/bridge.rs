@@ -1,6 +1,6 @@
 mod common;
 
-use bunsin_app::bridge::{UiCommand, UiState, apply};
+use bunsin_app::bridge::{UiCommand, UiState, apply, refresh, spawn_bridge};
 use bunsin_core::approval::ApprovalState;
 
 #[tokio::test]
@@ -176,4 +176,57 @@ async fn a_server_that_stops_answering_clears_the_shown_state() {
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     assert!(state.connected);
     assert_eq!(state.snapshot.unwrap().inbox.len(), 1);
+}
+
+#[tokio::test]
+async fn a_timed_refresh_keeps_the_last_command_error_but_not_a_connection_error() {
+    use bunsin_client::{RemoteConfig, RemoteEngine};
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    apply(&*rig.engine, &mut state, UiCommand::Approve(99)).await;
+    let command_error = state.error.clone();
+    assert!(command_error.is_some());
+
+    // The failure of the command stays on screen across a refresh.
+    refresh(&*rig.engine, &mut state).await;
+    assert_eq!(state.error, command_error);
+
+    // A connection failure replaces it, and goes away when the server answers again.
+    let dead = RemoteConfig {
+        url: "http://127.0.0.1:1".into(),
+        ca_cert_pem: None,
+    };
+    let dead = RemoteEngine::new(&dead, "bsn_test").unwrap();
+    refresh(&dead, &mut state).await;
+    assert!(!state.connected);
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("cannot be reached"))
+    );
+    refresh(&*rig.engine, &mut state).await;
+    assert!(state.connected);
+    assert_eq!(state.error, None);
+}
+
+#[tokio::test]
+async fn the_bridge_task_ends_when_the_window_drops_its_command_sender() {
+    let rig = common::rig().await;
+    let handle = tokio::runtime::Handle::current();
+    let (commands, mut states) = spawn_bridge(
+        &handle,
+        rig.engine.clone(),
+        std::time::Duration::from_millis(20),
+    );
+    commands.send(UiCommand::Refresh).unwrap();
+    assert!(states.recv().await.is_some());
+    drop(commands);
+    // The state channel closes only when the task has ended and dropped its sender.
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while states.recv().await.is_some() {}
+    })
+    .await;
+    assert!(closed.is_ok(), "the bridge task kept running");
 }

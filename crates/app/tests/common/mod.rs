@@ -34,6 +34,7 @@ impl Backends for Fakes {
 
 pub struct Rig {
     pub _dir: tempfile::TempDir,
+    pub llm: Arc<FakeLlm>,
     pub slack: Arc<FakeConnector>,
     pub engine: Arc<Engine>,
 }
@@ -78,7 +79,27 @@ pub async fn rig() -> Rig {
     engine.ingest("kim", event).await.unwrap();
     Rig {
         _dir: dir,
+        llm,
         slack,
         engine,
     }
+}
+
+/// Hands `kim` a second event that ends as a pending post with ID 2.
+#[allow(dead_code)]
+pub async fn ingest_second_event(rig: &Rig) {
+    let proposal = json!({
+        "kind": "tool_call", "rationale": "Lee asked again", "summary": null,
+        "tool": "slack/post",
+        "args_json": json!({"channel": "C1", "text": "Still 3 pm."}).to_string()
+    });
+    rig.llm.reply(&proposal.to_string(), 10);
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e2".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "is it still 3 pm?".into(),
+    };
+    rig.engine.ingest("kim", event).await.unwrap();
 }

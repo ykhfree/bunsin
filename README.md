@@ -46,9 +46,11 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   listen on `127.0.0.1`.
 - Profile settings name a secret key such as `LLM`. The server reads the value from
   `BUNSIN_SECRET_<PROFILE>__<KEY>`. A profile cannot name another profile's secret.
-- By default, profile settings may name only public `https://` addresses for the LLM and
-  for MCP servers. To allow an internal gateway, start the server with
-  `--allow-upstream-host <host>`; then only the listed hosts are allowed.
+- Profile owners choose the LLM and MCP addresses, and the server sends the requests.
+  By default the server accepts any `https://` address except `localhost` and internal
+  IP addresses. A host name that resolves to an internal address still passes.
+  On a shared or public server, start it with `--allow-upstream-host <host>` (repeatable):
+  then only the listed hosts are allowed, including an internal gateway over `http://`.
 - MCP servers that run as a local command need `--allow-stdio-connectors`.
 
 ### From your machine (profile owner)

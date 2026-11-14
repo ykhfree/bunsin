@@ -22,8 +22,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// How long running requests may finish after a stop signal.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+/// How long running requests may finish after a stop signal. One event can need two LLM
+/// calls of up to 120 s each, so the grace covers that. A request that is cut leaves its
+/// inbox item in the `executing` state.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(300);
 
 struct Failure(ApiError);
 

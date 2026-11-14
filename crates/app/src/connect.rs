@@ -1,6 +1,6 @@
 //! The window root: the connect screen, and the shell after a connection.
 
-use crate::bridge::spawn_bridge;
+use crate::bridge::{REFRESH_EVERY, spawn_bridge};
 use crate::connection::{Connection, TokenStore, client, load_connection, save_connection};
 use crate::shell::{Shell, labelled};
 use bunsin_api::{ApiError, ApiResult, EngineApi};
@@ -109,7 +109,15 @@ impl AppView {
             server: text(&self.server),
             ca_cert: (!ca_cert.is_empty()).then(|| PathBuf::from(ca_cert)),
         };
-        let token = text(&self.token);
+        let mut token = text(&self.token);
+        // An empty field means "use the token that is already stored". A token is shown
+        // only once, so the user cannot type it again after a start-up that failed.
+        if token.is_empty()
+            && let Source::Saved { tokens, .. } = &self.source
+            && let Ok(Some(stored)) = tokens.get()
+        {
+            token = stored;
+        }
         self.connect(connection, token, window, cx);
     }
 
@@ -177,7 +185,7 @@ impl AppView {
         // The token now lives in the client and the token store, not in the form.
         self.token
             .update(cx, |input, cx| input.set_value("", window, cx));
-        let (commands, states) = spawn_bridge(&self.runtime, engine);
+        let (commands, states) = spawn_bridge(&self.runtime, engine, REFRESH_EVERY);
         self.shell = Some(cx.new(|cx| Shell::new(states, commands, cx)));
     }
 

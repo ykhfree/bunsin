@@ -61,8 +61,9 @@ enum Command {
         #[arg(long)]
         allow_stdio_connectors: bool,
         /// An LLM or MCP host that profile settings may name. Repeat it for more hosts.
-        /// With this option, only the listed hosts are allowed. Without it, any public
-        /// https:// address is allowed and addresses inside this network are refused.
+        /// With this option, only the listed hosts are allowed. Without it, any https://
+        /// address is allowed except localhost and internal IP addresses; a host name that
+        /// resolves to an internal address still passes. Give the list on a shared server.
         #[arg(long = "allow-upstream-host")]
         allow_upstream_hosts: Vec<String>,
     },

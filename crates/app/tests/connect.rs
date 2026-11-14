@@ -440,3 +440,37 @@ fn a_fixed_connection_goes_straight_to_the_shell(cx: &mut TestAppContext) {
         Some("● Kim (kim)")
     );
 }
+
+#[gpui_kit::test]
+fn an_empty_token_field_uses_the_stored_token(cx: &mut TestAppContext) {
+    let t = Test::new();
+    // The saved address does not answer, as if the server was down at start-up.
+    let dead = Connection {
+        server: "http://127.0.0.1:1".into(),
+        ca_cert: None,
+    };
+    save_connection(t.dir.path(), &dead).unwrap();
+    t.tokens.set(&t.server.token).unwrap();
+    let (window, view) = t.open(cx, t.saved());
+    wait_until(cx, &view, "the error", failed);
+    assert!(
+        label(cx, window, "connect-error")
+            .unwrap()
+            .contains("cannot be reached")
+    );
+
+    // The user corrects the address and connects without typing the token again.
+    let url = t.server.url();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("server", cx);
+        window.press("cmd-a", cx);
+        window.input(&url, cx);
+        window.click("connect", cx);
+    })
+    .unwrap();
+    wait_until(cx, &view, "the shell", shell_loaded);
+    assert_eq!(load_connection(t.dir.path()).unwrap().server, url);
+    assert_eq!(t.tokens.get().unwrap(), Some(t.server.token.clone()));
+    assert_not_on_screen(cx, window, &t.server.token, "Kim (kim)");
+}
