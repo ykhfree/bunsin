@@ -110,10 +110,7 @@ async fn returns_a_redirect_as_http_without_following_it() {
             },
             "{wire:?}"
         );
-        assert!(
-            reached.try_recv().is_err(),
-            "the redirect target got a request"
-        );
+        assert!(reached.try_recv().is_err(), "the redirect target got a request");
         assert_no_token(&error);
     }
 }

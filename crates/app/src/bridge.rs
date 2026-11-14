@@ -94,11 +94,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
 /// The failure of the last command stays on screen. A connection failure does not,
 /// once the server answers again.
 pub async fn refresh(api: &dyn EngineApi, state: &mut UiState) {
-    let command_error = if state.connected {
-        state.error.take()
-    } else {
-        None
-    };
+    let command_error = if state.connected { state.error.take() } else { None };
     state.error = None;
     reload(api, state).await;
     if state.error.is_none() {
@@ -115,10 +111,7 @@ pub fn spawn_bridge(
     runtime: &tokio::runtime::Handle,
     api: Arc<dyn EngineApi>,
     refresh_every: std::time::Duration,
-) -> (
-    mpsc::UnboundedSender<UiCommand>,
-    mpsc::UnboundedReceiver<UiState>,
-) {
+) -> (mpsc::UnboundedSender<UiCommand>, mpsc::UnboundedReceiver<UiState>) {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (state_tx, state_rx) = mpsc::unbounded_channel();
     runtime.spawn(async move {

@@ -1,8 +1,6 @@
 //! Runner tests with fake backends. They never start the real claude or codex.
 
-use bunsin_coding::{
-    ClaudeCode, Codex, CodingBackend, CodingError, CodingJob, CodingResult, CodingRunner, Generic,
-};
+use bunsin_coding::{ClaudeCode, Codex, CodingBackend, CodingError, CodingJob, CodingResult, CodingRunner, Generic};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,12 +31,7 @@ impl Fixture {
         git(&repo, &["commit", "-q", "-m", "initial"]);
         let runner = CodingRunner::new(dir.path().join("worktrees"));
         let out = dir.path().join("out");
-        Fixture {
-            dir,
-            repo,
-            runner,
-            out,
-        }
+        Fixture { dir, repo, runner, out }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -49,11 +42,7 @@ impl Fixture {
     /// slowed by the first launch of a new executable (about 0.4 s on macOS).
     fn script(&self, name: &str, body: &str) -> PathBuf {
         let path = self.path(name);
-        std::fs::write(
-            &path,
-            format!("#!/bin/sh\n[ -n \"$WARMUP\" ] && exit 0\n{body}\n"),
-        )
-        .unwrap();
+        std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARMUP\" ] && exit 0\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let warmup = Command::new(&path).env("WARMUP", "1").status().unwrap();
         assert!(warmup.success());
@@ -80,13 +69,10 @@ impl Fixture {
 
     /// Fails the test if the run hangs, for example when a killed process kept a pipe open.
     async fn run(&self, backend: &dyn CodingBackend, job: &CodingJob) -> CodingResult {
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            self.runner.run(backend, job, &self.out),
-        )
-        .await
-        .expect("run finished within 30 s")
-        .unwrap()
+        tokio::time::timeout(Duration::from_secs(30), self.runner.run(backend, job, &self.out))
+            .await
+            .expect("run finished within 30 s")
+            .unwrap()
     }
 
     fn agent_branches(&self) -> String {
@@ -95,12 +81,7 @@ impl Fixture {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap();
+    let output = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
     assert!(
         output.status.success(),
         "git {args:?}: {}",
@@ -110,11 +91,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn read_pid(path: &Path) -> libc::pid_t {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap()
+    std::fs::read_to_string(path).unwrap().trim().parse().unwrap()
 }
 
 /// Waits up to 5 s for the process to disappear. A killed orphan is reaped by launchd.
@@ -149,33 +126,20 @@ async fn edit_makes_branch_and_leaves_user_checkout_alone() {
         git(&fx.repo, &["rev-parse", "refs/heads/agent/edit-1"]),
         result.head_commit
     );
-    assert!(
-        result.diff_stat.contains("file.txt"),
-        "{}",
-        result.diff_stat
-    );
+    assert!(result.diff_stat.contains("file.txt"), "{}", result.diff_stat);
     assert_eq!(
-        git(
-            &fx.repo,
-            &["show", &format!("{}:file.txt", result.head_commit)]
-        ),
+        git(&fx.repo, &["show", &format!("{}:file.txt", result.head_commit)]),
         "changed"
     );
     assert_eq!(result.exit.code, Some(0));
     assert!(!result.exit.timed_out);
     // The instructions arrive on stdin.
-    assert_eq!(
-        std::fs::read_to_string(&stdin_copy).unwrap(),
-        "Change file.txt"
-    );
+    assert_eq!(std::fs::read_to_string(&stdin_copy).unwrap(), "Change file.txt");
     // The user's checkout is untouched.
     assert_eq!(git(&fx.repo, &["rev-parse", "HEAD"]), user_head);
     assert_eq!(git(&fx.repo, &["symbolic-ref", "--short", "HEAD"]), BASE);
     assert_eq!(git(&fx.repo, &["status", "--porcelain"]), "");
-    assert_eq!(
-        std::fs::read_to_string(fx.repo.join("file.txt")).unwrap(),
-        "original\n"
-    );
+    assert_eq!(std::fs::read_to_string(fx.repo.join("file.txt")).unwrap(), "original\n");
 }
 
 #[tokio::test]
@@ -211,16 +175,9 @@ async fn commits_made_by_the_backend_are_kept() {
             &format!("{}..{}", result.base_commit, result.head_commit),
         ],
     );
-    assert_eq!(
-        log,
-        "Uncommitted changes left by coding job self-commit\nagent commit"
-    );
+    assert_eq!(log, "Uncommitted changes left by coding job self-commit\nagent commit");
     assert!(result.diff_stat.contains("new.txt"), "{}", result.diff_stat);
-    assert!(
-        result.diff_stat.contains("extra.txt"),
-        "{}",
-        result.diff_stat
-    );
+    assert!(result.diff_stat.contains("extra.txt"), "{}", result.diff_stat);
 }
 
 /// A fake Claude Code that claims success in the documented stream-json shape.
@@ -328,10 +285,7 @@ async fn background_child_holding_output_is_killed_at_timeout() {
     let fx = Fixture::new();
     let sleep_pid = fx.path("sleep.pid");
     // The script exits at once, but its background child keeps stdout open.
-    let backend = fx.generic(&format!(
-        "sleep 300 &\necho $! > '{}'\nexit 0",
-        sleep_pid.display()
-    ));
+    let backend = fx.generic(&format!("sleep 300 &\necho $! > '{}'\nexit 0", sleep_pid.display()));
     let mut job = fx.job("orphan");
     job.timeout = Duration::from_secs(2);
 
@@ -397,10 +351,7 @@ async fn codex_runs_in_the_worktree_with_its_dir_flag() {
         workdir.canonicalize().unwrap().to_str().unwrap(),
         "process cwd"
     );
-    assert_eq!(
-        lines[1..],
-        ["exec", "--json", "-C", workdir.to_str().unwrap(), "-"]
-    );
+    assert_eq!(lines[1..], ["exec", "--json", "-C", workdir.to_str().unwrap(), "-"]);
     assert_eq!(result.summary.as_deref(), Some("Done"));
     assert_eq!(result.session_id.as_deref(), Some("t-9"));
 }
@@ -460,24 +411,16 @@ async fn bad_base_ref_is_a_git_error_and_makes_no_branch() {
 #[tokio::test]
 async fn second_run_with_same_id_fails_and_keeps_the_first_branch() {
     let fx = Fixture::new();
-    let first = fx
-        .run(&fx.generic("echo one > file.txt"), &fx.job("dup"))
-        .await;
+    let first = fx.run(&fx.generic("echo one > file.txt"), &fx.job("dup")).await;
     let second_backend = fx.generic("echo two > file.txt");
 
-    let error = fx
-        .runner
-        .run(&second_backend, &fx.job("dup"), &fx.out)
-        .await;
+    let error = fx.runner.run(&second_backend, &fx.job("dup"), &fx.out).await;
 
     assert!(
         matches!(&error, Err(CodingError::BranchExists(b)) if b == "agent/dup"),
         "{error:?}"
     );
-    assert_eq!(
-        git(&fx.repo, &["rev-parse", "refs/heads/agent/dup"]),
-        first.head_commit
-    );
+    assert_eq!(git(&fx.repo, &["rev-parse", "refs/heads/agent/dup"]), first.head_commit);
     let worktree_file = fx.dir.path().join("worktrees/dup/file.txt");
     assert_eq!(std::fs::read_to_string(worktree_file).unwrap(), "one\n");
 }
@@ -487,15 +430,9 @@ async fn leftover_worktree_directory_is_not_reused() {
     let fx = Fixture::new();
     std::fs::create_dir_all(fx.dir.path().join("worktrees/stale")).unwrap();
 
-    let error = fx
-        .runner
-        .run(&fx.generic("true"), &fx.job("stale"), &fx.out)
-        .await;
+    let error = fx.runner.run(&fx.generic("true"), &fx.job("stale"), &fx.out).await;
 
-    assert!(
-        matches!(error, Err(CodingError::WorktreeExists(_))),
-        "{error:?}"
-    );
+    assert!(matches!(error, Err(CodingError::WorktreeExists(_))), "{error:?}");
     assert_eq!(fx.agent_branches(), "");
 }
 
@@ -507,9 +444,6 @@ async fn empty_test_command_is_rejected() {
 
     let error = fx.runner.run(&fx.generic("true"), &job, &fx.out).await;
 
-    assert!(
-        matches!(error, Err(CodingError::EmptyTestCommand)),
-        "{error:?}"
-    );
+    assert!(matches!(error, Err(CodingError::EmptyTestCommand)), "{error:?}");
     assert_eq!(fx.agent_branches(), "");
 }

@@ -73,9 +73,8 @@ impl HttpLlmClient {
             Wire::OpenAiChat => format!("Bearer {}", token.0),
             Wire::AnthropicMessages => token.0.clone(),
         };
-        let mut auth = HeaderValue::from_str(&raw).map_err(|_| {
-            LlmError::Transport("the token is not a valid HTTP header value".into())
-        })?;
+        let mut auth = HeaderValue::from_str(&raw)
+            .map_err(|_| LlmError::Transport("the token is not a valid HTTP header value".into()))?;
         auth.set_sensitive(true);
         // Redirects are not followed: reqwest keeps `x-api-key` on a cross-host redirect.
         // A 3xx reply becomes `LlmError::Http`.
@@ -155,10 +154,7 @@ impl HttpLlmClient {
 }
 
 impl LlmClient for HttpLlmClient {
-    fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> BoxFuture<'_, Result<CompletionResponse, LlmError>> {
+    fn complete(&self, request: CompletionRequest) -> BoxFuture<'_, Result<CompletionResponse, LlmError>> {
         Box::pin(async move { self.send(&request).await.map_err(|e| self.scrub(e)) })
     }
 }

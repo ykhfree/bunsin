@@ -16,15 +16,7 @@ impl InboundEvent {
     /// Two deliveries of the same source event have the same key.
     pub fn dedupe_key(&self) -> String {
         // The length prefix keeps ("a", "b\0c") and ("a\0b", "c") apart.
-        crate::sha256_hex(
-            format!(
-                "{}:{}\0{}",
-                self.source.len(),
-                self.source,
-                self.external_id
-            )
-            .as_bytes(),
-        )
+        crate::sha256_hex(format!("{}:{}\0{}", self.source.len(), self.source, self.external_id).as_bytes())
     }
 }
 

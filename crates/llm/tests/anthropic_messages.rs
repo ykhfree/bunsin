@@ -115,9 +115,7 @@ async fn adds_cache_tokens_to_input_usage() {
 #[tokio::test]
 async fn maps_token_limit_stops_to_max_tokens() {
     for stop_reason in ["max_tokens", "model_context_window_exceeded"] {
-        let response = complete(ok(reply(text("{\"ans"), stop_reason)))
-            .await
-            .unwrap();
+        let response = complete(ok(reply(text("{\"ans"), stop_reason))).await.unwrap();
         assert_eq!(response.stop, StopReason::MaxTokens, "{stop_reason}");
         assert_eq!(response.content, "{\"ans");
     }
@@ -132,9 +130,7 @@ async fn maps_refusal_with_empty_content() {
 
 #[tokio::test]
 async fn rejects_tool_use_stop() {
-    let error = complete(ok(reply(text("hi"), "tool_use")))
-        .await
-        .unwrap_err();
+    let error = complete(ok(reply(text("hi"), "tool_use"))).await.unwrap_err();
     assert!(
         matches!(&error, LlmError::Malformed(text) if text.contains("tool_use")),
         "{error:?}"
@@ -166,9 +162,7 @@ async fn maps_500_to_http_with_body() {
 
 #[tokio::test]
 async fn maps_invalid_json_to_malformed() {
-    let error = complete(Reply::Status(200, "not json".into()))
-        .await
-        .unwrap_err();
+    let error = complete(Reply::Status(200, "not json".into())).await.unwrap_err();
     assert!(matches!(error, LlmError::Malformed(_)), "{error:?}");
     assert_no_token(&error);
 }
@@ -187,13 +181,10 @@ async fn maps_timeout_to_transport() {
     let (base, _) = serve_once(Reply::Hang).await;
     let client = client_with_timeout(Wire::AnthropicMessages, base, Duration::from_millis(200));
     // The outer limit makes a missing client timeout fail the test instead of hanging it.
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        client.complete(request("be brief", None)),
-    )
-    .await
-    .expect("the client did not time out")
-    .unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(5), client.complete(request("be brief", None)))
+        .await
+        .expect("the client did not time out")
+        .unwrap_err();
     assert!(matches!(error, LlmError::Transport(_)), "{error:?}");
     assert_no_token(&error);
 }

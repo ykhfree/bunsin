@@ -20,12 +20,7 @@ async fn refresh_selects_the_first_profile_and_loads_it() {
 async fn selecting_another_profile_shows_only_its_data() {
     let rig = common::rig().await;
     let mut state = UiState::default();
-    apply(
-        &*rig.engine,
-        &mut state,
-        UiCommand::SelectProfile("lee".into()),
-    )
-    .await;
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
     assert_eq!(state.selected.as_deref(), Some("lee"));
     assert!(state.snapshot.unwrap().inbox.is_empty());
 }
@@ -37,17 +32,11 @@ async fn approve_runs_the_call_and_a_second_approve_reports_an_error() {
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     apply(&*rig.engine, &mut state, UiCommand::Approve(1)).await;
     assert_eq!(state.error, None);
-    assert_eq!(
-        state.snapshot.as_ref().unwrap().inbox[0].state,
-        ApprovalState::Executed
-    );
+    assert_eq!(state.snapshot.as_ref().unwrap().inbox[0].state, ApprovalState::Executed);
 
     apply(&*rig.engine, &mut state, UiCommand::Approve(1)).await;
     assert!(
-        state
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("not pending")),
+        state.error.as_deref().is_some_and(|e| e.contains("not pending")),
         "{:?}",
         state.error
     );
@@ -62,17 +51,11 @@ async fn a_failed_call_is_shown_as_an_error() {
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     apply(&*rig.engine, &mut state, UiCommand::Approve(1)).await;
     assert!(
-        state
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("channel_not_found")),
+        state.error.as_deref().is_some_and(|e| e.contains("channel_not_found")),
         "{:?}",
         state.error
     );
-    assert_eq!(
-        state.snapshot.unwrap().inbox[0].state,
-        ApprovalState::Failed
-    );
+    assert_eq!(state.snapshot.unwrap().inbox[0].state, ApprovalState::Failed);
 }
 
 #[tokio::test]
@@ -86,19 +69,11 @@ async fn the_kill_switch_state_comes_from_the_engine() {
     // With the switch on, approval is refused and the item stays pending.
     apply(&*rig.engine, &mut state, UiCommand::Approve(1)).await;
     assert!(state.error.is_some());
-    assert_eq!(
-        state.snapshot.as_ref().unwrap().inbox[0].state,
-        ApprovalState::Pending
-    );
+    assert_eq!(state.snapshot.as_ref().unwrap().inbox[0].state, ApprovalState::Pending);
     assert!(rig.slack.calls().is_empty());
 
     // The other profile has its own switch.
-    apply(
-        &*rig.engine,
-        &mut state,
-        UiCommand::SelectProfile("lee".into()),
-    )
-    .await;
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
     assert!(!state.snapshot.unwrap().kill_switch);
 }
 
@@ -109,10 +84,7 @@ async fn dismiss_rejects_the_item() {
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     apply(&*rig.engine, &mut state, UiCommand::Reject(1)).await;
     assert_eq!(state.error, None);
-    assert_eq!(
-        state.snapshot.unwrap().inbox[0].state,
-        ApprovalState::Rejected
-    );
+    assert_eq!(state.snapshot.unwrap().inbox[0].state, ApprovalState::Rejected);
     assert!(rig.slack.calls().is_empty());
 }
 
@@ -129,12 +101,8 @@ async fn a_command_without_any_profile_reports_an_error() {
             Box::pin(async { Err("unused".to_owned()) })
         }
     }
-    let engine = bunsin_engine::Engine::open(
-        dir.path(),
-        std::sync::Arc::new(NoBackends),
-        std::sync::Arc::new(|| 1),
-    )
-    .unwrap();
+    let engine =
+        bunsin_engine::Engine::open(dir.path(), std::sync::Arc::new(NoBackends), std::sync::Arc::new(|| 1)).unwrap();
     let mut state = UiState::default();
     apply(&engine, &mut state, UiCommand::SetKillSwitch(true)).await;
     assert_eq!(state.error.as_deref(), Some("no profile is selected"));
@@ -163,10 +131,7 @@ async fn a_server_that_stops_answering_clears_the_shown_state() {
     assert_eq!(state.snapshot, None);
     assert!(state.profiles.is_empty());
     assert!(
-        state
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("cannot be reached")),
+        state.error.as_deref().is_some_and(|e| e.contains("cannot be reached")),
         "{:?}",
         state.error
     );
@@ -200,12 +165,7 @@ async fn a_timed_refresh_keeps_the_last_command_error_but_not_a_connection_error
     let dead = RemoteEngine::new(&dead, "bsn_test").unwrap();
     refresh(&dead, &mut state).await;
     assert!(!state.connected);
-    assert!(
-        state
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("cannot be reached"))
-    );
+    assert!(state.error.as_deref().is_some_and(|e| e.contains("cannot be reached")));
     refresh(&*rig.engine, &mut state).await;
     assert!(state.connected);
     assert_eq!(state.error, None);
@@ -215,11 +175,7 @@ async fn a_timed_refresh_keeps_the_last_command_error_but_not_a_connection_error
 async fn the_bridge_task_ends_when_the_window_drops_its_command_sender() {
     let rig = common::rig().await;
     let handle = tokio::runtime::Handle::current();
-    let (commands, mut states) = spawn_bridge(
-        &handle,
-        rig.engine.clone(),
-        std::time::Duration::from_millis(20),
-    );
+    let (commands, mut states) = spawn_bridge(&handle, rig.engine.clone(), std::time::Duration::from_millis(20));
     commands.send(UiCommand::Refresh).unwrap();
     assert!(states.recv().await.is_some());
     drop(commands);

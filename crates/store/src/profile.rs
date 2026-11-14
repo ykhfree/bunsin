@@ -65,9 +65,7 @@ pub struct ProfileStore {
     db: Mutex<Connection>,
 }
 
-fn inbox_from_row(
-    row: &Row<'_>,
-) -> rusqlite::Result<(i64, String, String, String, String, i64, i64)> {
+fn inbox_from_row(row: &Row<'_>) -> rusqlite::Result<(i64, String, String, String, String, i64, i64)> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -115,9 +113,7 @@ impl ProfileStore {
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .db()
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0))
             .optional()?)
     }
 
@@ -164,13 +160,7 @@ impl ProfileStore {
         db.execute(
             "INSERT INTO inbox (event_key, body, rationale, state, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            (
-                event_key,
-                serde_json::to_string(body)?,
-                rationale,
-                state.as_str(),
-                now,
-            ),
+            (event_key, serde_json::to_string(body)?, rationale, state.as_str(), now),
         )?;
         Ok(InboxItem {
             id: db.last_insert_rowid(),
@@ -199,9 +189,7 @@ impl ProfileStore {
     /// Newest first.
     pub fn list_inbox(&self, limit: u32) -> Result<Vec<InboxItem>> {
         let db = self.db();
-        let mut statement = db.prepare(&format!(
-            "SELECT {INBOX_COLUMNS} FROM inbox ORDER BY id DESC LIMIT ?1"
-        ))?;
+        let mut statement = db.prepare(&format!("SELECT {INBOX_COLUMNS} FROM inbox ORDER BY id DESC LIMIT ?1"))?;
         let rows = statement
             .query_map([limit], inbox_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -210,13 +198,7 @@ impl ProfileStore {
 
     /// Moves an item from `from` to `to`. Returns false if the item is not in `from`,
     /// so only one of two concurrent callers wins.
-    pub fn move_inbox_state(
-        &self,
-        id: i64,
-        from: ApprovalState,
-        to: ApprovalState,
-        now: i64,
-    ) -> Result<bool> {
+    pub fn move_inbox_state(&self, id: i64, from: ApprovalState, to: ApprovalState, now: i64) -> Result<bool> {
         let changed = self.db().execute(
             "UPDATE inbox SET state = ?1, updated_at = ?2 WHERE id = ?3 AND state = ?4",
             (to.as_str(), now, id, from.as_str()),
@@ -238,7 +220,13 @@ impl ProfileStore {
     pub fn add_correction(&self, inbox_id: i64, correction: &Correction, now: i64) -> Result<()> {
         self.db().execute(
             "INSERT INTO corrections (inbox_id, original, edited, reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (inbox_id, &correction.original, &correction.edited, &correction.reason, now),
+            (
+                inbox_id,
+                &correction.original,
+                &correction.edited,
+                &correction.reason,
+                now,
+            ),
         )?;
         Ok(())
     }
@@ -246,9 +234,7 @@ impl ProfileStore {
     /// Newest first.
     pub fn recent_corrections(&self, limit: u32) -> Result<Vec<Correction>> {
         let db = self.db();
-        let mut statement = db.prepare(
-            "SELECT original, edited, reason FROM corrections ORDER BY id DESC LIMIT ?1",
-        )?;
+        let mut statement = db.prepare("SELECT original, edited, reason FROM corrections ORDER BY id DESC LIMIT ?1")?;
         let rows = statement.query_map([limit], |row| {
             Ok(Correction {
                 original: row.get(0)?,
@@ -286,14 +272,7 @@ impl ProfileStore {
         db.execute(
             "INSERT INTO artifacts (kind, sha256, size, created_at, event_key, inbox_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (
-                kind,
-                &sha256,
-                content.len() as i64,
-                now,
-                event_key,
-                inbox_id,
-            ),
+            (kind, &sha256, content.len() as i64, now, event_key, inbox_id),
         )?;
         Ok(ArtifactMeta {
             id: db.last_insert_rowid(),
@@ -331,9 +310,7 @@ impl ProfileStore {
     pub fn read_artifact(&self, id: i64) -> Result<Vec<u8>> {
         let sha256: String = self
             .db()
-            .query_row("SELECT sha256 FROM artifacts WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT sha256 FROM artifacts WHERE id = ?1", [id], |row| row.get(0))
             .optional()?
             .ok_or(StoreError::NotFound("artifact", id))?;
         let content = std::fs::read(self.artifact_path(&sha256))?;
@@ -345,13 +322,7 @@ impl ProfileStore {
 
     // --- audit ---
 
-    pub fn append_audit(
-        &self,
-        now: i64,
-        kind: &str,
-        event_key: Option<&str>,
-        detail: &Value,
-    ) -> Result<()> {
+    pub fn append_audit(&self, now: i64, kind: &str, event_key: Option<&str>, detail: &Value) -> Result<()> {
         self.db().execute(
             "INSERT INTO audit (at, kind, event_key, detail) VALUES (?1, ?2, ?3, ?4)",
             (now, kind, event_key, detail.to_string()),
@@ -362,9 +333,8 @@ impl ProfileStore {
     /// Newest first.
     pub fn list_audit(&self, limit: u32) -> Result<Vec<AuditEntry>> {
         let db = self.db();
-        let mut statement = db.prepare(
-            "SELECT id, at, kind, event_key, detail FROM audit ORDER BY id DESC LIMIT ?1",
-        )?;
+        let mut statement =
+            db.prepare("SELECT id, at, kind, event_key, detail FROM audit ORDER BY id DESC LIMIT ?1")?;
         let rows = statement
             .query_map([limit], |row| {
                 Ok((
@@ -415,10 +385,7 @@ mod tests {
     fn an_event_is_recorded_once() {
         let (_dir, s) = store();
         assert!(s.record_event("k1", &json!({"text": "a"}), 1).unwrap());
-        assert!(
-            !s.record_event("k1", &json!({"text": "a again"}), 2)
-                .unwrap()
-        );
+        assert!(!s.record_event("k1", &json!({"text": "a again"}), 2).unwrap());
         assert!(s.record_event("k2", &json!({"text": "b"}), 3).unwrap());
     }
 
@@ -432,10 +399,7 @@ mod tests {
         first.set_kill_switch(true).unwrap();
         drop(first);
         drop(app);
-        let reopened = AppStore::open(dir.path())
-            .unwrap()
-            .open_profile("kim")
-            .unwrap();
+        let reopened = AppStore::open(dir.path()).unwrap().open_profile("kim").unwrap();
         assert!(reopened.kill_switch().unwrap());
         reopened.set_kill_switch(false).unwrap();
         assert!(!reopened.kill_switch().unwrap());
@@ -492,10 +456,7 @@ mod tests {
         let item = s
             .add_inbox_item("k1", &tool_call("hi"), "r", ApprovalState::Pending, 10)
             .unwrap();
-        assert!(
-            s.replace_pending_body(item.id, &tool_call("hello"), 11)
-                .unwrap()
-        );
+        assert!(s.replace_pending_body(item.id, &tool_call("hello"), 11).unwrap());
         assert_eq!(s.inbox_item(item.id).unwrap().body, tool_call("hello"));
         s.move_inbox_state(item.id, ApprovalState::Pending, ApprovalState::Approved, 12)
             .unwrap();
@@ -509,10 +470,7 @@ mod tests {
     #[test]
     fn corrections_come_back_newest_first() {
         let (_dir, s) = store();
-        for (i, reason) in ["too long", "wrong tone", "missing link"]
-            .iter()
-            .enumerate()
-        {
+        for (i, reason) in ["too long", "wrong tone", "missing link"].iter().enumerate() {
             let c = Correction {
                 original: "o".into(),
                 edited: "e".into(),
@@ -520,12 +478,7 @@ mod tests {
             };
             s.add_correction(1, &c, i as i64).unwrap();
         }
-        let reasons: Vec<String> = s
-            .recent_corrections(2)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.reason)
-            .collect();
+        let reasons: Vec<String> = s.recent_corrections(2).unwrap().into_iter().map(|c| c.reason).collect();
         assert_eq!(reasons, ["missing link", "wrong tone"]);
     }
 
@@ -544,9 +497,7 @@ mod tests {
     fn equal_content_is_stored_once_but_listed_twice() {
         let (dir, s) = store();
         let a = s.put_artifact("draft", b"same", 1, None, None).unwrap();
-        let b = s
-            .put_artifact("tool_result", b"same", 2, None, None)
-            .unwrap();
+        let b = s.put_artifact("tool_result", b"same", 2, None, None).unwrap();
         assert_eq!(a.sha256, b.sha256);
         assert_ne!(a.id, b.id);
         let files = std::fs::read_dir(dir.path().join("profiles/kim/artifacts/sha256"))
@@ -560,33 +511,21 @@ mod tests {
         let (dir, s) = store();
         let meta = s.put_artifact("draft", b"original", 1, None, None).unwrap();
         std::fs::write(
-            dir.path()
-                .join("profiles/kim/artifacts/sha256")
-                .join(&meta.sha256),
+            dir.path().join("profiles/kim/artifacts/sha256").join(&meta.sha256),
             b"tampered",
         )
         .unwrap();
-        assert!(
-            matches!(s.read_artifact(meta.id), Err(StoreError::ArtifactDamaged { id }) if id == meta.id)
-        );
+        assert!(matches!(s.read_artifact(meta.id), Err(StoreError::ArtifactDamaged { id }) if id == meta.id));
     }
 
     #[test]
     fn the_audit_log_is_append_only() {
         let (_dir, s) = store();
-        s.append_audit(
-            1,
-            "policy_decision",
-            Some("k1"),
-            &json!({"decision": "needs_approval"}),
-        )
-        .unwrap();
-        s.append_audit(2, "executed", Some("k1"), &json!({"ok": true}))
+        s.append_audit(1, "policy_decision", Some("k1"), &json!({"decision": "needs_approval"}))
             .unwrap();
+        s.append_audit(2, "executed", Some("k1"), &json!({"ok": true})).unwrap();
 
-        let update = s
-            .db()
-            .execute("UPDATE audit SET kind = 'forged' WHERE id = 1", []);
+        let update = s.db().execute("UPDATE audit SET kind = 'forged' WHERE id = 1", []);
         let delete = s.db().execute("DELETE FROM audit", []);
         assert!(update.unwrap_err().to_string().contains("append-only"));
         assert!(delete.unwrap_err().to_string().contains("append-only"));

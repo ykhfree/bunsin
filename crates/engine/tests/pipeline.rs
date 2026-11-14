@@ -21,11 +21,7 @@ struct Fakes {
 }
 
 impl Backends for Fakes {
-    fn build<'a>(
-        &'a self,
-        _profile: &'a str,
-        _config: &'a ProfileConfig,
-    ) -> BoxFuture<'a, Result<Runtime, String>> {
+    fn build<'a>(&'a self, _profile: &'a str, _config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
         let llm: Arc<dyn LlmClient> = self.llm.clone();
         let slack: Arc<dyn Connector> = self.slack.clone();
         Box::pin(async move {
@@ -40,11 +36,7 @@ impl Backends for Fakes {
 struct Broken;
 
 impl Backends for Broken {
-    fn build<'a>(
-        &'a self,
-        _profile: &'a str,
-        _config: &'a ProfileConfig,
-    ) -> BoxFuture<'a, Result<Runtime, String>> {
+    fn build<'a>(&'a self, _profile: &'a str, _config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
         Box::pin(async { Err("the LLM endpoint setting is missing".to_owned()) })
     }
 }
@@ -69,10 +61,7 @@ fn config() -> ProfileConfig {
     let mut config = ProfileConfig::new("Kim");
     config.principles = vec!["Answer in two sentences.".into()];
     config.approved_tools.insert("slack".into(), slack_tools());
-    config
-        .policy
-        .rules
-        .insert("slack/search".into(), ToolRule::read());
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
     config.policy.rules.insert(
         "slack/post".into(),
         ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
@@ -84,11 +73,7 @@ fn config() -> ProfileConfig {
     config
 }
 
-fn open(
-    dir: &std::path::Path,
-    llm: &Arc<FakeLlm>,
-    slack: &Arc<FakeConnector>,
-) -> Result<Engine, OpenError> {
+fn open(dir: &std::path::Path, llm: &Arc<FakeLlm>, slack: &Arc<FakeConnector>) -> Result<Engine, OpenError> {
     let ticks = AtomicI64::new(1_000);
     Engine::open(
         dir,
@@ -145,12 +130,7 @@ async fn set_tier(rig: &Rig, tool_id: &str, tier: Tier) {
 
 async fn pending_post(rig: &Rig, id: &str, text: &str) -> i64 {
     rig.llm.reply(&post(text), 10);
-    match rig
-        .engine
-        .ingest("kim", event(id, "please answer"))
-        .await
-        .unwrap()
-    {
+    match rig.engine.ingest("kim", event(id, "please answer")).await.unwrap() {
         Outcome::PendingApproval { inbox_id } => inbox_id,
         other => panic!("expected a pending item, got {other:?}"),
     }
@@ -161,11 +141,7 @@ async fn a_redelivered_event_is_handled_once() {
     let rig = rig().await;
     rig.llm.reply(&post("hello"), 10);
     let first = rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
-    let second = rig
-        .engine
-        .ingest("kim", event("e1", "hi (redelivered)"))
-        .await
-        .unwrap();
+    let second = rig.engine.ingest("kim", event("e1", "hi (redelivered)")).await.unwrap();
     assert!(matches!(first, Outcome::PendingApproval { .. }));
     assert_eq!(second, Outcome::Duplicate);
     assert_eq!(rig.llm.requests().len(), 1);
@@ -175,9 +151,7 @@ async fn a_redelivered_event_is_handled_once() {
 #[tokio::test]
 async fn an_invalid_reply_gets_exactly_one_repair_request() {
     let rig = rig().await;
-    rig.llm
-        .reply("Sure, I will post it.", 10)
-        .reply(&post("hello"), 10);
+    rig.llm.reply("Sure, I will post it.", 10).reply(&post("hello"), 10);
     let outcome = rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
     assert!(matches!(outcome, Outcome::PendingApproval { .. }));
 
@@ -189,10 +163,7 @@ async fn an_invalid_reply_gets_exactly_one_repair_request() {
 
     // Both raw replies are kept as work products.
     let artifacts = rig.engine.snapshot("kim").await.unwrap().artifacts;
-    assert_eq!(
-        artifacts.iter().filter(|a| a.kind == "llm_reply").count(),
-        2
-    );
+    assert_eq!(artifacts.iter().filter(|a| a.kind == "llm_reply").count(), 2);
 }
 
 #[tokio::test]
@@ -217,9 +188,7 @@ async fn no_repair_is_requested_when_the_token_budget_is_used_up() {
     let mut config = config();
     config.token_budget = 500;
     let rig = rig_with(config).await;
-    rig.llm
-        .reply("not json", 500)
-        .reply(&post("never used"), 10);
+    rig.llm.reply("not json", 500).reply(&post("never used"), 10);
     let outcome = rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
     assert!(
         matches!(outcome, Outcome::Failed { ref error } if error.contains("token budget")),
@@ -240,9 +209,7 @@ async fn an_llm_error_or_refusal_fails_the_event() {
     }));
     let rate_limited = rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
     let refused = rig.engine.ingest("kim", event("e2", "hi")).await.unwrap();
-    assert!(
-        matches!(rate_limited, Outcome::Failed { ref error } if error.contains("rate-limited"))
-    );
+    assert!(matches!(rate_limited, Outcome::Failed { ref error } if error.contains("rate-limited")));
     assert!(matches!(refused, Outcome::Failed { ref error } if error.contains("refused")));
     assert!(rig.slack.calls().is_empty());
 }
@@ -293,10 +260,7 @@ async fn a_write_waits_for_approval_and_runs_once() {
 async fn two_concurrent_approvals_run_the_call_once() {
     let rig = rig().await;
     let id = pending_post(&rig, "e1", "hello").await;
-    let (a, b) = tokio::join!(
-        rig.engine.approve("kim", id, None),
-        rig.engine.approve("kim", id, None)
-    );
+    let (a, b) = tokio::join!(rig.engine.approve("kim", id, None), rig.engine.approve("kim", id, None));
     let executed = [&a, &b]
         .iter()
         .filter(|r| matches!(r, Ok(Outcome::Executed { .. })))
@@ -337,17 +301,11 @@ async fn an_edit_is_sent_marked_and_recorded_as_a_correction() {
         reason: "too long for this channel".into(),
     };
     rig.engine.approve("kim", id, Some(edit)).await.unwrap();
-    assert_eq!(
-        rig.slack.calls()[0].1["text"],
-        format!("Short version.\n\n{MARKER}")
-    );
+    assert_eq!(rig.slack.calls()[0].1["text"], format!("Short version.\n\n{MARKER}"));
 
     // The next proposal request carries the correction.
     rig.llm.reply(&post("ok"), 10);
-    rig.engine
-        .ingest("kim", event("e2", "another question"))
-        .await
-        .unwrap();
+    rig.engine.ingest("kim", event("e2", "another question")).await.unwrap();
     let prompt = &rig.llm.requests()[1].messages[0].content;
     assert!(prompt.contains("too long for this channel"));
     assert!(prompt.contains("A long and formal first draft."));
@@ -379,10 +337,7 @@ async fn the_kill_switch_stops_writes_but_not_reads() {
 
     // An item that was already waiting cannot be approved, and stays pending.
     let blocked = rig.engine.approve("kim", waiting, None).await;
-    assert!(
-        matches!(blocked, Err(ApiError::NotAllowed(_))),
-        "{blocked:?}"
-    );
+    assert!(matches!(blocked, Err(ApiError::NotAllowed(_))), "{blocked:?}");
     let item = rig
         .engine
         .snapshot("kim")
@@ -396,8 +351,7 @@ async fn the_kill_switch_stops_writes_but_not_reads() {
     assert!(rig.slack.calls().is_empty());
 
     // A read still runs.
-    rig.llm
-        .reply(&call("slack/search", json!({"query": "deploy"})), 10);
+    rig.llm.reply(&call("slack/search", json!({"query": "deploy"})), 10);
     let read = rig.engine.ingest("kim", event("e3", "hi")).await.unwrap();
     assert!(matches!(read, Outcome::Executed { .. }), "{read:?}");
     assert_eq!(rig.slack.calls().len(), 1);
@@ -437,10 +391,7 @@ async fn the_kill_switch_stays_on_after_a_restart() {
 
     assert!(restarted.snapshot("kim").await.unwrap().kill_switch);
     let blocked = restarted.approve("kim", waiting, None).await;
-    assert!(
-        matches!(blocked, Err(ApiError::NotAllowed(_))),
-        "{blocked:?}"
-    );
+    assert!(matches!(blocked, Err(ApiError::NotAllowed(_))), "{blocked:?}");
     assert!(slack.calls().is_empty());
 }
 
@@ -468,8 +419,7 @@ async fn a_changed_tool_description_blocks_new_and_waiting_calls() {
     assert!(rig.slack.calls().is_empty());
 
     // An unchanged tool of the same connector still works.
-    rig.llm
-        .reply(&call("slack/search", json!({"query": "x"})), 10);
+    rig.llm.reply(&call("slack/search", json!({"query": "x"})), 10);
     assert!(matches!(
         rig.engine.ingest("kim", event("e3", "hi")).await.unwrap(),
         Outcome::Executed { .. }
@@ -490,8 +440,7 @@ async fn each_tier_gives_its_own_outcome() {
 
     set_tier(&rig, "slack/post", Tier::Draft).await;
     rig.llm.reply(&post("draft"), 10);
-    let Outcome::Drafted { inbox_id } = rig.engine.ingest("kim", event("e2", "hi")).await.unwrap()
-    else {
+    let Outcome::Drafted { inbox_id } = rig.engine.ingest("kim", event("e2", "hi")).await.unwrap() else {
         panic!("expected a draft")
     };
     // A draft cannot be approved into a call.
@@ -514,13 +463,9 @@ async fn each_tier_gives_its_own_outcome() {
 
     // A delete never runs without approval, even at the autonomous tier.
     set_tier(&rig, "slack/delete_message", Tier::Autonomous).await;
-    rig.llm
-        .reply(&call("slack/delete_message", json!({"ts": "1"})), 10);
+    rig.llm.reply(&call("slack/delete_message", json!({"ts": "1"})), 10);
     let outcome = rig.engine.ingest("kim", event("e4", "hi")).await.unwrap();
-    assert!(
-        matches!(outcome, Outcome::PendingApproval { .. }),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, Outcome::PendingApproval { .. }), "{outcome:?}");
     assert_eq!(rig.slack.calls().len(), 1);
 }
 
@@ -541,22 +486,14 @@ async fn an_escalation_can_be_dismissed_but_not_approved() {
     let rig = rig().await;
     let reply = json!({"kind": "escalate", "rationale": "budget question", "summary": "Lee asks for approval of a purchase.", "tool": null, "args_json": null});
     rig.llm.reply(&reply.to_string(), 10);
-    let Outcome::Escalated { inbox_id } = rig
-        .engine
-        .ingest("kim", event("e1", "can we buy it?"))
-        .await
-        .unwrap()
-    else {
+    let Outcome::Escalated { inbox_id } = rig.engine.ingest("kim", event("e1", "can we buy it?")).await.unwrap() else {
         panic!("expected an escalation")
     };
     assert!(matches!(
         rig.engine.approve("kim", inbox_id, None).await,
         Err(ApiError::NotAllowed(_))
     ));
-    rig.engine
-        .reject("kim", inbox_id, "handled in person")
-        .await
-        .unwrap();
+    rig.engine.reject("kim", inbox_id, "handled in person").await.unwrap();
     let snapshot = rig.engine.snapshot("kim").await.unwrap();
     assert_eq!(snapshot.inbox[0].state, ApprovalState::Rejected);
     assert!(
@@ -597,10 +534,8 @@ async fn a_failed_call_is_reported_and_not_retried() {
 async fn a_message_without_markable_text_is_not_queued() {
     let rig = rig().await;
     // The proposal has no `text`, so the AI marker cannot be added.
-    rig.llm.reply(
-        &call("slack/post", json!({"channel": "C1", "blocks": []})),
-        10,
-    );
+    rig.llm
+        .reply(&call("slack/post", json!({"channel": "C1", "blocks": []})), 10);
     let outcome = rig.engine.ingest("kim", event("e1", "hi")).await.unwrap();
     assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
     assert!(rig.engine.snapshot("kim").await.unwrap().inbox.is_empty());
@@ -622,11 +557,7 @@ async fn work_products_are_saved_and_readable() {
         let bytes = std::fs::read(folder.join(&artifact.sha256)).unwrap();
         assert_eq!(bytes.len() as u64, artifact.size);
     }
-    let result = snapshot
-        .artifacts
-        .iter()
-        .find(|a| a.kind == "tool_result")
-        .unwrap();
+    let result = snapshot.artifacts.iter().find(|a| a.kind == "tool_result").unwrap();
     let text = std::fs::read_to_string(folder.join(&result.sha256)).unwrap();
     assert!(text.contains(MARKER));
 }
@@ -669,11 +600,7 @@ async fn profiles_do_not_share_events_or_inbox_items() {
     assert!(lee.artifacts.is_empty());
     // The same source event is new for the other profile.
     rig.llm.reply(&post("for lee"), 10);
-    let outcome = rig
-        .engine
-        .ingest("lee", event("e1", "please answer"))
-        .await
-        .unwrap();
+    let outcome = rig.engine.ingest("lee", event("e1", "please answer")).await.unwrap();
     assert!(matches!(outcome, Outcome::PendingApproval { .. }));
     let ids: Vec<String> = rig
         .engine

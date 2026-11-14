@@ -1,11 +1,8 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
-use bunsin_api::http::{
-    ApproveBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path,
-};
+use bunsin_api::http::{ApproveBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
-    ApiError, ApiResult, Edit, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult,
+    ApiError, ApiResult, Edit, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
@@ -58,16 +55,13 @@ fn is_loopback(url: &Url) -> bool {
 impl RemoteEngine {
     pub fn new(config: &RemoteConfig, token: &str) -> ApiResult<Self> {
         let invalid = |message: String| ApiError::Invalid(message);
-        let base = Url::parse(config.url.trim())
-            .map_err(|e| invalid(format!("the server address is invalid: {e}")))?;
+        let base = Url::parse(config.url.trim()).map_err(|e| invalid(format!("the server address is invalid: {e}")))?;
         match base.scheme() {
             "https" => {}
             // The access token must not cross a network in clear text.
             "http" if is_loopback(&base) => {}
             "http" => {
-                return Err(invalid(
-                    "use https:// for a server on another machine".into(),
-                ));
+                return Err(invalid("use https:// for a server on another machine".into()));
             }
             other => {
                 return Err(invalid(format!(
@@ -83,10 +77,8 @@ impl RemoteEngine {
         if token.trim().is_empty() {
             return Err(ApiError::Unauthorized("no access token is set".into()));
         }
-        let mut auth =
-            HeaderValue::from_str(&format!("Bearer {}", token.trim())).map_err(|_| {
-                ApiError::Unauthorized("the access token has characters that cannot be sent".into())
-            })?;
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
+            .map_err(|_| ApiError::Unauthorized("the access token has characters that cannot be sent".into()))?;
         auth.set_sensitive(true);
 
         let mut builder = reqwest::Client::builder()
@@ -99,9 +91,7 @@ impl RemoteEngine {
                 .map_err(|e| invalid(format!("the CA certificate cannot be read: {e}")))?;
             // Text without a certificate parses as an empty list, which would trust no server.
             if certs.is_empty() {
-                return Err(invalid(
-                    "the CA certificate file holds no certificate".into(),
-                ));
+                return Err(invalid("the CA certificate file holds no certificate".into()));
             }
             builder = builder.tls_certs_only(certs);
         }
@@ -118,25 +108,16 @@ impl RemoteEngine {
         body: Option<&B>,
     ) -> ApiResult<T> {
         let text = self.send(method, path, body).await?;
-        serde_json::from_str(&text)
-            .map_err(|e| ApiError::Unreachable(format!("the server reply cannot be read: {e}")))
+        serde_json::from_str(&text).map_err(|e| ApiError::Unreachable(format!("the server reply cannot be read: {e}")))
     }
 
     /// Sends one request. Returns the reply body of a 2xx answer.
-    async fn send<B: Serialize + Sync>(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&B>,
-    ) -> ApiResult<String> {
+    async fn send<B: Serialize + Sync>(&self, method: Method, path: &str, body: Option<&B>) -> ApiResult<String> {
         let url = self
             .base
             .join(path)
             .map_err(|e| ApiError::Invalid(format!("the request path is invalid: {e}")))?;
-        let mut request = self
-            .http
-            .request(method, url)
-            .header(AUTHORIZATION, self.auth.clone());
+        let mut request = self.http.request(method, url).header(AUTHORIZATION, self.auth.clone());
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -151,9 +132,9 @@ impl RemoteEngine {
         match serde_json::from_str::<ErrorBody>(&text) {
             Ok(body) => Err(body.error),
             // Not a Bunsin error: a proxy page, or another service at this address.
-            Err(_) if status.as_u16() == 401 => Err(ApiError::Unauthorized(
-                "the server refused the access token".into(),
-            )),
+            Err(_) if status.as_u16() == 401 => {
+                Err(ApiError::Unauthorized("the server refused the access token".into()))
+            }
             Err(_) => Err(ApiError::Unreachable(format!(
                 "the server answered HTTP {} without a Bunsin error",
                 status.as_u16()
@@ -161,12 +142,7 @@ impl RemoteEngine {
         }
     }
 
-    async fn send_only<B: Serialize + Sync>(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&B>,
-    ) -> ApiResult<()> {
+    async fn send_only<B: Serialize + Sync>(&self, method: Method, path: &str, body: Option<&B>) -> ApiResult<()> {
         self.send(method, path, body).await.map(|_| ())
     }
 }
@@ -179,17 +155,10 @@ impl EngineApi for RemoteEngine {
     }
 
     fn profile_config<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<ProfileConfig>> {
-        Box::pin(async move {
-            self.call(Method::GET, &profile_path(profile, "config"), NO_BODY)
-                .await
-        })
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "config"), NO_BODY).await })
     }
 
-    fn set_profile_config<'a>(
-        &'a self,
-        profile: &'a str,
-        config: ProfileConfig,
-    ) -> BoxFuture<'a, ApiResult<()>> {
+    fn set_profile_config<'a>(&'a self, profile: &'a str, config: ProfileConfig) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             self.send_only(Method::PUT, &profile_path(profile, "config"), Some(&config))
                 .await
@@ -203,36 +172,21 @@ impl EngineApi for RemoteEngine {
         })
     }
 
-    fn ingest<'a>(
-        &'a self,
-        profile: &'a str,
-        event: InboundEvent,
-    ) -> BoxFuture<'a, ApiResult<Outcome>> {
+    fn ingest<'a>(&'a self, profile: &'a str, event: InboundEvent) -> BoxFuture<'a, ApiResult<Outcome>> {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "events"), Some(&event))
                 .await
         })
     }
 
-    fn approve<'a>(
-        &'a self,
-        profile: &'a str,
-        inbox_id: i64,
-        edit: Option<Edit>,
-    ) -> BoxFuture<'a, ApiResult<Outcome>> {
+    fn approve<'a>(&'a self, profile: &'a str, inbox_id: i64, edit: Option<Edit>) -> BoxFuture<'a, ApiResult<Outcome>> {
         Box::pin(async move {
             let path = profile_path(profile, &format!("inbox/{inbox_id}/approve"));
-            self.call(Method::POST, &path, Some(&ApproveBody { edit }))
-                .await
+            self.call(Method::POST, &path, Some(&ApproveBody { edit })).await
         })
     }
 
-    fn reject<'a>(
-        &'a self,
-        profile: &'a str,
-        inbox_id: i64,
-        reason: &'a str,
-    ) -> BoxFuture<'a, ApiResult<()>> {
+    fn reject<'a>(&'a self, profile: &'a str, inbox_id: i64, reason: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let path = profile_path(profile, &format!("inbox/{inbox_id}/reject"));
             self.send_only(
@@ -249,18 +203,12 @@ impl EngineApi for RemoteEngine {
     fn set_kill_switch<'a>(&'a self, profile: &'a str, on: bool) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move {
             let path = profile_path(profile, "kill-switch");
-            let reply: KillSwitchBody = self
-                .call(Method::PUT, &path, Some(&KillSwitchBody { on }))
-                .await?;
+            let reply: KillSwitchBody = self.call(Method::PUT, &path, Some(&KillSwitchBody { on })).await?;
             Ok(reply.on)
         })
     }
 
-    fn replay<'a>(
-        &'a self,
-        profile: &'a str,
-        case: ReplayCase,
-    ) -> BoxFuture<'a, ApiResult<ReplayResult>> {
+    fn replay<'a>(&'a self, profile: &'a str, case: ReplayCase) -> BoxFuture<'a, ApiResult<ReplayResult>> {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "replay"), Some(&case))
                 .await
@@ -320,10 +268,7 @@ mod tests {
             "https://user:pw@bunsin.example.com",
             "https://bunsin.example.com/?token=x",
         ] {
-            assert!(
-                matches!(connect(url, "bsn_x"), Err(ApiError::Invalid(_))),
-                "{url}"
-            );
+            assert!(matches!(connect(url, "bsn_x"), Err(ApiError::Invalid(_))), "{url}");
         }
         assert!(matches!(
             connect("https://bunsin.example.com", "  "),
@@ -337,10 +282,7 @@ mod tests {
             url: "https://bunsin.example.com".into(),
             ca_cert_pem: Some(b"not a certificate".to_vec()),
         };
-        assert!(matches!(
-            RemoteEngine::new(&bad_ca, "bsn_x"),
-            Err(ApiError::Invalid(_))
-        ));
+        assert!(matches!(RemoteEngine::new(&bad_ca, "bsn_x"), Err(ApiError::Invalid(_))));
     }
 
     #[test]

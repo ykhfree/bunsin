@@ -21,11 +21,7 @@ pub fn apply_marker(text: &str, marker: &str) -> String {
 }
 
 /// Marks the outgoing-text argument of a tool call.
-pub fn mark_args(
-    args: &mut Map<String, Value>,
-    text_arg: &str,
-    marker: &str,
-) -> Result<(), MarkerError> {
+pub fn mark_args(args: &mut Map<String, Value>, text_arg: &str, marker: &str) -> Result<(), MarkerError> {
     if marker.trim().is_empty() {
         return Err(MarkerError::EmptyMarker);
     }
@@ -61,10 +57,7 @@ mod tests {
 
     #[test]
     fn mark_args_changes_only_the_text_argument() {
-        let mut args = json!({"channel": "C1", "text": "hello"})
-            .as_object()
-            .unwrap()
-            .clone();
+        let mut args = json!({"channel": "C1", "text": "hello"}).as_object().unwrap().clone();
         mark_args(&mut args, "text", MARKER).unwrap();
         assert_eq!(args["channel"], "C1");
         assert_eq!(args["text"], format!("hello\n\n{MARKER}"));
@@ -83,9 +76,6 @@ mod tests {
             Err(MarkerError::TextArgNotString("text".into()))
         );
         let mut args = json!({"text": "hello"}).as_object().unwrap().clone();
-        assert_eq!(
-            mark_args(&mut args, "text", "  "),
-            Err(MarkerError::EmptyMarker)
-        );
+        assert_eq!(mark_args(&mut args, "text", "  "), Err(MarkerError::EmptyMarker));
     }
 }

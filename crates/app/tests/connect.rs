@@ -3,14 +3,12 @@
 mod common;
 
 use bunsin_app::connect::{AppView, Source};
-use bunsin_app::connection::{
-    Connection, MemoryTokenStore, TokenStore, load_connection, save_connection,
-};
+use bunsin_app::connection::{Connection, MemoryTokenStore, TokenStore, load_connection, save_connection};
 use bunsin_daemon::server::{Running, ServeConfig, serve};
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, Entity, Point, TestAppContext, Window, WindowBounds,
-    WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, Entity, Point, TestAppContext, Window, WindowBounds, WindowOptions, px,
+    size,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -58,11 +56,7 @@ impl Test {
                 tls: None,
             };
             let running = serve(rig.engine.clone(), config).await.unwrap();
-            Server {
-                rig,
-                running,
-                token,
-            }
+            Server { rig, running, token }
         });
         Self {
             rt,
@@ -119,12 +113,7 @@ impl Test {
 }
 
 /// Waits in real time, because the server runs on tokio threads. Fails after 10 seconds.
-fn wait_until(
-    cx: &mut TestAppContext,
-    view: &Entity<AppView>,
-    what: &str,
-    done: impl Fn(&AppView, &App) -> bool,
-) {
+fn wait_until(cx: &mut TestAppContext, view: &Entity<AppView>, what: &str, done: impl Fn(&AppView, &App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         cx.run_until_parked();
@@ -170,12 +159,7 @@ fn screen_texts(window: &Window) -> Vec<String> {
 }
 
 /// Fails if `secret` is in any accessibility text. `shown` must be found, so the scan is real.
-fn assert_not_on_screen(
-    cx: &mut TestAppContext,
-    window: AnyWindowHandle,
-    secret: &str,
-    shown: &str,
-) {
+fn assert_not_on_screen(cx: &mut TestAppContext, window: AnyWindowHandle, secret: &str, shown: &str) {
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         let texts = screen_texts(window);
@@ -278,9 +262,7 @@ fn plain_http_to_another_machine_is_refused_before_any_request(cx: &mut TestAppC
     let (window, view) = t.open(cx, t.saved());
     fill_and_connect(cx, window, "http://bunsin.example.com", &t.server.token);
     // No wait: the address check runs in the click, before any request starts.
-    let (connecting, error) = view.read_with(cx, |view, _| {
-        (view.connecting(), view.error().map(str::to_owned))
-    });
+    let (connecting, error) = view.read_with(cx, |view, _| (view.connecting(), view.error().map(str::to_owned)));
     assert!(!connecting);
     let error = error.unwrap();
     assert!(error.contains("use https://"), "{error}");
@@ -293,10 +275,7 @@ fn a_saved_connection_goes_straight_to_the_shell(cx: &mut TestAppContext) {
     t.save_good_connection();
     let (window, view) = t.open(cx, t.saved());
     wait_until(cx, &view, "the shell with a snapshot", shell_loaded);
-    assert_eq!(
-        label(cx, window, "profile-kim").as_deref(),
-        Some("● Kim (kim)")
-    );
+    assert_eq!(label(cx, window, "profile-kim").as_deref(), Some("● Kim (kim)"));
     assert_not_on_screen(cx, window, &t.server.token, "Kim (kim)");
 }
 
@@ -331,9 +310,7 @@ fn a_saved_address_without_a_token_shows_the_form_without_an_error(cx: &mut Test
     t.tokens.delete().unwrap();
     let (window, view) = t.open(cx, t.saved());
     cx.run_until_parked();
-    let (connecting, error) = view.read_with(cx, |view, _| {
-        (view.connecting(), view.error().map(str::to_owned))
-    });
+    let (connecting, error) = view.read_with(cx, |view, _| (view.connecting(), view.error().map(str::to_owned)));
     assert!(!connecting);
     assert_eq!(error, None);
     cx.update_window(window, |_, window, cx| {
@@ -435,10 +412,7 @@ fn a_fixed_connection_goes_straight_to_the_shell(cx: &mut TestAppContext) {
     };
     let (window, view) = t.open(cx, source);
     wait_until(cx, &view, "the shell with a snapshot", shell_loaded);
-    assert_eq!(
-        label(cx, window, "profile-kim").as_deref(),
-        Some("● Kim (kim)")
-    );
+    assert_eq!(label(cx, window, "profile-kim").as_deref(), Some("● Kim (kim)"));
 }
 
 #[gpui_kit::test]

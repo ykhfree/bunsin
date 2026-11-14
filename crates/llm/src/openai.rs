@@ -54,8 +54,7 @@ struct ReplyUsage {
 }
 
 pub(crate) fn parse_reply(body: &[u8]) -> Result<CompletionResponse, LlmError> {
-    let reply: Reply =
-        serde_json::from_slice(body).map_err(|e| LlmError::Malformed(e.to_string()))?;
+    let reply: Reply = serde_json::from_slice(body).map_err(|e| LlmError::Malformed(e.to_string()))?;
     let choice = reply
         .choices
         .into_iter()
@@ -78,9 +77,7 @@ pub(crate) fn parse_reply(body: &[u8]) -> Result<CompletionResponse, LlmError> {
         "length" => StopReason::MaxTokens,
         "content_filter" => StopReason::Refusal,
         other => {
-            return Err(LlmError::Malformed(format!(
-                "unexpected finish_reason `{other}`"
-            )));
+            return Err(LlmError::Malformed(format!("unexpected finish_reason `{other}`")));
         }
     };
     Ok(CompletionResponse {

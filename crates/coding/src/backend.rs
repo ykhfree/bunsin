@@ -183,10 +183,7 @@ mod tests {
         };
         let spec = backend.command(&job(), Path::new("/work/job-1"));
         assert_eq!(spec.program, PathBuf::from("/opt/bin/claude"));
-        assert_eq!(
-            spec.args,
-            ["-p", "--output-format", "stream-json", "--verbose"]
-        );
+        assert_eq!(spec.args, ["-p", "--output-format", "stream-json", "--verbose"]);
         assert_eq!(spec.stdin.as_deref(), Some(job().instructions.as_str()));
         assert!(spec.env.is_empty());
         assert_no_bypass(&spec);
@@ -213,10 +210,7 @@ mod tests {
         let spec = backend.command(&job(), Path::new("/work/job-1"));
         assert_eq!(spec.args, ["run", "{instructions}"]);
         assert_eq!(spec.stdin.as_deref(), Some(job().instructions.as_str()));
-        assert_eq!(
-            backend.parse("{\"result\":\"done\"}"),
-            BackendReport::default()
-        );
+        assert_eq!(backend.parse("{\"result\":\"done\"}"), BackendReport::default());
     }
 
     // Hand-written sample in the documented stream-json shape. It is not a capture of a real run.

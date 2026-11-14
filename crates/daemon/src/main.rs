@@ -179,21 +179,17 @@ fn now() -> i64 {
 }
 
 fn open_store(local: &Local) -> Result<AppStore, String> {
-    std::fs::create_dir_all(&local.data_dir)
-        .map_err(|e| format!("cannot create the data directory: {e}"))?;
+    std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     AppStore::open(&local.data_dir).map_err(|e| e.to_string())
 }
 
 fn connect(remote: &Remote) -> Result<RemoteEngine, String> {
     let ca_cert_pem = match &remote.ca_cert {
-        Some(path) => {
-            Some(std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?)
-        }
+        Some(path) => Some(std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?),
         None => None,
     };
     // The token comes from the environment only. A command-line flag would show in the process list.
-    let token = std::env::var("BUNSIN_TOKEN")
-        .map_err(|_| "set BUNSIN_TOKEN to your access token".to_owned())?;
+    let token = std::env::var("BUNSIN_TOKEN").map_err(|_| "set BUNSIN_TOKEN to your access token".to_owned())?;
     RemoteEngine::new(
         &RemoteConfig {
             url: remote.server.clone(),
@@ -210,11 +206,9 @@ async fn run_server(
     tls: Option<(PathBuf, PathBuf)>,
     backends: RealBackends,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(&local.data_dir)
-        .map_err(|e| format!("cannot create the data directory: {e}"))?;
+    std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
-    let engine =
-        Engine::open(&local.data_dir, backends, Arc::new(now)).map_err(|e| e.to_string())?;
+    let engine = Engine::open(&local.data_dir, backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let running = serve(Arc::new(engine), ServeConfig { listen, tls })
         .await
         .map_err(|e| e.to_string())?;
@@ -249,43 +243,28 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
-            let backends =
-                RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
+            let backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
             run_server(local, listen, tls_cert.zip(tls_key), backends).await?;
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;
-            let info =
-                bunsin_engine::create_profile(&store, &id, &ProfileConfig::new(&owner), now())
-                    .map_err(text)?;
+            let info = bunsin_engine::create_profile(&store, &id, &ProfileConfig::new(&owner), now()).map_err(text)?;
             println!("created profile {} for {}", info.id, info.display_name);
         }
-        Command::TokenAdd {
-            local,
-            profile,
-            label,
-        } => {
+        Command::TokenAdd { local, profile, label } => {
             let token = open_store(&local)?
                 .add_token(&profile, &label, now())
                 .map_err(|e| e.to_string())?;
             println!("{token}");
-            eprintln!(
-                "This token gives access to profile {profile}. It is shown once and is not stored."
-            );
+            eprintln!("This token gives access to profile {profile}. It is shown once and is not stored.");
         }
         Command::TokenList { local } => {
-            for token in open_store(&local)?
-                .list_tokens()
-                .map_err(|e| e.to_string())?
-            {
+            for token in open_store(&local)?.list_tokens().map_err(|e| e.to_string())? {
                 println!("{}\t{}\t{}", token.id, token.profile, token.label);
             }
         }
         Command::TokenRevoke { local, id } => {
-            match open_store(&local)?
-                .revoke_token(&id)
-                .map_err(|e| e.to_string())?
-            {
+            match open_store(&local)?.revoke_token(&id).map_err(|e| e.to_string())? {
                 0 => return Err(format!("no token has the ID `{id}`")),
                 _ => println!("token {id} removed"),
             }
@@ -298,23 +277,13 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::ConfigShow { remote, profile } => {
             println!(
                 "{}",
-                json(
-                    &connect(&remote)?
-                        .profile_config(&profile)
-                        .await
-                        .map_err(text)?
-                )
+                json(&connect(&remote)?.profile_config(&profile).await.map_err(text)?)
             );
         }
-        Command::ConfigSet {
-            remote,
-            profile,
-            file,
-        } => {
-            let content = std::fs::read_to_string(&file)
-                .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-            let config: ProfileConfig = serde_json::from_str(&content)
-                .map_err(|e| format!("the settings file is invalid: {e}"))?;
+        Command::ConfigSet { remote, profile, file } => {
+            let content = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            let config: ProfileConfig =
+                serde_json::from_str(&content).map_err(|e| format!("the settings file is invalid: {e}"))?;
             connect(&remote)?
                 .set_profile_config(&profile, config)
                 .await
@@ -323,10 +292,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Status { remote, profile } => {
             let snapshot = connect(&remote)?.snapshot(&profile).await.map_err(text)?;
-            println!(
-                "kill switch: {}",
-                if snapshot.kill_switch { "on" } else { "off" }
-            );
+            println!("kill switch: {}", if snapshot.kill_switch { "on" } else { "off" });
             println!("inbox: {} item(s)", snapshot.inbox.len());
             for item in &snapshot.inbox {
                 let what = match &item.body {
@@ -338,11 +304,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 println!("  #{} [{}] {what}", item.id, item.state.as_str());
             }
         }
-        Command::Stop {
-            remote,
-            profile,
-            state,
-        } => {
+        Command::Stop { remote, profile, state } => {
             let on = connect(&remote)?
                 .set_kill_switch(&profile, state == "on")
                 .await
@@ -367,12 +329,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             };
             println!(
                 "{}",
-                json(
-                    &connect(&remote)?
-                        .ingest(&profile, event)
-                        .await
-                        .map_err(text)?
-                )
+                json(&connect(&remote)?.ingest(&profile, event).await.map_err(text)?)
             );
         }
         Command::Approve {
@@ -384,8 +341,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         } => {
             let edit = match (args, reason) {
                 (Some(args), Some(reason)) => {
-                    let args = serde_json::from_str(&args)
-                        .map_err(|e| format!("--args is not a JSON object: {e}"))?;
+                    let args = serde_json::from_str(&args).map_err(|e| format!("--args is not a JSON object: {e}"))?;
                     Some(Edit { args, reason })
                 }
                 _ => None,

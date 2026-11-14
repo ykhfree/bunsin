@@ -157,47 +157,17 @@ mod tests {
             (Read, Tier::Autonomous, true, false, Execute),
             (Read, Tier::Observe, true, false, Execute),
             (Read, Tier::Autonomous, true, true, Execute),
-            (
-                Read,
-                Tier::Autonomous,
-                false,
-                false,
-                Deny(DenyReason::PinChanged),
-            ),
+            (Read, Tier::Autonomous, false, false, Deny(DenyReason::PinChanged)),
             (Write, Tier::Observe, true, false, RecordOnly),
             (Write, Tier::Draft, true, false, DraftOnly),
             (Write, Tier::Approve, true, false, NeedsApproval),
             (Write, Tier::Autonomous, true, false, Execute),
-            (
-                Write,
-                Tier::Autonomous,
-                true,
-                true,
-                Deny(DenyReason::KillSwitch),
-            ),
-            (
-                Write,
-                Tier::Observe,
-                true,
-                true,
-                Deny(DenyReason::KillSwitch),
-            ),
-            (
-                Write,
-                Tier::Autonomous,
-                false,
-                false,
-                Deny(DenyReason::PinChanged),
-            ),
+            (Write, Tier::Autonomous, true, true, Deny(DenyReason::KillSwitch)),
+            (Write, Tier::Observe, true, true, Deny(DenyReason::KillSwitch)),
+            (Write, Tier::Autonomous, false, false, Deny(DenyReason::PinChanged)),
             (Delete, Tier::Approve, true, false, NeedsApproval),
             (Delete, Tier::Autonomous, true, false, NeedsApproval),
-            (
-                Delete,
-                Tier::Autonomous,
-                true,
-                true,
-                Deny(DenyReason::KillSwitch),
-            ),
+            (Delete, Tier::Autonomous, true, true, Deny(DenyReason::KillSwitch)),
         ];
         for (class, tier, pin_holds, kill_switch, expected) in cases {
             let p = policy(&[("slack/tool", class, tier)]);
@@ -236,20 +206,16 @@ mod tests {
     #[test]
     fn a_rule_must_say_where_the_outgoing_text_is() {
         let parse = |text: &str| serde_json::from_str::<ToolRule>(text);
-        let rule =
-            parse(r#"{"class": "write", "tier": "approve", "outgoing_text": {"arg": "text"}}"#)
-                .unwrap();
+        let rule = parse(r#"{"class": "write", "tier": "approve", "outgoing_text": {"arg": "text"}}"#).unwrap();
         assert_eq!(rule.text_arg(), Some("text"));
-        let silent =
-            parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none"}"#).unwrap();
+        let silent = parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none"}"#).unwrap();
         assert_eq!(silent.text_arg(), None);
         // Leaving the field out is an error, not "no marker".
         assert!(parse(r#"{"class": "write", "tier": "approve"}"#).is_err());
         // A misspelled field is an error too.
-        assert!(parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none", "text_args": "text"}"#).is_err());
         assert!(
-            parse(r#"{"class": "write", "tier": "approve", "outgoing_txt": {"arg": "text"}}"#)
-                .is_err()
+            parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none", "text_args": "text"}"#).is_err()
         );
+        assert!(parse(r#"{"class": "write", "tier": "approve", "outgoing_txt": {"arg": "text"}}"#).is_err());
     }
 }

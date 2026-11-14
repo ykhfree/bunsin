@@ -104,13 +104,9 @@ async fn maps_length_to_max_tokens() {
 #[tokio::test]
 async fn maps_refusal_field_to_refusal() {
     // A structured-output refusal has finish_reason "stop", null content and a refusal text.
-    let response = complete(ok(reply(
-        Value::Null,
-        json!("I can't help with that."),
-        "stop",
-    )))
-    .await
-    .unwrap();
+    let response = complete(ok(reply(Value::Null, json!("I can't help with that."), "stop")))
+        .await
+        .unwrap();
     assert_eq!(response.stop, StopReason::Refusal);
     assert_eq!(response.content, "I can't help with that.");
 }
@@ -185,13 +181,10 @@ async fn maps_timeout_to_transport() {
     let (base, _) = serve_once(Reply::Hang).await;
     let client = client_with_timeout(Wire::OpenAiChat, base, Duration::from_millis(200));
     // The outer limit makes a missing client timeout fail the test instead of hanging it.
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        client.complete(request("be brief", None)),
-    )
-    .await
-    .expect("the client did not time out")
-    .unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(5), client.complete(request("be brief", None)))
+        .await
+        .expect("the client did not time out")
+        .unwrap_err();
     assert!(matches!(error, LlmError::Transport(_)), "{error:?}");
     assert_no_token(&error);
 }

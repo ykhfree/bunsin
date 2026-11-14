@@ -34,15 +34,9 @@ pub enum ProposalError {
     #[error("`rationale` is empty")]
     EmptyRationale,
     #[error("kind `{kind}` needs `{field}`")]
-    MissingField {
-        kind: &'static str,
-        field: &'static str,
-    },
+    MissingField { kind: &'static str, field: &'static str },
     #[error("kind `{kind}` must not set `{field}`")]
-    UnexpectedField {
-        kind: &'static str,
-        field: &'static str,
-    },
+    UnexpectedField { kind: &'static str, field: &'static str },
     #[error("`tool` must be `<connector>/<tool>`")]
     BadToolId,
     #[error("`args_json` is not a JSON object: {0}")]
@@ -91,8 +85,7 @@ pub fn proposal_schema() -> Value {
 
 /// Parses and checks an LLM reply. A reply that fails here never reaches the policy check.
 pub fn parse_proposal(reply: &str) -> Result<Proposal, ProposalError> {
-    let raw: Raw =
-        serde_json::from_str(reply.trim()).map_err(|e| ProposalError::Json(e.to_string()))?;
+    let raw: Raw = serde_json::from_str(reply.trim()).map_err(|e| ProposalError::Json(e.to_string()))?;
     if raw.rationale.trim().is_empty() {
         return Err(ProposalError::EmptyRationale);
     }
@@ -180,24 +173,13 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_proposal(&reply(
-                "escalate",
-                json!("needs a decision"),
-                n.clone(),
-                n.clone()
-            )),
+            parse_proposal(&reply("escalate", json!("needs a decision"), n.clone(), n.clone())),
             Ok(Proposal::Escalate {
                 rationale: "because".into(),
                 summary: "needs a decision".into()
             })
         );
-        let parsed = parse_proposal(&reply(
-            "tool_call",
-            n,
-            json!("slack/post"),
-            json!({"text": "hi"}),
-        ))
-        .unwrap();
+        let parsed = parse_proposal(&reply("tool_call", n, json!("slack/post"), json!({"text": "hi"}))).unwrap();
         let Proposal::ToolCall { tool, args, .. } = parsed else {
             panic!("expected a tool call")
         };

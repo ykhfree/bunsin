@@ -9,10 +9,7 @@ use std::pin::Pin;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait LlmClient: Send + Sync {
-    fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> BoxFuture<'_, Result<CompletionResponse, LlmError>>;
+    fn complete(&self, request: CompletionRequest) -> BoxFuture<'_, Result<CompletionResponse, LlmError>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -30,9 +27,5 @@ pub trait Connector: Send + Sync {
     /// The connector name. Tool IDs are `<name>/<tool>`.
     fn name(&self) -> &str;
     fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolSpec>, ConnectorError>>;
-    fn call_tool(
-        &self,
-        tool: &str,
-        args: Map<String, Value>,
-    ) -> BoxFuture<'_, Result<Value, ConnectorError>>;
+    fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>>;
 }

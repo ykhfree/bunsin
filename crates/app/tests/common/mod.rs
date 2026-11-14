@@ -16,11 +16,7 @@ struct Fakes {
 }
 
 impl Backends for Fakes {
-    fn build<'a>(
-        &'a self,
-        _profile: &'a str,
-        _config: &'a ProfileConfig,
-    ) -> BoxFuture<'a, Result<Runtime, String>> {
+    fn build<'a>(&'a self, _profile: &'a str, _config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
         let llm: Arc<dyn LlmClient> = self.llm.clone();
         let slack: Arc<dyn Connector> = self.slack.clone();
         Box::pin(async move {
@@ -58,10 +54,7 @@ pub async fn rig() -> Rig {
             "slack/post".into(),
             ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
         );
-        engine
-            .create_profile(&owner.to_lowercase(), config)
-            .await
-            .unwrap();
+        engine.create_profile(&owner.to_lowercase(), config).await.unwrap();
     }
     let proposal = json!({
         "kind": "tool_call", "rationale": "Lee asked for the time", "summary": null,

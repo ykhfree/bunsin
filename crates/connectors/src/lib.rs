@@ -60,9 +60,7 @@ impl McpConnector {
                 let http = reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
-                    .map_err(|e| {
-                        ConnectorError::Transport(format!("the HTTP client cannot start: {e}"))
-                    })?;
+                    .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))?;
                 ().serve(StreamableHttpClientTransport::with_client(http, transport))
                     .await
             }
@@ -80,9 +78,8 @@ impl McpConnector {
                 }
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(args).envs(env);
-                let transport = TokioChildProcess::new(cmd).map_err(|e| {
-                    ConnectorError::Transport(format!("cannot start `{}`: {e}", command.display()))
-                })?;
+                let transport = TokioChildProcess::new(cmd)
+                    .map_err(|e| ConnectorError::Transport(format!("cannot start `{}`: {e}", command.display())))?;
                 ().serve(transport).await
             }
         }
@@ -131,11 +128,7 @@ impl Connector for McpConnector {
         Box::pin(self.list_all())
     }
 
-    fn call_tool(
-        &self,
-        tool: &str,
-        args: Map<String, Value>,
-    ) -> BoxFuture<'_, Result<Value, ConnectorError>> {
+    fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>> {
         let tool = tool.to_owned();
         Box::pin(async move { self.call(&tool, args).await })
     }

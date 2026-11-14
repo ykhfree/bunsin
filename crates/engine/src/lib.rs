@@ -3,8 +3,7 @@
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
 use bunsin_api::{
-    ApiError, ApiResult, Edit, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult,
+    ApiError, ApiResult, Edit, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -36,11 +35,7 @@ pub struct Runtime {
 
 /// Builds the LLM client and the connectors of a profile from its config.
 pub trait Backends: Send + Sync {
-    fn build<'a>(
-        &'a self,
-        profile: &'a str,
-        config: &'a ProfileConfig,
-    ) -> BoxFuture<'a, Result<Runtime, String>>;
+    fn build<'a>(&'a self, profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>>;
 
     /// Checks new settings before they are stored. The error says what to change.
     fn validate(&self, _profile: &str, _config: &ProfileConfig) -> Result<(), String> {
@@ -84,22 +79,15 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
 
 fn store_error(error: StoreError) -> ApiError {
     match error {
-        StoreError::NoSuchProfile(_) | StoreError::NotFound(..) => {
-            ApiError::NotFound(error.to_string())
-        }
-        StoreError::BadProfileId(_) | StoreError::ProfileExists(_) => {
-            ApiError::Invalid(error.to_string())
-        }
+        StoreError::NoSuchProfile(_) | StoreError::NotFound(..) => ApiError::NotFound(error.to_string()),
+        StoreError::BadProfileId(_) | StoreError::ProfileExists(_) => ApiError::Invalid(error.to_string()),
         other => internal(other),
     }
 }
 
 /// The text the user sees and edits: the outgoing-text argument, or all arguments.
 fn draft_text(args: &Map<String, Value>, text_arg: Option<&str>) -> String {
-    match text_arg
-        .and_then(|name| args.get(name))
-        .and_then(Value::as_str)
-    {
+    match text_arg.and_then(|name| args.get(name)).and_then(Value::as_str) {
         Some(text) => text.to_owned(),
         None => Value::Object(args.clone()).to_string(),
     }
@@ -107,16 +95,9 @@ fn draft_text(args: &Map<String, Value>, text_arg: Option<&str>) -> String {
 
 /// Creates a profile with its settings. The server operator does this, not a profile owner.
 /// It needs no running engine, so it also works while a server uses the data directory.
-pub fn create_profile(
-    app: &AppStore,
-    id: &str,
-    config: &ProfileConfig,
-    now: i64,
-) -> ApiResult<ProfileInfo> {
+pub fn create_profile(app: &AppStore, id: &str, config: &ProfileConfig, now: i64) -> ApiResult<ProfileInfo> {
     let text = serde_json::to_string(config).map_err(internal)?;
-    let info = app
-        .create_profile(id, &config.owner_name, now)
-        .map_err(store_error)?;
+    let info = app.create_profile(id, &config.owner_name, now).map_err(store_error)?;
     let store = app.open_profile(id).map_err(store_error)?;
     store.set_setting(CONFIG_KEY, &text).map_err(store_error)?;
     store
@@ -135,11 +116,7 @@ impl Engine {
         create_profile(&self.app, id, &config, self.now())
     }
 
-    pub fn open(
-        data_dir: &Path,
-        backends: Arc<dyn Backends>,
-        clock: Clock,
-    ) -> Result<Self, OpenError> {
+    pub fn open(data_dir: &Path, backends: Arc<dyn Backends>, clock: Clock) -> Result<Self, OpenError> {
         let app = AppStore::open(data_dir)?;
         let lock = File::options()
             .create(true)
@@ -183,12 +160,7 @@ impl Engine {
         if let Some(runtime) = self.runtimes.lock().expect("engine lock").get(profile) {
             return Ok(runtime.clone());
         }
-        let runtime = Arc::new(
-            self.backends
-                .build(profile, config)
-                .await
-                .map_err(ApiError::Internal)?,
-        );
+        let runtime = Arc::new(self.backends.build(profile, config).await.map_err(ApiError::Internal)?);
         self.runtimes
             .lock()
             .expect("engine lock")
@@ -200,20 +172,10 @@ impl Engine {
         let store = self.store(profile)?;
         let config = Self::config(&store)?;
         let runtime = self.runtime(profile, &config).await?;
-        Ok(Ctx {
-            store,
-            config,
-            runtime,
-        })
+        Ok(Ctx { store, config, runtime })
     }
 
-    fn audit(
-        &self,
-        store: &ProfileStore,
-        kind: &str,
-        event_key: Option<&str>,
-        detail: Value,
-    ) -> ApiResult<()> {
+    fn audit(&self, store: &ProfileStore, kind: &str, event_key: Option<&str>, detail: Value) -> ApiResult<()> {
         store
             .append_audit(self.now(), kind, event_key, &detail)
             .map_err(store_error)
@@ -243,19 +205,9 @@ impl Engine {
 
     /// Asks the LLM for a proposal. An invalid reply gets one repair request.
     /// Returns the proposal or the reason there is none, and every raw LLM reply.
-    async fn propose(
-        &self,
-        ctx: &Ctx,
-        event: &InboundEvent,
-    ) -> ApiResult<(Result<Proposal, String>, Vec<String>)> {
-        let Ctx {
-            store,
-            config,
-            runtime,
-        } = ctx;
-        let corrections = store
-            .recent_corrections(CORRECTIONS_IN_PROMPT)
-            .map_err(store_error)?;
+    async fn propose(&self, ctx: &Ctx, event: &InboundEvent) -> ApiResult<(Result<Proposal, String>, Vec<String>)> {
+        let Ctx { store, config, runtime } = ctx;
+        let corrections = store.recent_corrections(CORRECTIONS_IN_PROMPT).map_err(store_error)?;
         let tools = Self::tool_hints(config);
         let mut request: CompletionRequest = assemble(&ContextInput {
             owner_name: &config.owner_name,
@@ -291,10 +243,7 @@ impl Engine {
             }
             if used_tokens >= config.token_budget {
                 return Ok((
-                    Err(format!(
-                        "token budget of {} is used up",
-                        config.token_budget
-                    )),
+                    Err(format!("token budget of {} is used up", config.token_budget)),
                     replies,
                 ));
             }
@@ -313,19 +262,12 @@ impl Engine {
     }
 
     async fn decide(&self, ctx: &Ctx, tool_id: &str) -> ApiResult<Decision> {
-        let Ctx {
-            store,
-            config,
-            runtime,
-        } = ctx;
+        let Ctx { store, config, runtime } = ctx;
         let kill_switch = store.kill_switch().map_err(store_error)?;
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
             Some((connector, tool)) if config.policy.rules.contains_key(tool_id) => {
-                match (
-                    config.approved_tools.get(connector),
-                    runtime.connectors.get(connector),
-                ) {
+                match (config.approved_tools.get(connector), runtime.connectors.get(connector)) {
                     (Some(approved), Some(live)) => match live.list_tools().await {
                         Ok(current) => pin_holds(&pin(approved), &current, tool),
                         Err(_) => false,
@@ -341,33 +283,20 @@ impl Engine {
     /// Runs an approved item. Only the caller that moves it to `Executing` runs it.
     async fn execute(&self, ctx: &Ctx, item: &InboxItem) -> ApiResult<Outcome> {
         let Ctx { store, runtime, .. } = ctx;
-        let InboxBody::ToolCall {
-            tool: tool_id,
-            args,
-        } = &item.body
-        else {
+        let InboxBody::ToolCall { tool: tool_id, args } = &item.body else {
             return Err(ApiError::NotAllowed("only a tool call can run".into()));
         };
         if !store
-            .move_inbox_state(
-                item.id,
-                ApprovalState::Approved,
-                ApprovalState::Executing,
-                self.now(),
-            )
+            .move_inbox_state(item.id, ApprovalState::Approved, ApprovalState::Executing, self.now())
             .map_err(store_error)?
         {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
         let key = Some(item.event_key.as_str());
-        let result =
-            match split_tool_id(tool_id).and_then(|(c, t)| Some((runtime.connectors.get(c)?, t))) {
-                Some((connector, tool)) => connector
-                    .call_tool(tool, args.clone())
-                    .await
-                    .map_err(|e| e.to_string()),
-                None => Err(format!("no connector for `{tool_id}`")),
-            };
+        let result = match split_tool_id(tool_id).and_then(|(c, t)| Some((runtime.connectors.get(c)?, t))) {
+            Some((connector, tool)) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),
+            None => Err(format!("no connector for `{tool_id}`")),
+        };
         match result {
             Ok(value) => {
                 let content = serde_json::to_vec_pretty(&value).map_err(internal)?;
@@ -375,29 +304,14 @@ impl Engine {
                     .put_artifact("tool_result", &content, self.now(), key, Some(item.id))
                     .map_err(store_error)?;
                 store
-                    .move_inbox_state(
-                        item.id,
-                        ApprovalState::Executing,
-                        ApprovalState::Executed,
-                        self.now(),
-                    )
+                    .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Executed, self.now())
                     .map_err(store_error)?;
-                self.audit(
-                    store,
-                    "executed",
-                    key,
-                    json!({"inbox_id": item.id, "tool": tool_id}),
-                )?;
+                self.audit(store, "executed", key, json!({"inbox_id": item.id, "tool": tool_id}))?;
                 Ok(Outcome::Executed { inbox_id: item.id })
             }
             Err(error) => {
                 store
-                    .move_inbox_state(
-                        item.id,
-                        ApprovalState::Executing,
-                        ApprovalState::Failed,
-                        self.now(),
-                    )
+                    .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
                     .map_err(store_error)?;
                 self.audit(
                     store,
@@ -437,11 +351,7 @@ impl Engine {
             Decision::Execute => ApprovalState::Approved,
         };
         // The marker is added before the user sees the draft, so the inbox shows what will be sent.
-        let text_arg = config
-            .policy
-            .rules
-            .get(&tool_id)
-            .and_then(|rule| rule.text_arg());
+        let text_arg = config.policy.rules.get(&tool_id).and_then(|rule| rule.text_arg());
         if let Some(text_arg) = text_arg
             && let Err(error) = mark_args(&mut args, text_arg, &config.ai_marker)
         {
@@ -455,10 +365,7 @@ impl Engine {
                 error: error.to_string(),
             });
         }
-        let body = InboxBody::ToolCall {
-            tool: tool_id,
-            args,
-        };
+        let body = InboxBody::ToolCall { tool: tool_id, args };
         let item = store
             .add_inbox_item(key, &body, rationale, state, self.now())
             .map_err(store_error)?;
@@ -473,10 +380,7 @@ impl Engine {
         let store = self.store(profile)?;
         let key = event.dedupe_key();
         let payload = serde_json::to_value(&event).map_err(internal)?;
-        if !store
-            .record_event(&key, &payload, self.now())
-            .map_err(store_error)?
-        {
+        if !store.record_event(&key, &payload, self.now()).map_err(store_error)? {
             return Ok(Outcome::Duplicate);
         }
         self.audit(
@@ -496,12 +400,7 @@ impl Engine {
         let proposal = match proposal {
             Ok(proposal) => proposal,
             Err(error) => {
-                self.audit(
-                    &store,
-                    "proposal_failed",
-                    Some(&key),
-                    json!({"error": error}),
-                )?;
+                self.audit(&store, "proposal_failed", Some(&key), json!({"error": error}))?;
                 return Ok(Outcome::Failed { error });
             }
         };
@@ -525,33 +424,17 @@ impl Engine {
                     .map_err(store_error)?;
                 Ok(Outcome::Escalated { inbox_id: item.id })
             }
-            Proposal::ToolCall {
-                rationale,
-                tool,
-                args,
-            } => {
-                self.handle_tool_call(&ctx, &key, &rationale, tool, args)
-                    .await
+            Proposal::ToolCall { rationale, tool, args } => {
+                self.handle_tool_call(&ctx, &key, &rationale, tool, args).await
             }
         }
     }
 
-    async fn approve_item(
-        &self,
-        profile: &str,
-        inbox_id: i64,
-        edit: Option<Edit>,
-    ) -> ApiResult<Outcome> {
+    async fn approve_item(&self, profile: &str, inbox_id: i64, edit: Option<Edit>) -> ApiResult<Outcome> {
         let store = self.store(profile)?;
         let mut item = store.inbox_item(inbox_id).map_err(store_error)?;
-        let InboxBody::ToolCall {
-            tool: tool_id,
-            args,
-        } = item.body.clone()
-        else {
-            return Err(ApiError::NotAllowed(
-                "an escalation cannot be approved".into(),
-            ));
+        let InboxBody::ToolCall { tool: tool_id, args } = item.body.clone() else {
+            return Err(ApiError::NotAllowed("an escalation cannot be approved".into()));
         };
         if item.state != ApprovalState::Pending {
             return Err(ApiError::NotAllowed(format!(
@@ -562,11 +445,7 @@ impl Engine {
         let ctx = self.ctx(profile).await?;
         let config = &ctx.config;
         let key = item.event_key.clone();
-        let text_arg = config
-            .policy
-            .rules
-            .get(&tool_id)
-            .and_then(|rule| rule.text_arg());
+        let text_arg = config.policy.rules.get(&tool_id).and_then(|rule| rule.text_arg());
 
         if let Some(Edit {
             args: mut edited,
@@ -575,8 +454,7 @@ impl Engine {
         {
             // The user may have removed the marker while editing. It is added again.
             if let Some(text_arg) = text_arg {
-                mark_args(&mut edited, text_arg, &config.ai_marker)
-                    .map_err(|e| ApiError::Invalid(e.to_string()))?;
+                mark_args(&mut edited, text_arg, &config.ai_marker).map_err(|e| ApiError::Invalid(e.to_string()))?;
             }
             let correction = Correction {
                 original: draft_text(&args, text_arg),
@@ -628,40 +506,25 @@ impl Engine {
             )));
         }
         if !store
-            .move_inbox_state(
-                inbox_id,
-                ApprovalState::Pending,
-                ApprovalState::Approved,
-                self.now(),
-            )
+            .move_inbox_state(inbox_id, ApprovalState::Pending, ApprovalState::Approved, self.now())
             .map_err(store_error)?
         {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
-        self.audit(
-            &store,
-            "approved",
-            Some(&key),
-            json!({"inbox_id": inbox_id}),
-        )?;
+        self.audit(&store, "approved", Some(&key), json!({"inbox_id": inbox_id}))?;
         self.execute(&ctx, &item).await
     }
 
     fn reject_item(&self, profile: &str, inbox_id: i64, reason: &str) -> ApiResult<()> {
         let store = self.store(profile)?;
         let item = store.inbox_item(inbox_id).map_err(store_error)?;
-        let moved = [ApprovalState::Pending, ApprovalState::Draft]
-            .into_iter()
-            .any(|from| {
-                store
-                    .move_inbox_state(inbox_id, from, ApprovalState::Rejected, self.now())
-                    .unwrap_or(false)
-            });
+        let moved = [ApprovalState::Pending, ApprovalState::Draft].into_iter().any(|from| {
+            store
+                .move_inbox_state(inbox_id, from, ApprovalState::Rejected, self.now())
+                .unwrap_or(false)
+        });
         if !moved {
-            return Err(ApiError::NotAllowed(format!(
-                "the item is {}",
-                item.state.as_str()
-            )));
+            return Err(ApiError::NotAllowed(format!("the item is {}", item.state.as_str())));
         }
         self.audit(
             &store,
@@ -679,13 +542,7 @@ impl Engine {
         let key = case.event.dedupe_key();
         for reply in &replies {
             store
-                .put_artifact(
-                    "replay_reply",
-                    reply.as_bytes(),
-                    self.now(),
-                    Some(&key),
-                    None,
-                )
+                .put_artifact("replay_reply", reply.as_bytes(), self.now(), Some(&key), None)
                 .map_err(store_error)?;
         }
         let (proposal, error) = match proposal {
@@ -709,16 +566,10 @@ impl EngineApi for Engine {
         Box::pin(async move { Self::config(&*self.store(profile)?) })
     }
 
-    fn set_profile_config<'a>(
-        &'a self,
-        profile: &'a str,
-        config: ProfileConfig,
-    ) -> BoxFuture<'a, ApiResult<()>> {
+    fn set_profile_config<'a>(&'a self, profile: &'a str, config: ProfileConfig) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let store = self.store(profile)?;
-            self.backends
-                .validate(profile, &config)
-                .map_err(ApiError::Invalid)?;
+            self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
             let text = serde_json::to_string(&config).map_err(internal)?;
             store.set_setting(CONFIG_KEY, &text).map_err(store_error)?;
             // The next use builds the clients again from the new settings.
@@ -745,29 +596,15 @@ impl EngineApi for Engine {
         })
     }
 
-    fn ingest<'a>(
-        &'a self,
-        profile: &'a str,
-        event: InboundEvent,
-    ) -> BoxFuture<'a, ApiResult<Outcome>> {
+    fn ingest<'a>(&'a self, profile: &'a str, event: InboundEvent) -> BoxFuture<'a, ApiResult<Outcome>> {
         Box::pin(self.ingest_event(profile, event))
     }
 
-    fn approve<'a>(
-        &'a self,
-        profile: &'a str,
-        inbox_id: i64,
-        edit: Option<Edit>,
-    ) -> BoxFuture<'a, ApiResult<Outcome>> {
+    fn approve<'a>(&'a self, profile: &'a str, inbox_id: i64, edit: Option<Edit>) -> BoxFuture<'a, ApiResult<Outcome>> {
         Box::pin(self.approve_item(profile, inbox_id, edit))
     }
 
-    fn reject<'a>(
-        &'a self,
-        profile: &'a str,
-        inbox_id: i64,
-        reason: &'a str,
-    ) -> BoxFuture<'a, ApiResult<()>> {
+    fn reject<'a>(&'a self, profile: &'a str, inbox_id: i64, reason: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.reject_item(profile, inbox_id, reason) })
     }
 
@@ -780,11 +617,7 @@ impl EngineApi for Engine {
         })
     }
 
-    fn replay<'a>(
-        &'a self,
-        profile: &'a str,
-        case: ReplayCase,
-    ) -> BoxFuture<'a, ApiResult<ReplayResult>> {
+    fn replay<'a>(&'a self, profile: &'a str, case: ReplayCase) -> BoxFuture<'a, ApiResult<ReplayResult>> {
         Box::pin(self.replay_case(profile, case))
     }
 }

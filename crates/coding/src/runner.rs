@@ -70,33 +70,14 @@ impl CodingRunner {
         let workdir_arg = workdir.to_string_lossy();
         git(
             &job.repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                &branch,
-                &workdir_arg,
-                &base_commit,
-            ],
+            &["worktree", "add", "-q", "-b", &branch, &workdir_arg, &base_commit],
         )
         .await?;
 
-        let run = run_process(
-            &spec.program,
-            &spec.args,
-            &spec.env,
-            spec.stdin,
-            &workdir,
-            job.timeout,
-        )
-        .await?;
+        let run = run_process(&spec.program, &spec.args, &spec.env, spec.stdin, &workdir, job.timeout).await?;
         std::fs::create_dir_all(out_dir)?;
         let transcript = out_dir.join(format!("{}.transcript.log", job.id));
-        std::fs::write(
-            &transcript,
-            transcript_text(&spec.program, &spec.args, &run),
-        )?;
+        std::fs::write(&transcript, transcript_text(&spec.program, &spec.args, &run))?;
 
         commit_leftovers(&workdir, &job.id).await?;
         let head_commit = git(&workdir, &["rev-parse", "HEAD"]).await?;
@@ -182,20 +163,8 @@ async fn commit_leftovers(workdir: &Path, job_id: &str) -> Result<(), CodingErro
     Ok(())
 }
 
-async fn run_test(
-    command: &[String],
-    workdir: &Path,
-    timeout: Duration,
-) -> Result<TestRun, CodingError> {
-    let run = run_process(
-        Path::new(&command[0]),
-        &command[1..],
-        &[],
-        None,
-        workdir,
-        timeout,
-    )
-    .await?;
+async fn run_test(command: &[String], workdir: &Path, timeout: Duration) -> Result<TestRun, CodingError> {
+    let run = run_process(Path::new(&command[0]), &command[1..], &[], None, workdir, timeout).await?;
     let mut output = run.stdout;
     output.extend_from_slice(&run.stderr);
     Ok(TestRun {
@@ -228,11 +197,7 @@ async fn run_process(
         .args(args)
         .envs(env.iter().map(|(key, value)| (key, value)))
         .current_dir(cwd)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -353,10 +318,7 @@ mod tests {
             "한글",
             &"x".repeat(65),
         ] {
-            assert!(
-                matches!(validate_job_id(id), Err(CodingError::InvalidJobId(_))),
-                "{id}"
-            );
+            assert!(matches!(validate_job_id(id), Err(CodingError::InvalidJobId(_))), "{id}");
         }
     }
 

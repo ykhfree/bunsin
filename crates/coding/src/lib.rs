@@ -65,9 +65,7 @@ pub struct ExitInfo {
 pub enum CodingError {
     #[error("program must be an absolute path: {0}")]
     RelativeProgram(PathBuf),
-    #[error(
-        "invalid job id {0:?}: use 1-64 ASCII letters, digits, '-' or '_', starting with a letter or digit"
-    )]
+    #[error("invalid job id {0:?}: use 1-64 ASCII letters, digits, '-' or '_', starting with a letter or digit")]
     InvalidJobId(String),
     #[error("test command is empty")]
     EmptyTestCommand,
@@ -78,10 +76,7 @@ pub enum CodingError {
     #[error("git {args} failed: {stderr}")]
     Git { args: String, stderr: String },
     #[error("could not start {program}: {source}")]
-    Spawn {
-        program: PathBuf,
-        source: std::io::Error,
-    },
+    Spawn { program: PathBuf, source: std::io::Error },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

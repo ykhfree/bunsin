@@ -8,9 +8,7 @@ use bunsin_client::RemoteEngine;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::{
-    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px,
-};
+use gpui_kit::{AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -18,15 +16,9 @@ use tokio::sync::oneshot;
 /// Where the connection comes from.
 pub enum Source {
     /// The saved connection. Connect saves to it and Disconnect deletes the token.
-    Saved {
-        dir: PathBuf,
-        tokens: Arc<dyn TokenStore>,
-    },
+    Saved { dir: PathBuf, tokens: Arc<dyn TokenStore> },
     /// Given by the environment for development. Nothing is read or saved.
-    Fixed {
-        connection: Connection,
-        token: String,
-    },
+    Fixed { connection: Connection, token: String },
 }
 
 pub struct AppView {
@@ -42,12 +34,7 @@ pub struct AppView {
 
 impl AppView {
     /// Fills in the known address. If a token is known too, connects with it.
-    pub fn new(
-        runtime: tokio::runtime::Handle,
-        source: Source,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(runtime: tokio::runtime::Handle, source: Source, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut error = None;
         let (known, token) = match &source {
             Source::Saved { dir, tokens } => match load_connection(dir) {
@@ -122,13 +109,7 @@ impl AppView {
     }
 
     /// Checks the address at once. Then asks the server for the profile list on tokio.
-    fn connect(
-        &mut self,
-        connection: Connection,
-        token: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn connect(&mut self, connection: Connection, token: String, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         cx.notify();
         let engine = {
@@ -183,8 +164,7 @@ impl AppView {
             return;
         }
         // The token now lives in the client and the token store, not in the form.
-        self.token
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.token.update(cx, |input, cx| input.set_value("", window, cx));
         let (commands, states) = spawn_bridge(&self.runtime, engine, REFRESH_EVERY);
         self.shell = Some(cx.new(|cx| Shell::new(states, commands, cx)));
     }
@@ -203,15 +183,9 @@ impl AppView {
     }
 }
 
-fn save(
-    dir: &Path,
-    tokens: &dyn TokenStore,
-    connection: &Connection,
-    token: &str,
-) -> Result<(), String> {
+fn save(dir: &Path, tokens: &dyn TokenStore, connection: &Connection, token: &str) -> Result<(), String> {
     tokens.set(token)?;
-    save_connection(dir, connection)
-        .map_err(|e| format!("connected, but the connection cannot be saved: {e}"))
+    save_connection(dir, connection).map_err(|e| format!("connected, but the connection cannot be saved: {e}"))
 }
 
 impl Render for AppView {
@@ -232,9 +206,7 @@ impl Render for AppView {
                 .into_any_element();
         }
 
-        let field = |label: &'static str, input: Input| {
-            div().flex().flex_col().gap_1().child(label).child(input)
-        };
+        let field = |label: &'static str, input: Input| div().flex().flex_col().gap_1().child(label).child(input);
         div()
             .size_full()
             .flex()
@@ -249,16 +221,12 @@ impl Render for AppView {
                     .child("Connect to a Bunsin server")
                     .child(field(
                         "Server address",
-                        Input::new(&self.server)
-                            .id("server")
-                            .aria_label("Server address"),
+                        Input::new(&self.server).id("server").aria_label("Server address"),
                     ))
                     .child(field(
                         "Access token",
                         // Masked, with no toggle that would show the token.
-                        Input::new(&self.token)
-                            .id("token")
-                            .aria_label("Access token"),
+                        Input::new(&self.token).id("token").aria_label("Access token"),
                     ))
                     .child(field(
                         "CA certificate file (optional)",
@@ -276,10 +244,7 @@ impl Render for AppView {
                         "connect-status",
                         if self.connecting { "Connecting…" } else { "" },
                     ))
-                    .child(labelled(
-                        "connect-error",
-                        self.error.clone().unwrap_or_default(),
-                    )),
+                    .child(labelled("connect-error", self.error.clone().unwrap_or_default())),
             )
             .into_any_element()
     }

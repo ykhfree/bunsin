@@ -78,10 +78,7 @@ pub fn assemble(input: &ContextInput<'_>) -> CompletionRequest {
     if !input.corrections.is_empty() {
         user.push_str("Past corrections by the person (draft, their edit, their reason):\n");
         for c in input.corrections {
-            let body = format!(
-                "draft: {}\nedit: {}\nreason: {}",
-                c.original, c.edited, c.reason
-            );
+            let body = format!("draft: {}\nedit: {}\nreason: {}", c.original, c.edited, c.reason);
             user.push_str(&quote_untrusted("correction", &body));
             user.push('\n');
         }
@@ -113,10 +110,7 @@ pub fn assemble(input: &ContextInput<'_>) -> CompletionRequest {
         event.thread.as_deref().unwrap_or("-")
     );
     user.push_str("Incoming event:\n");
-    user.push_str(&quote_untrusted(
-        &event.source,
-        &format!("{header}\n{}", event.text),
-    ));
+    user.push_str(&quote_untrusted(&event.source, &format!("{header}\n{}", event.text)));
 
     CompletionRequest {
         system,
@@ -143,11 +137,7 @@ mod tests {
         }
     }
 
-    fn input<'a>(
-        event: &'a InboundEvent,
-        principles: &'a [String],
-        tools: &'a [ToolHint],
-    ) -> ContextInput<'a> {
+    fn input<'a>(event: &'a InboundEvent, principles: &'a [String], tools: &'a [ToolHint]) -> ContextInput<'a> {
         ContextInput {
             owner_name: "Kim",
             principles,

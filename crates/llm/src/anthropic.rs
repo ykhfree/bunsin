@@ -49,17 +49,14 @@ struct ReplyUsage {
 }
 
 pub(crate) fn parse_reply(body: &[u8]) -> Result<CompletionResponse, LlmError> {
-    let reply: Reply =
-        serde_json::from_slice(body).map_err(|e| LlmError::Malformed(e.to_string()))?;
+    let reply: Reply = serde_json::from_slice(body).map_err(|e| LlmError::Malformed(e.to_string()))?;
     let stop = match reply.stop_reason.as_str() {
         "end_turn" | "stop_sequence" => StopReason::End,
         // Both mean the output was cut off by a token limit.
         "max_tokens" | "model_context_window_exceeded" => StopReason::MaxTokens,
         "refusal" => StopReason::Refusal,
         other => {
-            return Err(LlmError::Malformed(format!(
-                "unexpected stop_reason `{other}`"
-            )));
+            return Err(LlmError::Malformed(format!("unexpected stop_reason `{other}`")));
         }
     };
     let content = reply

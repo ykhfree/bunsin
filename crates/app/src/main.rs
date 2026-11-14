@@ -12,10 +12,7 @@ impl Global for Tokio {}
 
 fn source() -> Source {
     // For development, the environment overrides the saved connection.
-    if let (Ok(server), Ok(token)) = (
-        std::env::var("BUNSIN_SERVER"),
-        std::env::var("BUNSIN_TOKEN"),
-    ) {
+    if let (Ok(server), Ok(token)) = (std::env::var("BUNSIN_SERVER"), std::env::var("BUNSIN_TOKEN")) {
         let ca_cert = std::env::var_os("BUNSIN_CA_CERT").map(Into::into);
         return Source::Fixed {
             connection: Connection { server, ca_cert },

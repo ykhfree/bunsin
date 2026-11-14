@@ -11,9 +11,7 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
-use bunsin_api::{
-    ApiError, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
-};
+use bunsin_api::{ApiError, EngineApi, Outcome, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::ProfileInfo;
 use bunsin_engine::Engine;
@@ -31,8 +29,7 @@ struct Failure(ApiError);
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        let status =
-            StatusCode::from_u16(status_of(&self.0)).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(status_of(&self.0)).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(ErrorBody { error: self.0 })).into_response()
     }
 }
@@ -73,17 +70,10 @@ fn authorize(engine: &Engine, headers: &HeaderMap, profile: &str) -> Result<(), 
     }
 }
 
-async fn list_profiles(
-    State(engine): State<Arc<Engine>>,
-    headers: HeaderMap,
-) -> Reply<Vec<ProfileInfo>> {
+async fn list_profiles(State(engine): State<Arc<Engine>>, headers: HeaderMap) -> Reply<Vec<ProfileInfo>> {
     let own = token_profile(&engine, &headers)?;
     let all = engine.list_profiles().await?;
-    Ok(Json(
-        all.into_iter()
-            .filter(|profile| profile.id == own)
-            .collect(),
-    ))
+    Ok(Json(all.into_iter().filter(|profile| profile.id == own).collect()))
 }
 
 async fn get_config(
@@ -211,11 +201,7 @@ pub struct Running {
 impl Running {
     /// The address a client on this machine can use.
     pub fn url(&self) -> String {
-        format!(
-            "{}://{}",
-            if self.tls { "https" } else { "http" },
-            self.addr
-        )
+        format!("{}://{}", if self.tls { "https" } else { "http" }, self.addr)
     }
 
     /// Stops taking new requests, lets running ones finish, then returns.
@@ -236,20 +222,14 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
     let tls = config.tls.is_some();
     let task = match config.tls {
         Some((cert, key)) => {
-            let rustls = RustlsConfig::from_pem_file(cert, key)
-                .await
-                .map_err(ServeError::Tls)?;
+            let rustls = RustlsConfig::from_pem_file(cert, key).await.map_err(ServeError::Tls)?;
             tokio::spawn(
                 axum_server::bind_rustls(config.listen, rustls)
                     .handle(handle.clone())
                     .serve(app),
             )
         }
-        None => tokio::spawn(
-            axum_server::bind(config.listen)
-                .handle(handle.clone())
-                .serve(app),
-        ),
+        None => tokio::spawn(axum_server::bind(config.listen).handle(handle.clone()).serve(app)),
     };
     match handle.listening().await {
         Some(addr) => Ok(Running {

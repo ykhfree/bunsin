@@ -54,12 +54,7 @@ pub struct ConnectorSection {
 /// A key is upper-case letters and digits in groups joined by one `_`. It has no `__`,
 /// so the name of one profile's secret is never the name of another profile's secret.
 pub fn secret_env_name(profile: &str, key: &str) -> Result<String, String> {
-    let group = |part: &str| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-    };
+    let group = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
     if !key.split('_').all(group) {
         return Err(format!(
             "the secret key `{key}` is invalid: use A-Z and 0-9 in groups joined by one `_`"
@@ -111,8 +106,7 @@ fn is_internal_ip(ip: std::net::IpAddr) -> bool {
 impl UpstreamPolicy {
     /// Checks one address from profile settings. `what` names the setting in the error.
     pub fn check(&self, what: &str, address: &str) -> Result<(), String> {
-        let url =
-            url::Url::parse(address).map_err(|e| format!("{what} is not a valid address: {e}"))?;
+        let url = url::Url::parse(address).map_err(|e| format!("{what} is not a valid address: {e}"))?;
         let host = url.host().ok_or_else(|| format!("{what} has no host"))?;
         let name = match &host {
             url::Host::Domain(name) => name.to_ascii_lowercase(),
@@ -158,11 +152,7 @@ pub struct RealBackends {
 
 impl RealBackends {
     pub fn from_env(allow_stdio: bool, upstream: UpstreamPolicy) -> Self {
-        Self::new(
-            Arc::new(|name| std::env::var(name).ok()),
-            allow_stdio,
-            upstream,
-        )
+        Self::new(Arc::new(|name| std::env::var(name).ok()), allow_stdio, upstream)
     }
 
     pub fn new(secrets: SecretLookup, allow_stdio: bool, upstream: UpstreamPolicy) -> Self {
@@ -187,10 +177,9 @@ impl RealBackends {
         if section.is_null() {
             return Err("the profile has no `llm` settings".to_owned());
         }
-        let section: LlmSection = serde_json::from_value(section.clone())
-            .map_err(|e| format!("the `llm` settings are invalid: {e}"))?;
-        self.upstream
-            .check("the LLM `base_url`", &section.base_url)?;
+        let section: LlmSection =
+            serde_json::from_value(section.clone()).map_err(|e| format!("the `llm` settings are invalid: {e}"))?;
+        self.upstream.check("the LLM `base_url`", &section.base_url)?;
         Ok(section)
     }
 
@@ -224,12 +213,7 @@ impl RealBackends {
         HttpLlmClient::new(config, token).map_err(|e| format!("the LLM client cannot start: {e}"))
     }
 
-    async fn connector(
-        &self,
-        profile: &str,
-        name: &str,
-        section: &Value,
-    ) -> Result<McpConnector, String> {
+    async fn connector(&self, profile: &str, name: &str, section: &Value) -> Result<McpConnector, String> {
         let section = self.connector_section(name, section)?;
         let token = section
             .token_secret
@@ -250,19 +234,12 @@ impl RealBackends {
 }
 
 impl Backends for RealBackends {
-    fn build<'a>(
-        &'a self,
-        profile: &'a str,
-        config: &'a ProfileConfig,
-    ) -> BoxFuture<'a, Result<Runtime, String>> {
+    fn build<'a>(&'a self, profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
         Box::pin(async move {
             let llm: Arc<dyn LlmClient> = Arc::new(self.llm(profile, &config.llm)?);
             let mut connectors: BTreeMap<String, Arc<dyn Connector>> = BTreeMap::new();
             for (name, section) in &config.connectors {
-                connectors.insert(
-                    name.clone(),
-                    Arc::new(self.connector(profile, name, section).await?),
-                );
+                connectors.insert(name.clone(), Arc::new(self.connector(profile, name, section).await?));
             }
             Ok(Runtime { llm, connectors })
         })
@@ -313,38 +290,17 @@ mod tests {
 
     #[test]
     fn secret_names_are_per_profile_and_never_overlap() {
-        assert_eq!(
-            secret_env_name("kim", "LLM").unwrap(),
-            "BUNSIN_SECRET_KIM__LLM"
-        );
+        assert_eq!(secret_env_name("kim", "LLM").unwrap(), "BUNSIN_SECRET_KIM__LLM");
         assert_eq!(
             secret_env_name("team-a", "SLACK_BOT").unwrap(),
             "BUNSIN_SECRET_TEAM_A__SLACK_BOT"
         );
         // Profile `a` cannot form the name of a secret of profile `a-b` or of profile `a--b`.
-        assert_eq!(
-            secret_env_name("a-b", "LLM").unwrap(),
-            "BUNSIN_SECRET_A_B__LLM"
-        );
-        assert_eq!(
-            secret_env_name("a", "B_LLM").unwrap(),
-            "BUNSIN_SECRET_A__B_LLM"
-        );
-        assert_eq!(
-            secret_env_name("a--b", "LLM").unwrap(),
-            "BUNSIN_SECRET_A__B__LLM"
-        );
+        assert_eq!(secret_env_name("a-b", "LLM").unwrap(), "BUNSIN_SECRET_A_B__LLM");
+        assert_eq!(secret_env_name("a", "B_LLM").unwrap(), "BUNSIN_SECRET_A__B_LLM");
+        assert_eq!(secret_env_name("a--b", "LLM").unwrap(), "BUNSIN_SECRET_A__B__LLM");
         assert!(secret_env_name("a", "B__LLM").is_err());
-        for key in [
-            "",
-            "llm",
-            "LLM-1",
-            "_LLM",
-            "LLM_",
-            "A__B",
-            "PATH/../X",
-            "A B",
-        ] {
+        for key in ["", "llm", "LLM-1", "_LLM", "LLM_", "A__B", "PATH/../X", "A B"] {
             assert!(secret_env_name("kim", key).is_err(), "{key:?}");
         }
     }
@@ -367,10 +323,7 @@ mod tests {
         let b = backends(env, false);
         // The same key under another profile is another variable, which is not set.
         let error = b.llm("lee", &llm_section()).unwrap_err();
-        assert_eq!(
-            error,
-            "the environment variable `BUNSIN_SECRET_LEE__LLM` is not set"
-        );
+        assert_eq!(error, "the environment variable `BUNSIN_SECRET_LEE__LLM` is not set");
         // No key reaches a variable outside the profile's own names.
         for key in ["HOME", "KIM__LLM", "BUNSIN_SECRET_KIM__LLM"] {
             let mut section = llm_section();
@@ -383,10 +336,7 @@ mod tests {
     fn a_missing_or_empty_secret_names_the_variable() {
         for env in [&[][..], &[("BUNSIN_SECRET_KIM__LLM", "")][..]] {
             let error = backends(env, false).llm("kim", &llm_section()).unwrap_err();
-            assert_eq!(
-                error,
-                "the environment variable `BUNSIN_SECRET_KIM__LLM` is not set"
-            );
+            assert_eq!(error, "the environment variable `BUNSIN_SECRET_KIM__LLM` is not set");
         }
     }
 
@@ -397,8 +347,7 @@ mod tests {
             b.llm("kim", &Value::Null).unwrap_err(),
             "the profile has no `llm` settings"
         );
-        let unknown_wire =
-            json!({"wire": "telepathy", "base_url": "u", "model": "m", "token_secret": "LLM"});
+        let unknown_wire = json!({"wire": "telepathy", "base_url": "u", "model": "m", "token_secret": "LLM"});
         assert!(
             b.llm("kim", &unknown_wire)
                 .unwrap_err()
@@ -443,7 +392,8 @@ mod tests {
     #[test]
     fn settings_are_checked_before_they_are_stored() {
         let b = backends(&[], false);
-        let http = |key: &str| json!({"mcp": {"transport": "http", "url": "https://mcp.example/slack"}, "token_secret": key});
+        let http =
+            |key: &str| json!({"mcp": {"transport": "http", "url": "https://mcp.example/slack"}, "token_secret": key});
         assert_eq!(b.validate("kim", &config(Value::Null, &[])), Ok(()));
         assert_eq!(
             b.validate("kim", &config(llm_section(), &[("slack", http("SLACK"))])),
@@ -451,21 +401,14 @@ mod tests {
         );
         // A secret key that tries to leave the profile's own names is refused at once.
         let error = b
-            .validate(
-                "kim",
-                &config(llm_section(), &[("slack", http("LEE__SLACK"))]),
-            )
+            .validate("kim", &config(llm_section(), &[("slack", http("LEE__SLACK"))]))
             .unwrap_err();
-        assert!(
-            error.contains("secret key `LEE__SLACK` is invalid"),
-            "{error}"
-        );
+        assert!(error.contains("secret key `LEE__SLACK` is invalid"), "{error}");
         let mut llm = llm_section();
         llm["token_secret"] = json!("../LLM");
         assert!(b.validate("kim", &config(llm, &[])).is_err());
         // The earlier field, which named any environment variable, is refused.
-        let old_field =
-            json!({"mcp": {"transport": "http", "url": "https://x"}, "token_env": "HOME"});
+        let old_field = json!({"mcp": {"transport": "http", "url": "https://x"}, "token_env": "HOME"});
         assert!(
             b.validate("kim", &config(Value::Null, &[("slack", old_field)]))
                 .is_err()
@@ -475,13 +418,9 @@ mod tests {
     #[tokio::test]
     async fn a_connector_error_names_the_connector_and_hides_the_token() {
         let b = backends(&[("BUNSIN_SECRET_KIM__SLACK", "xoxb-s3cret")], true);
-        let relative =
-            json!({"mcp": {"transport": "stdio", "command": "slack-mcp", "args": [], "env": {}}});
+        let relative = json!({"mcp": {"transport": "stdio", "command": "slack-mcp", "args": [], "env": {}}});
         let error = b.connector("kim", "slack", &relative).await.err().unwrap();
-        assert!(
-            error.starts_with("connector `slack` cannot connect"),
-            "{error}"
-        );
+        assert!(error.starts_with("connector `slack` cannot connect"), "{error}");
 
         // The operator allows this host, so the request is tried and fails at connect.
         let b = RealBackends::new(
@@ -498,10 +437,7 @@ mod tests {
 
         let missing = json!({"mcp": {"transport": "http", "url": "http://127.0.0.1:1/mcp"}, "token_secret": "JIRA"});
         let error = b.connector("kim", "slack", &missing).await.err().unwrap();
-        assert_eq!(
-            error,
-            "the environment variable `BUNSIN_SECRET_KIM__JIRA` is not set"
-        );
+        assert_eq!(error, "the environment variable `BUNSIN_SECRET_KIM__JIRA` is not set");
     }
 
     #[test]
@@ -545,10 +481,7 @@ mod tests {
             allowed_hosts: vec!["llm.corp.internal".into(), "10.0.0.5".into()],
         };
         // The operator may allow an internal gateway, also without TLS.
-        assert_eq!(
-            policy.check("x", "http://llm.corp.internal:8080/v1"),
-            Ok(())
-        );
+        assert_eq!(policy.check("x", "http://llm.corp.internal:8080/v1"), Ok(()));
         assert_eq!(policy.check("x", "https://LLM.Corp.Internal/v1"), Ok(()));
         assert_eq!(policy.check("x", "http://10.0.0.5"), Ok(()));
         // With a list, a public host that is not on it is refused too.

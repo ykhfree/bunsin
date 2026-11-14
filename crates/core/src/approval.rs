@@ -45,11 +45,9 @@ impl ApprovalState {
 
     pub fn parse(text: &str) -> Option<Self> {
         use ApprovalState::*;
-        [
-            Draft, Pending, Approved, Rejected, Executing, Executed, Failed,
-        ]
-        .into_iter()
-        .find(|s| s.as_str() == text)
+        [Draft, Pending, Approved, Rejected, Executing, Executed, Failed]
+            .into_iter()
+            .find(|s| s.as_str() == text)
     }
 
     /// Returns the next state. Each item runs at most once: no state leads back to `Approved`.
@@ -113,13 +111,7 @@ mod tests {
     #[test]
     fn a_draft_is_never_approved_and_approval_is_not_repeated() {
         assert!(S::Draft.on(E::Approve).is_err());
-        for state in [
-            S::Approved,
-            S::Executing,
-            S::Executed,
-            S::Failed,
-            S::Rejected,
-        ] {
+        for state in [S::Approved, S::Executing, S::Executed, S::Failed, S::Rejected] {
             assert!(state.on(E::Approve).is_err(), "{state:?}");
         }
     }

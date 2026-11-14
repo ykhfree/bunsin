@@ -22,11 +22,7 @@ struct Fakes {
 }
 
 impl Backends for Fakes {
-    fn build<'a>(
-        &'a self,
-        _profile: &'a str,
-        _config: &'a ProfileConfig,
-    ) -> BoxFuture<'a, Result<Runtime, String>> {
+    fn build<'a>(&'a self, _profile: &'a str, _config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
         let llm: Arc<dyn LlmClient> = self.llm.clone();
         let slack: Arc<dyn Connector> = self.slack.clone();
         Box::pin(async move {
@@ -82,10 +78,7 @@ fn profile_config(owner: &str) -> ProfileConfig {
 async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let llm = Arc::new(FakeLlm::new());
-    let slack = Arc::new(FakeConnector::new(
-        "slack",
-        vec![tool("post", "Post a message")],
-    ));
+    let slack = Arc::new(FakeConnector::new("slack", vec![tool("post", "Post a message")]));
     let real = RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default());
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
@@ -93,20 +86,12 @@ async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig 
         real,
     });
     let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1_000)).unwrap());
-    engine
-        .create_profile("kim", profile_config("Kim"))
-        .await
-        .unwrap();
-    engine
-        .create_profile("lee", profile_config("Lee"))
-        .await
-        .unwrap();
+    engine.create_profile("kim", profile_config("Kim")).await.unwrap();
+    engine.create_profile("lee", profile_config("Lee")).await.unwrap();
     let kim_token = engine.app_store().add_token("kim", "test", 1).unwrap();
     let lee_token = engine.app_store().add_token("lee", "test", 1).unwrap();
     let listen = "127.0.0.1:0".parse().unwrap();
-    let server = serve(engine.clone(), ServeConfig { listen, tls })
-        .await
-        .unwrap();
+    let server = serve(engine.clone(), ServeConfig { listen, tls }).await.unwrap();
     Rig {
         _dir: dir,
         llm,
@@ -144,8 +129,7 @@ async fn an_owner_works_through_the_server_like_through_the_engine() {
     let kim = rig.kim();
 
     rig.llm.reply(&post("Deployed."), 10);
-    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap()
-    else {
+    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap() else {
         panic!("expected a pending item")
     };
     let snapshot = kim.snapshot("kim").await.unwrap();
@@ -178,9 +162,7 @@ async fn an_owner_works_through_the_server_like_through_the_engine() {
     assert!(!kim.set_kill_switch("kim", false).await.unwrap());
 
     rig.llm.reply(&post("second"), 10);
-    let Outcome::PendingApproval { inbox_id: second } =
-        kim.ingest("kim", event("e2")).await.unwrap()
-    else {
+    let Outcome::PendingApproval { inbox_id: second } = kim.ingest("kim", event("e2")).await.unwrap() else {
         panic!("expected a pending item")
     };
     kim.reject("kim", second, "not needed").await.unwrap();
@@ -208,13 +190,9 @@ async fn an_owner_works_through_the_server_like_through_the_engine() {
 async fn engine_errors_keep_their_kind_across_the_network() {
     let rig = rig().await;
     let kim = rig.kim();
-    assert!(matches!(
-        kim.approve("kim", 42, None).await,
-        Err(ApiError::NotFound(_))
-    ));
+    assert!(matches!(kim.approve("kim", 42, None).await, Err(ApiError::NotFound(_))));
     rig.llm.reply(&post("x"), 10);
-    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap()
-    else {
+    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap() else {
         panic!()
     };
     kim.approve("kim", inbox_id, None).await.unwrap();
@@ -230,40 +208,24 @@ async fn a_token_reaches_only_its_own_profile() {
     let rig = rig().await;
     let kim = rig.kim();
     rig.llm.reply(&post("for lee"), 10);
-    let Outcome::PendingApproval { inbox_id } = rig
-        .client(&rig.lee_token)
-        .ingest("lee", event("e1"))
-        .await
-        .unwrap()
+    let Outcome::PendingApproval { inbox_id } = rig.client(&rig.lee_token).ingest("lee", event("e1")).await.unwrap()
     else {
         panic!("expected a pending item")
     };
 
     // The list shows the caller's own profile and nothing about others.
-    let listed: Vec<String> = kim
-        .list_profiles()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|p| p.id)
-        .collect();
+    let listed: Vec<String> = kim.list_profiles().await.unwrap().into_iter().map(|p| p.id).collect();
     assert_eq!(listed, ["kim"]);
 
     // Every route refuses kim's token for lee's profile, and for a profile that does not exist,
     // with the same error.
     for other in ["lee", "nobody"] {
         let refused = |result: Result<(), ApiError>| {
-            assert!(
-                matches!(result, Err(ApiError::Unauthorized(_))),
-                "{other}: {result:?}"
-            );
+            assert!(matches!(result, Err(ApiError::Unauthorized(_))), "{other}: {result:?}");
         };
         refused(kim.snapshot(other).await.map(|_| ()));
         refused(kim.profile_config(other).await.map(|_| ()));
-        refused(
-            kim.set_profile_config(other, ProfileConfig::new("Mallory"))
-                .await,
-        );
+        refused(kim.set_profile_config(other, ProfileConfig::new("Mallory")).await);
         refused(kim.ingest(other, event("e9")).await.map(|_| ()));
         refused(kim.approve(other, inbox_id, None).await.map(|_| ()));
         refused(kim.reject(other, inbox_id, "x").await);
@@ -284,10 +246,7 @@ async fn a_token_reaches_only_its_own_profile() {
     let lee = rig.engine.snapshot("lee").await.unwrap();
     assert!(!lee.kill_switch);
     assert_eq!(lee.inbox[0].state, ApprovalState::Pending);
-    assert_eq!(
-        rig.engine.profile_config("lee").await.unwrap().owner_name,
-        "Lee"
-    );
+    assert_eq!(rig.engine.profile_config("lee").await.unwrap().owner_name, "Lee");
     assert!(rig.slack.calls().is_empty());
 }
 
@@ -296,10 +255,7 @@ async fn unknown_and_revoked_tokens_are_refused() {
     let rig = rig().await;
     for token in ["bsn_guess", "x", &rig.kim_token[..rig.kim_token.len() - 1]] {
         let result = rig.client(token).snapshot("kim").await;
-        assert!(
-            matches!(result, Err(ApiError::Unauthorized(_))),
-            "{result:?}"
-        );
+        assert!(matches!(result, Err(ApiError::Unauthorized(_))), "{result:?}");
         assert!(matches!(
             rig.client(token).list_profiles().await,
             Err(ApiError::Unauthorized(_))
@@ -318,10 +274,7 @@ async fn unknown_and_revoked_tokens_are_refused() {
         .id;
     rig.engine.app_store().revoke_token(&id).unwrap();
     // The same client, on an open connection, is refused on its next request.
-    assert!(matches!(
-        kim.snapshot("kim").await,
-        Err(ApiError::Unauthorized(_))
-    ));
+    assert!(matches!(kim.snapshot("kim").await, Err(ApiError::Unauthorized(_))));
     assert!(rig.client(&rig.lee_token).snapshot("lee").await.is_ok());
 }
 
@@ -329,17 +282,9 @@ async fn unknown_and_revoked_tokens_are_refused() {
 async fn a_request_without_a_bearer_token_is_refused() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let rig = rig().await;
-    for auth in [
-        "",
-        "Authorization: Basic a2ltOng=\r\n",
-        "Authorization: bsn_x\r\n",
-    ] {
-        let mut stream = tokio::net::TcpStream::connect(rig.server.addr)
-            .await
-            .unwrap();
-        let request = format!(
-            "GET /v1/profiles/kim/snapshot HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n"
-        );
+    for auth in ["", "Authorization: Basic a2ltOng=\r\n", "Authorization: bsn_x\r\n"] {
+        let mut stream = tokio::net::TcpStream::connect(rig.server.addr).await.unwrap();
+        let request = format!("GET /v1/profiles/kim/snapshot HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
@@ -368,7 +313,8 @@ async fn settings_that_break_isolation_are_refused_and_not_stored() {
     // A secret key cannot name another profile's secret or a server variable.
     for key in ["LEE__LLM", "BUNSIN_SECRET_LEE__LLM", "../HOME"] {
         let mut foreign = before.clone();
-        foreign.llm = json!({"wire": "openai-chat", "base_url": "https://attacker.example", "model": "m", "token_secret": key});
+        foreign.llm =
+            json!({"wire": "openai-chat", "base_url": "https://attacker.example", "model": "m", "token_secret": key});
         let error = kim.set_profile_config("kim", foreign).await.unwrap_err();
         assert!(matches!(error, ApiError::Invalid(_)), "{key}: {error:?}");
     }
@@ -403,9 +349,7 @@ async fn a_stopped_server_is_reported_as_unreachable() {
     let rig = rig().await;
     let kim = rig.kim();
     assert!(kim.snapshot("kim").await.is_ok());
-    let Rig {
-        server, kim_token, ..
-    } = rig;
+    let Rig { server, kim_token, .. } = rig;
     server.shutdown().await.unwrap();
     let error = kim.snapshot("kim").await.unwrap_err();
     assert!(matches!(error, ApiError::Unreachable(_)), "{error:?}");
@@ -415,20 +359,13 @@ async fn a_stopped_server_is_reported_as_unreachable() {
 #[tokio::test]
 async fn a_public_address_needs_tls() {
     let dir = tempfile::tempdir().unwrap();
-    let backends = Arc::new(RealBackends::new(
-        Arc::new(|_| None),
-        false,
-        UpstreamPolicy::default(),
-    ));
+    let backends = Arc::new(RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default()));
     let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1)).unwrap());
     let config = ServeConfig {
         listen: "0.0.0.0:0".parse().unwrap(),
         tls: None,
     };
-    assert!(matches!(
-        serve(engine, config).await,
-        Err(ServeError::TlsRequired(_))
-    ));
+    assert!(matches!(serve(engine, config).await, Err(ServeError::TlsRequired(_))));
 }
 
 #[tokio::test]
@@ -450,18 +387,8 @@ async fn tls_works_with_the_given_ca_and_fails_without_it() {
     assert_eq!(kim.snapshot("kim").await.unwrap().profile.id, "kim");
 
     // Without the CA the certificate is not trusted, so no request (and no token) is sent.
-    let untrusted = RemoteEngine::new(
-        &RemoteConfig {
-            url,
-            ca_cert_pem: None,
-        },
-        &rig.kim_token,
-    )
-    .unwrap();
-    assert!(matches!(
-        untrusted.snapshot("kim").await,
-        Err(ApiError::Unreachable(_))
-    ));
+    let untrusted = RemoteEngine::new(&RemoteConfig { url, ca_cert_pem: None }, &rig.kim_token).unwrap();
+    assert!(matches!(untrusted.snapshot("kim").await, Err(ApiError::Unreachable(_))));
     // Plain HTTP to the TLS port does not work either.
     let plain = format!("http://127.0.0.1:{}", rig.server.addr.port());
     let plain = RemoteEngine::new(

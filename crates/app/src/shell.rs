@@ -5,9 +5,7 @@ use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::button::Button;
-use gpui_kit::{
-    Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, prelude::*, px,
-};
+use gpui_kit::{Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, prelude::*, px};
 use tokio::sync::mpsc;
 
 const AUDIT_ROWS: usize = 50;
@@ -72,16 +70,9 @@ pub fn inbox_detail(item: &InboxItem) -> String {
 }
 
 /// Text that tests can read through its accessibility label. Never pass a secret.
-pub(crate) fn labelled(
-    id: impl Into<SharedString>,
-    text: impl Into<SharedString>,
-) -> impl IntoElement {
+pub(crate) fn labelled(id: impl Into<SharedString>, text: impl Into<SharedString>) -> impl IntoElement {
     let text = text.into();
-    div()
-        .id(id.into())
-        .test_support()
-        .aria_label(text.clone())
-        .child(text)
+    div().id(id.into()).test_support().aria_label(text.clone()).child(text)
 }
 
 impl Render for Shell {
@@ -95,26 +86,22 @@ impl Render for Shell {
             Some(_) => "Running",
         };
 
-        let profiles =
-            self.state.profiles.iter().map(|profile| {
-                let id = profile.id.clone();
-                let mark = if self.state.selected.as_deref() == Some(id.as_str()) {
-                    "● "
-                } else {
-                    ""
-                };
-                let text =
-                    SharedString::from(format!("{mark}{} ({})", profile.display_name, profile.id));
-                div()
-                    .id(SharedString::from(format!("profile-{id}")))
-                    .test_support()
-                    .aria_label(text.clone())
-                    .cursor_pointer()
-                    .child(text)
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        this.send(UiCommand::SelectProfile(id.clone()))
-                    }))
-            });
+        let profiles = self.state.profiles.iter().map(|profile| {
+            let id = profile.id.clone();
+            let mark = if self.state.selected.as_deref() == Some(id.as_str()) {
+                "● "
+            } else {
+                ""
+            };
+            let text = SharedString::from(format!("{mark}{} ({})", profile.display_name, profile.id));
+            div()
+                .id(SharedString::from(format!("profile-{id}")))
+                .test_support()
+                .aria_label(text.clone())
+                .cursor_pointer()
+                .child(text)
+                .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SelectProfile(id.clone()))))
+        });
 
         let inbox = snapshot
             .map(|s| s.inbox.as_slice())
@@ -136,18 +123,14 @@ impl Render for Shell {
                     buttons = buttons.child(
                         Button::new(SharedString::from(format!("approve-{id}")))
                             .label("Approve and run")
-                            .on_click(
-                                cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id))),
-                            ),
+                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
                     );
                 }
                 if matches!(item.state, ApprovalState::Pending | ApprovalState::Draft) {
                     buttons = buttons.child(
                         Button::new(SharedString::from(format!("reject-{id}")))
                             .label("Dismiss")
-                            .on_click(
-                                cx.listener(move |this, _, _, _| this.send(UiCommand::Reject(id))),
-                            ),
+                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Reject(id)))),
                     );
                     row = row.child(buttons);
                 }
@@ -183,30 +166,16 @@ impl Render for Shell {
                     .flex_col()
                     .gap_3()
                     .child(
-                        div()
-                            .flex()
-                            .gap_3()
-                            .child(labelled("status", status))
-                            .child(
-                                Button::new("kill-switch")
-                                    .label(if stopped {
-                                        "Resume changes"
-                                    } else {
-                                        "Stop all changes"
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, _| {
-                                        this.send(UiCommand::SetKillSwitch(!stopped))
-                                    })),
-                            ),
+                        div().flex().gap_3().child(labelled("status", status)).child(
+                            Button::new("kill-switch")
+                                .label(if stopped { "Resume changes" } else { "Stop all changes" })
+                                .on_click(
+                                    cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped))),
+                                ),
+                        ),
                     )
-                    .child(labelled(
-                        "error",
-                        self.state.error.clone().unwrap_or_default(),
-                    ))
-                    .child(labelled(
-                        "inbox-count",
-                        format!("Approval inbox: {}", inbox.len()),
-                    ))
+                    .child(labelled("error", self.state.error.clone().unwrap_or_default()))
+                    .child(labelled("inbox-count", format!("Approval inbox: {}", inbox.len())))
                     .child(
                         div()
                             .id("inbox")
@@ -216,10 +185,7 @@ impl Render for Shell {
                             .overflow_y_scroll()
                             .children(inbox),
                     )
-                    .child(labelled(
-                        "audit-count",
-                        format!("Audit log: {} entries", audit.len()),
-                    ))
+                    .child(labelled("audit-count", format!("Audit log: {} entries", audit.len())))
                     .child(
                         div()
                             .id("audit")
@@ -276,10 +242,7 @@ mod tests {
         let escalation = InboxBody::Escalation {
             summary: "Decide the budget.".into(),
         };
-        assert_eq!(
-            inbox_title(&item(escalation.clone())),
-            "pending · needs your decision"
-        );
+        assert_eq!(inbox_title(&item(escalation.clone())), "pending · needs your decision");
         assert_eq!(inbox_detail(&item(escalation)), "Decide the budget.");
     }
 }

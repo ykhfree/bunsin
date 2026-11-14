@@ -104,10 +104,7 @@ async fn lists_every_page_with_schema_and_empty_missing_description() {
     assert_eq!(*server.list_requests.lock().unwrap(), 3);
 
     let echo = &tools[0];
-    assert_eq!(
-        echo.description,
-        "Returns the arguments as structured content"
-    );
+    assert_eq!(echo.description, "Returns the arguments as structured content");
     assert_eq!(echo.input_schema, Value::Object(server::echo_schema()));
     let plain = &tools[1];
     assert_eq!(plain.description, "");
@@ -125,10 +122,7 @@ async fn call_passes_arguments_unchanged_and_returns_structured_content() {
         "nested": {"list": [1, 2.5, null, true], "empty": {}}
     });
 
-    let result = connector
-        .call_tool("echo", args(sent.clone()))
-        .await
-        .unwrap();
+    let result = connector.call_tool("echo", args(sent.clone())).await.unwrap();
 
     assert_eq!(result, sent);
     assert_eq!(calls(&server), [("echo".to_owned(), Some(args(sent)))]);
@@ -258,10 +252,7 @@ async fn stdio_server_gets_args_and_env_and_answers_calls() {
 
     assert_eq!(connector.list_tools().await.unwrap().len(), 5);
     let result = connector.call_tool("whoami", Map::new()).await.unwrap();
-    assert_eq!(
-        result,
-        json!({"args": ["--flag", "two words"], "value": "from-config"})
-    );
+    assert_eq!(result, json!({"args": ["--flag", "two words"], "value": "from-config"}));
 }
 
 #[tokio::test]
@@ -302,8 +293,7 @@ async fn stdio_rejects_a_token() {
 #[test]
 fn config_round_trips_through_json_and_has_no_token_field() {
     let http: McpConfig =
-        serde_json::from_value(json!({"transport": "http", "url": "https://mcp.example/mcp"}))
-            .unwrap();
+        serde_json::from_value(json!({"transport": "http", "url": "https://mcp.example/mcp"})).unwrap();
     assert_eq!(
         http,
         McpConfig::Http {
@@ -312,8 +302,7 @@ fn config_round_trips_through_json_and_has_no_token_field() {
     );
 
     let stdio: McpConfig =
-        serde_json::from_value(json!({"transport": "stdio", "command": "/usr/local/bin/server"}))
-            .unwrap();
+        serde_json::from_value(json!({"transport": "stdio", "command": "/usr/local/bin/server"})).unwrap();
     assert_eq!(
         stdio,
         McpConfig::Stdio {
@@ -341,14 +330,15 @@ async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host(
         StreamableHttpServerConfig::default(),
     );
     let counter = with_token.clone();
-    let target = axum::Router::new()
-        .nest_service("/mcp", service)
-        .layer(from_fn(move |request: Request, next: Next| {
-            if request.headers().contains_key(AUTHORIZATION) {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-            next.run(request)
-        }));
+    let target =
+        axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(from_fn(move |request: Request, next: Next| {
+                if request.headers().contains_key(AUTHORIZATION) {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request)
+            }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target_url = format!("http://{}/mcp", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, target).await });

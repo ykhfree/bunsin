@@ -47,8 +47,7 @@ impl KeychainTokenStore {
     const ACCOUNT: &str = "access-token";
 
     fn entry() -> Result<keyring::Entry, String> {
-        keyring::Entry::new(Self::SERVICE, Self::ACCOUNT)
-            .map_err(|e| format!("the Keychain cannot be used: {e}"))
+        keyring::Entry::new(Self::SERVICE, Self::ACCOUNT).map_err(|e| format!("the Keychain cannot be used: {e}"))
     }
 }
 
@@ -70,9 +69,7 @@ impl TokenStore for KeychainTokenStore {
     fn delete(&self) -> Result<(), String> {
         match Self::entry()?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!(
-                "the token cannot be deleted from the Keychain: {e}"
-            )),
+            Err(e) => Err(format!("the token cannot be deleted from the Keychain: {e}")),
         }
     }
 }
@@ -100,12 +97,10 @@ impl TokenStore for MemoryTokenStore {
 /// Builds the client. It checks the address and the token form, and sends no request.
 pub fn client(connection: &Connection, token: &str) -> ApiResult<RemoteEngine> {
     let ca_cert_pem = match &connection.ca_cert {
-        Some(path) => Some(std::fs::read(path).map_err(|e| {
-            ApiError::Invalid(format!(
-                "the CA certificate {} cannot be read: {e}",
-                path.display()
-            ))
-        })?),
+        Some(path) => Some(
+            std::fs::read(path)
+                .map_err(|e| ApiError::Invalid(format!("the CA certificate {} cannot be read: {e}", path.display())))?,
+        ),
         None => None,
     };
     let config = RemoteConfig {

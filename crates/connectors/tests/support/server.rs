@@ -1,8 +1,8 @@
 //! A test MCP server. The integration tests serve it over HTTP. The stdio example serves it on stdio.
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
@@ -42,19 +42,11 @@ pub fn echo_schema() -> JsonObject {
 pub fn tools() -> Vec<Tool> {
     let empty = || object(json!({"type": "object"}));
     vec![
-        Tool::new(
-            "echo",
-            "Returns the arguments as structured content",
-            echo_schema(),
-        ),
+        Tool::new("echo", "Returns the arguments as structured content", echo_schema()),
         Tool::new_with_raw("plain", None, empty()),
         Tool::new("fail", "Always returns a tool error result", empty()),
         Tool::new("reject", "Always answers with a JSON-RPC error", empty()),
-        Tool::new(
-            "whoami",
-            "Returns the process arguments and BUNSIN_TEST_VALUE",
-            empty(),
-        ),
+        Tool::new("whoami", "Returns the process arguments and BUNSIN_TEST_VALUE", empty()),
     ]
 }
 
@@ -92,13 +84,8 @@ impl ServerHandler for TestServer {
             .unwrap()
             .push((request.name.to_string(), request.arguments.clone()));
         let result = match request.name.as_ref() {
-            "echo" => {
-                CallToolResult::structured(Value::Object(request.arguments.unwrap_or_default()))
-            }
-            "plain" => CallToolResult::success(vec![
-                ContentBlock::text("first"),
-                ContentBlock::text("second"),
-            ]),
+            "echo" => CallToolResult::structured(Value::Object(request.arguments.unwrap_or_default())),
+            "plain" => CallToolResult::success(vec![ContentBlock::text("first"), ContentBlock::text("second")]),
             "fail" => {
                 // An error result with both text and structured content.
                 // With `{"no_text": true}` the result has structured content only.

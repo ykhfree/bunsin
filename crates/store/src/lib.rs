@@ -112,8 +112,7 @@ impl AppStore {
 
     pub fn list_profiles(&self) -> Result<Vec<ProfileInfo>> {
         let db = self.db.lock().expect("store lock");
-        let mut statement =
-            db.prepare("SELECT id, display_name FROM profiles ORDER BY created_at, id")?;
+        let mut statement = db.prepare("SELECT id, display_name FROM profiles ORDER BY created_at, id")?;
         let rows = statement.query_map([], |row| {
             Ok(ProfileInfo {
                 id: row.get(0)?,
@@ -138,18 +137,12 @@ impl AppStore {
             return Err(StoreError::NoSuchProfile(profile.to_owned()));
         }
         let mut random = [0u8; 32];
-        getrandom::fill(&mut random)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        getrandom::fill(&mut random).map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         let secret: String = random.iter().map(|b| format!("{b:02x}")).collect();
         let token = format!("{TOKEN_PREFIX}{secret}");
         self.db.lock().expect("store lock").execute(
             "INSERT INTO tokens (hash, profile, label, created_at) VALUES (?1, ?2, ?3, ?4)",
-            (
-                bunsin_core::sha256_hex(token.as_bytes()),
-                profile,
-                label,
-                now,
-            ),
+            (bunsin_core::sha256_hex(token.as_bytes()), profile, label, now),
         )?;
         Ok(token)
     }
@@ -171,9 +164,8 @@ impl AppStore {
 
     pub fn list_tokens(&self) -> Result<Vec<TokenInfo>> {
         let db = self.db.lock().expect("store lock");
-        let mut statement = db.prepare(
-            "SELECT hash, profile, label, created_at FROM tokens ORDER BY created_at, hash",
-        )?;
+        let mut statement =
+            db.prepare("SELECT hash, profile, label, created_at FROM tokens ORDER BY created_at, hash")?;
         let rows = statement.query_map([], |row| {
             let hash: String = row.get(0)?;
             Ok(TokenInfo {
@@ -221,12 +213,7 @@ mod tests {
         let app = AppStore::open(dir.path()).unwrap();
         app.create_profile("kim", "Kim", 10).unwrap();
         app.create_profile("lee", "Lee", 20).unwrap();
-        let names: Vec<String> = app
-            .list_profiles()
-            .unwrap()
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
+        let names: Vec<String> = app.list_profiles().unwrap().into_iter().map(|p| p.id).collect();
         assert_eq!(names, ["kim", "lee"]);
     }
 
@@ -254,10 +241,7 @@ mod tests {
         let long = "a".repeat(41);
         for id in ["", "../kim", "Kim", "a b", "a/b", long.as_str()] {
             assert!(
-                matches!(
-                    app.create_profile(id, "x", 1),
-                    Err(StoreError::BadProfileId(_))
-                ),
+                matches!(app.create_profile(id, "x", 1), Err(StoreError::BadProfileId(_))),
                 "{id:?}"
             );
             assert!(
@@ -270,17 +254,9 @@ mod tests {
             app.create_profile("kim", "Other", 2),
             Err(StoreError::ProfileExists(_))
         ));
-        assert!(matches!(
-            app.open_profile("lee"),
-            Err(StoreError::NoSuchProfile(_))
-        ));
+        assert!(matches!(app.open_profile("lee"), Err(StoreError::NoSuchProfile(_))));
         // No directory was created for a rejected id.
-        assert_eq!(
-            std::fs::read_dir(dir.path().join("profiles"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_eq!(std::fs::read_dir(dir.path().join("profiles")).unwrap().count(), 0);
     }
 
     #[test]
@@ -294,9 +270,7 @@ mod tests {
 
         kim.append_audit(5, "note", None, &serde_json::json!({"secret": "kim only"}))
             .unwrap();
-        let artifact = kim
-            .put_artifact("draft", b"kim draft", 5, None, None)
-            .unwrap();
+        let artifact = kim.put_artifact("draft", b"kim draft", 5, None, None).unwrap();
         kim.set_kill_switch(true).unwrap();
 
         assert!(lee.list_audit(10).unwrap().is_empty());
@@ -322,11 +296,7 @@ mod tests {
         let kim = app.add_token("kim", "laptop", 10).unwrap();
         let lee = app.add_token("lee", "laptop", 11).unwrap();
         assert_ne!(kim, lee);
-        assert!(
-            kim.starts_with("bsn_") && kim.len() == 4 + 64,
-            "{}",
-            kim.len()
-        );
+        assert!(kim.starts_with("bsn_") && kim.len() == 4 + 64, "{}", kim.len());
         assert_eq!(app.token_profile(&kim).unwrap().as_deref(), Some("kim"));
         assert_eq!(app.token_profile(&lee).unwrap().as_deref(), Some("lee"));
         assert_eq!(app.token_profile("bsn_guess").unwrap(), None);
@@ -334,10 +304,7 @@ mod tests {
 
         let listed = app.list_tokens().unwrap();
         assert_eq!(
-            listed
-                .iter()
-                .map(|t| t.profile.as_str())
-                .collect::<Vec<_>>(),
+            listed.iter().map(|t| t.profile.as_str()).collect::<Vec<_>>(),
             ["kim", "lee"]
         );
         assert_eq!(app.revoke_token(&listed[0].id).unwrap(), 1);
@@ -372,9 +339,7 @@ mod tests {
         for id in ["", "%", "0", "zzzzzzzzzzzz"] {
             assert_eq!(app.revoke_token(id).unwrap(), 0, "{id:?}");
         }
-        assert!(
-            app.token_profile(&a).unwrap().is_some() && app.token_profile(&b).unwrap().is_some()
-        );
+        assert!(app.token_profile(&a).unwrap().is_some() && app.token_profile(&b).unwrap().is_some());
     }
 
     #[test]
@@ -384,10 +349,7 @@ mod tests {
         let operator = AppStore::open(dir.path()).unwrap();
         operator.create_profile("kim", "Kim", 1).unwrap();
         let token = operator.add_token("kim", "laptop", 2).unwrap();
-        assert_eq!(
-            server.token_profile(&token).unwrap().as_deref(),
-            Some("kim")
-        );
+        assert_eq!(server.token_profile(&token).unwrap().as_deref(), Some("kim"));
         let id = operator.list_tokens().unwrap().remove(0).id;
         operator.revoke_token(&id).unwrap();
         assert_eq!(server.token_profile(&token).unwrap(), None);

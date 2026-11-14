@@ -42,15 +42,10 @@ impl FakeLlm {
 }
 
 impl LlmClient for FakeLlm {
-    fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> BoxFuture<'_, Result<CompletionResponse, LlmError>> {
+    fn complete(&self, request: CompletionRequest) -> BoxFuture<'_, Result<CompletionResponse, LlmError>> {
         self.requests.lock().unwrap().push(request);
         let reply = self.replies.lock().unwrap().pop_front();
-        Box::pin(async move {
-            reply.unwrap_or_else(|| Err(LlmError::Transport("FakeLlm has no reply queued".into())))
-        })
+        Box::pin(async move { reply.unwrap_or_else(|| Err(LlmError::Transport("FakeLlm has no reply queued".into()))) })
     }
 }
 
@@ -104,15 +99,8 @@ impl Connector for FakeConnector {
         Box::pin(async move { Ok(tools) })
     }
 
-    fn call_tool(
-        &self,
-        tool: &str,
-        args: Map<String, Value>,
-    ) -> BoxFuture<'_, Result<Value, ConnectorError>> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((tool.to_owned(), args.clone()));
+    fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>> {
+        self.calls.lock().unwrap().push((tool.to_owned(), args.clone()));
         let result = match self.failure.lock().unwrap().clone() {
             Some(message) => Err(ConnectorError::Failed(message)),
             None => Ok(json!({"ok": true, "tool": tool, "echo": args})),

@@ -15,10 +15,7 @@ pub struct ProfileInfo {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InboxBody {
     /// A tool call the agent wants to make. `tool` is a tool ID.
-    ToolCall {
-        tool: String,
-        args: Map<String, Value>,
-    },
+    ToolCall { tool: String, args: Map<String, Value> },
     /// An event the user must handle.
     Escalation { summary: String },
 }

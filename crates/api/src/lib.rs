@@ -143,35 +143,13 @@ pub trait EngineApi: Send + Sync {
     /// The profiles the caller may use.
     fn list_profiles(&self) -> BoxFuture<'_, ApiResult<Vec<ProfileInfo>>>;
     fn profile_config<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<ProfileConfig>>;
-    fn set_profile_config<'a>(
-        &'a self,
-        profile: &'a str,
-        config: ProfileConfig,
-    ) -> BoxFuture<'a, ApiResult<()>>;
+    fn set_profile_config<'a>(&'a self, profile: &'a str, config: ProfileConfig) -> BoxFuture<'a, ApiResult<()>>;
     fn snapshot<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<ProfileSnapshot>>;
-    fn ingest<'a>(
-        &'a self,
-        profile: &'a str,
-        event: InboundEvent,
-    ) -> BoxFuture<'a, ApiResult<Outcome>>;
+    fn ingest<'a>(&'a self, profile: &'a str, event: InboundEvent) -> BoxFuture<'a, ApiResult<Outcome>>;
     /// Approves a pending tool call, with an optional edit, and runs it.
-    fn approve<'a>(
-        &'a self,
-        profile: &'a str,
-        inbox_id: i64,
-        edit: Option<Edit>,
-    ) -> BoxFuture<'a, ApiResult<Outcome>>;
-    fn reject<'a>(
-        &'a self,
-        profile: &'a str,
-        inbox_id: i64,
-        reason: &'a str,
-    ) -> BoxFuture<'a, ApiResult<()>>;
+    fn approve<'a>(&'a self, profile: &'a str, inbox_id: i64, edit: Option<Edit>) -> BoxFuture<'a, ApiResult<Outcome>>;
+    fn reject<'a>(&'a self, profile: &'a str, inbox_id: i64, reason: &'a str) -> BoxFuture<'a, ApiResult<()>>;
     /// Returns the state the engine stored.
     fn set_kill_switch<'a>(&'a self, profile: &'a str, on: bool) -> BoxFuture<'a, ApiResult<bool>>;
-    fn replay<'a>(
-        &'a self,
-        profile: &'a str,
-        case: ReplayCase,
-    ) -> BoxFuture<'a, ApiResult<ReplayResult>>;
+    fn replay<'a>(&'a self, profile: &'a str, case: ReplayCase) -> BoxFuture<'a, ApiResult<ReplayResult>>;
 }
