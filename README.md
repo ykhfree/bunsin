@@ -21,7 +21,10 @@ Bunsin is in early development. Read this list before you use it.
 - **Finding events depends on your MCP servers.** The server repeats a search tool that
   you name in the settings (see [Find events](#find-events-polling)). It has run only
   against test servers. There is no webhook intake.
-- **One event gives one proposal.** The agent does not yet read a tool result and continue.
+- **The agent reads only through the tools you allow.** Before it proposes, it can call
+  tools with the class `read` (for example a search) up to five times and use the
+  results. There is no index of your Confluence or Jira content and no ranking of what
+  to read; the quality depends on the search tools of your MCP servers.
 - **The privacy filter works on patterns.** It finds email addresses, phone numbers and
   the other listed forms. It does not find names or postal addresses.
 - **There is no setup wizard.** The window and the command line set the connections and
@@ -112,8 +115,9 @@ approved tools and permission rules.
 Enter these in the desktop window (section "Connections"), or on the command line:
 
 ```sh
-bunsind llm-set kim --wire anthropic-messages --base-url https://llm.example.com \
-    --model your-model-id --token-stdin          # type or pipe the token, then Enter
+bunsind llm-set kim --token-stdin               # the Claude API; type or pipe the key, then Enter
+bunsind llm-set kim --wire openai-chat --base-url https://llm.example.com/v1 \
+    --model your-model-id --token-stdin          # another endpoint
 bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin
 bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
 bunsind connections kim                          # addresses and where each token comes from
@@ -121,10 +125,16 @@ bunsind tools kim slack                          # connects and lists the tools:
 bunsind connector-remove kim jira                # removes the connector and its token
 ```
 
-- `--wire` is `anthropic-messages` or `openai-chat`.
+- Without options, `llm-set` uses the Claude API: `--wire anthropic-messages`,
+  `--base-url https://api.anthropic.com` and `--model claude-opus-5-5`. The window
+  prefills the same values. `--wire` is `anthropic-messages` or `openai-chat`.
+- A Claude API key that is not scoped to one workspace also needs a workspace ID. Set
+  `"workspace_id"` in the `llm` section of the settings file.
 - The server stores each token encrypted and never sends it back. `connections` shows
   only "token stored on the server", "token from the server's environment" or "no token".
 - Without `--token-stdin` the stored token is kept. `--clear-token` removes it.
+- If someone else changed the same settings after the window loaded them, the window
+  warns before it overwrites. The command line and `config-set` do not check.
 - A token belongs to the address it was entered for. If you move a connection to another
   host or port, enter the token again; the server refuses to keep it.
 - A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
@@ -186,7 +196,10 @@ bunsind connector-remove kim jira                # removes the connector and its
   removed, the call is denied until you approve the list again.
 - **`policy.rules`** is the permission table. A key is `<connector>/<tool>`. The agent can
   propose only tools that have a rule and an approved entry.
-- **`class`** is `read`, `write` or `delete`. A read runs at once, also when the kill
+- **`class`** is `read`, `write` or `delete`. Give `read` only to a tool that changes
+  nothing and sends nothing outside its own service: the agent calls such a tool without
+  asking, and a later read can carry text from an earlier one in its arguments. A tool
+  that fetches a URL you do not control is not a `read`. A read runs at once, also when the kill
   switch is on.
 - **`tier`** says how far a write may go:
 

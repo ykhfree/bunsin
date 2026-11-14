@@ -20,7 +20,8 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
 
 - **이벤트 수신은 사용하는 MCP 서버에 달려 있습니다.** 서버는 설정에 적힌 검색 도구를 반복 호출합니다
   ([이벤트 찾기](#이벤트-찾기-폴링) 참고). 이 기능은 테스트 서버로만 실행해 보았습니다. webhook 수신은 없습니다.
-- **이벤트 하나에 제안 하나입니다.** agent가 도구 결과를 읽고 이어서 작업하는 기능이 아직 없습니다.
+- **agent는 허용한 도구로만 읽습니다.** 제안하기 전에 `read` 도구(예: 검색)를 최대 5번 호출하고 그 결과를 씁니다.
+  Confluence나 Jira 내용의 색인은 없고, 무엇을 읽을지 고르는 순위 기능도 없습니다. 품질은 MCP 서버의 검색 도구에 달려 있습니다.
 - **개인정보 필터는 패턴으로 동작합니다.** 이메일, 전화번호 같은 정해진 형식은 찾지만, 사람 이름과 주소는 찾지 못합니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다.
   원칙, 권한 규칙, poll은 JSON 파일로 편집합니다.
@@ -99,8 +100,9 @@ bunsind config-set kim kim.json
 데스크톱 창의 "Connections" 화면에서 입력하거나, 명령줄로 입력합니다.
 
 ```sh
-bunsind llm-set kim --wire anthropic-messages --base-url https://llm.example.com \
-    --model your-model-id --token-stdin          # token을 입력하거나 파이프로 넘긴 뒤 Enter
+bunsind llm-set kim --token-stdin               # Claude API. key를 입력하거나 파이프로 넘긴 뒤 Enter
+bunsind llm-set kim --wire openai-chat --base-url https://llm.example.com/v1 \
+    --model your-model-id --token-stdin          # 다른 endpoint
 bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin
 bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
 bunsind connections kim                          # 주소와 각 token의 출처
@@ -108,10 +110,15 @@ bunsind tools kim slack                          # 접속해서 도구 목록을
 bunsind connector-remove kim jira                # 커넥터와 그 token을 지웁니다
 ```
 
-- `--wire`는 `anthropic-messages` 또는 `openai-chat`입니다.
+- 옵션이 없으면 `llm-set`은 Claude API를 씁니다: `--wire anthropic-messages`,
+  `--base-url https://api.anthropic.com`, `--model claude-opus-5-5`. 창도 같은 값을 미리 채웁니다.
+  `--wire`는 `anthropic-messages` 또는 `openai-chat`입니다.
+- 한 workspace에 묶이지 않은 Claude API key는 workspace ID도 필요합니다. 설정 파일의 `llm` 항목에 `"workspace_id"`를 넣으십시오.
 - 서버는 token을 암호화해 저장하고, 다시 돌려주지 않습니다. `connections`는 "서버에 저장됨",
   "서버 환경 변수", "없음" 중 하나만 보여 줍니다.
 - `--token-stdin`이 없으면 저장된 token을 유지합니다. `--clear-token`은 token을 지웁니다.
+- 창이 설정을 읽은 뒤에 다른 사람이 같은 설정을 바꿨으면, 창은 덮어쓰기 전에 경고합니다.
+  명령줄과 `config-set`은 이 검사를 하지 않습니다.
 - token은 입력한 주소에 묶입니다. 연결을 다른 host나 port로 옮기면 token을 다시 입력해야 합니다.
   서버는 그 경우 token 유지를 거부합니다.
 - 커넥터 이름은 a-z, 0-9, `-`로 된 1~32자입니다. 이름은 모든 도구 ID의 앞부분이 됩니다(예: `slack/post_message`).
@@ -169,7 +176,9 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   서버는 호출할 때마다 승인된 목록을 현재 목록과 비교합니다. 도구가 바뀌었거나 없어졌으면,
   목록을 다시 승인할 때까지 호출을 거부합니다.
 - **`policy.rules`** 가 권한 표입니다. key는 `<커넥터>/<도구>`입니다. agent는 규칙과 승인 항목이 모두 있는 도구만 제안할 수 있습니다.
-- **`class`** 는 `read`, `write`, `delete` 중 하나입니다. 읽기는 바로 실행되고, 정지 스위치가 켜져 있어도 실행됩니다.
+- **`class`** 는 `read`, `write`, `delete` 중 하나입니다. `read`는 아무것도 바꾸지 않고, 자기 서비스 밖으로 아무것도 보내지 않는 도구에만 주십시오.
+  agent는 `read` 도구를 묻지 않고 호출하고, 뒤의 읽기는 앞에서 읽은 글을 인자에 담을 수 있습니다.
+  통제할 수 없는 URL을 가져오는 도구는 `read`가 아닙니다. 읽기는 바로 실행되고, 정지 스위치가 켜져 있어도 실행됩니다.
 - **`tier`** 는 쓰기를 어디까지 허용할지 정합니다.
 
   | 단계 | 제안된 쓰기의 처리 |
