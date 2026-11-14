@@ -431,3 +431,42 @@ async fn a_profile_whose_clients_cannot_be_built_shows_the_reason_in_its_poll_st
     // The same failure on the next cycle is not logged again.
     assert_eq!(snapshot.audit.iter().filter(|a| a.kind == "poll").count(), 1);
 }
+
+#[tokio::test]
+async fn a_write_that_ran_is_not_made_again_when_a_later_step_failed() {
+    use bunsin_core::policy::Tier;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut config = config();
+    config.policy.rules.get_mut("slack/post").unwrap().tier = Tier::Autonomous;
+    let rig = rig_with(config).await;
+    // The first event leaves the reply and proposal files on disk, so the second event
+    // needs to write only its tool result.
+    rig.llm.reply(&post("Done."), 10);
+    let first = rig
+        .engine
+        .ingest("kim", event("e0", "lee", "same question"))
+        .await
+        .unwrap();
+    assert!(matches!(first, Outcome::Executed { .. }), "{first:?}");
+
+    // The result of the next call is new content, and its folder cannot be written.
+    let folder = rig.dir.path().join("profiles/kim/artifacts/sha256");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    rig.slack.set_result("post", json!({"ok": true, "ts": "2"}));
+    rig.llm.reply(&post("Done."), 10);
+    let failed = rig.engine.ingest("kim", event("e1", "lee", "same question")).await;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(failed.is_err(), "{failed:?}");
+    assert_eq!(rig.slack.calls().len(), 2);
+
+    // The event is delivered again, as a poll would do. The message is not posted twice.
+    rig.llm.reply(&post("Done."), 10);
+    let again = rig
+        .engine
+        .ingest("kim", event("e1", "lee", "same question"))
+        .await
+        .unwrap();
+    assert_eq!(again, Outcome::Duplicate);
+    assert_eq!(rig.slack.calls().len(), 2);
+}

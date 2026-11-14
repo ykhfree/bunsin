@@ -229,3 +229,14 @@ async fn a_correction_with_personal_data_is_filtered_in_later_prompts() {
     );
     assert!(!later.contains(EMAIL) && !later.contains(PHONE));
 }
+
+#[tokio::test]
+async fn personal_data_in_the_thread_field_is_filtered_too() {
+    let rig = rig().await;
+    rig.llm.reply(&ignore(), 10);
+    let mut with_thread = event("e1", "lee", "see the thread");
+    with_thread.thread = Some(format!("thread of {EMAIL}"));
+    rig.engine.ingest("kim", with_thread).await.unwrap();
+    assert!(!all_requests(&rig).contains(EMAIL));
+    assert!(!rig.stores(EMAIL));
+}

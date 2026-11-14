@@ -35,9 +35,33 @@ pub fn wait_until(cx: &mut TestAppContext, shell: &Entity<Shell>, what: &str, do
     }
 }
 
-/// Opens the main window on the engine of `rig` and waits for the first snapshot.
-/// The window has GPUI's default size.
+/// The size of a small laptop screen. The inbox must work at this size.
+pub const LAPTOP: (f32, f32) = (1280., 800.);
+
+/// Opens the main window at laptop size. It shows the inbox.
 pub fn open(cx: &mut TestAppContext, rt: &tokio::runtime::Runtime, rig: &Rig) -> (AnyWindowHandle, Entity<Shell>) {
+    open_sized(cx, rt, rig, LAPTOP)
+}
+
+/// Opens the main window and switches to the settings forms. The window is tall,
+/// because a headless test cannot click a control that is scrolled out of view.
+pub fn open_settings(
+    cx: &mut TestAppContext,
+    rt: &tokio::runtime::Runtime,
+    rig: &Rig,
+) -> (AnyWindowHandle, Entity<Shell>) {
+    let (window, shell) = open_sized(cx, rt, rig, (1280., 1400.));
+    on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
+    (window, shell)
+}
+
+/// Opens the main window on the engine of `rig` and waits for the first snapshot.
+pub fn open_sized(
+    cx: &mut TestAppContext,
+    rt: &tokio::runtime::Runtime,
+    rig: &Rig,
+    (width, height): (f32, f32),
+) -> (AnyWindowHandle, Entity<Shell>) {
     // The engine wakes the view from tokio threads, as in the real app. Tell the test scheduler.
     cx.executor().allow_parking();
     let (commands, states) = spawn_bridge(rt.handle(), rig.engine.clone(), REFRESH);
@@ -45,7 +69,7 @@ pub fn open(cx: &mut TestAppContext, rt: &tokio::runtime::Runtime, rig: &Rig) ->
     let (window, shell) = cx.update(|cx| {
         let bounds = Bounds {
             origin: Point::default(),
-            size: size(px(1536.), px(1095.)),
+            size: size(px(width), px(height)),
         };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

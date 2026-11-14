@@ -7,7 +7,7 @@ use bunsin_app::bridge::ConnectionResult;
 use bunsin_app::shell::Shell;
 use bunsin_core::settings::{ConnectorSection, McpConfig, Wire};
 use bunsin_testkit::tool;
-use common::window::{REFRESH, label, on_screen, open, runtime, screen_texts, value, wait_until};
+use common::window::{REFRESH, label, on_screen, open_settings, runtime, screen_texts, value, wait_until};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{App, Entity, SharedString, TestAppContext, Window};
 
@@ -88,7 +88,7 @@ fn wire_checked(window: &mut Window) -> (Option<bool>, Option<bool>) {
 fn the_section_shows_the_server_connections_of_the_selected_profile(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, _| {
         assert_eq!(value(window, "llm-address"), "");
         assert_eq!(value(window, "llm-model"), "");
@@ -134,7 +134,7 @@ fn the_section_shows_the_server_connections_of_the_selected_profile(cx: &mut Tes
 fn saving_the_llm_endpoint_stores_the_token_on_the_server_only(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.within("llm-wire").click(1usize, cx);
         fill(window, cx, "llm-address", "https://llm.example/v1");
@@ -190,7 +190,7 @@ fn saving_the_llm_endpoint_stores_the_token_on_the_server_only(cx: &mut TestAppC
 fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         fill(window, cx, "connector-name", "jira");
         fill(window, cx, "connector-address", "https://mcp.example/jira");
@@ -269,7 +269,7 @@ fn a_stored_token_is_removed_only_with_an_empty_token_field(cx: &mut TestAppCont
     rt.block_on(rig.engine.set_llm("kim", endpoint)).unwrap();
     let jira = connector("https://mcp.example/jira", TokenChange::Set(SLACK_TOKEN.into()));
     rt.block_on(rig.engine.set_connector("kim", "jira", jira)).unwrap();
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     let sources = || {
         let connections = rt.block_on(rig.engine.connections("kim")).unwrap();
         (connections.llm.unwrap().token, connections.connectors["jira"].token)
@@ -336,7 +336,7 @@ fn remove_deletes_the_connector_on_the_server_and_in_the_list(cx: &mut TestAppCo
         let update = connector(&url, TokenChange::Set(SLACK_TOKEN.into()));
         rt.block_on(rig.engine.set_connector("kim", name, update)).unwrap();
     }
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-count"), "Connectors: 2");
         click_row(window, cx, "jira", "remove");
@@ -356,7 +356,7 @@ fn remove_deletes_the_connector_on_the_server_and_in_the_list(cx: &mut TestAppCo
 fn a_bad_name_and_a_refused_address_show_the_server_error_and_keep_the_draft(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         fill(window, cx, "connector-name", "Bad Name");
         fill(window, cx, "connector-address", "https://mcp.example/x");
@@ -406,7 +406,7 @@ fn check_shows_the_tools_or_the_error_and_approve_makes_the_list_clean(cx: &mut 
     // Slack lists a tool that the owner has not approved.
     rig.slack
         .set_tools(vec![tool("post", "Post a message"), tool("search", "Search")]);
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         assert_eq!(row(window, "slack", "tools"), None);
         click_row(window, cx, "slack", "check");
@@ -454,7 +454,7 @@ fn check_shows_the_tools_or_the_error_and_approve_makes_the_list_clean(cx: &mut 
 fn a_refresh_does_not_overwrite_the_connection_drafts(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.within("llm-wire").click(1usize, cx);
         fill(window, cx, "llm-address", "https://typed.example/v1");
@@ -532,7 +532,7 @@ fn change_from_outside(
 fn drafts_typed_after_a_successful_save_survive_a_refresh(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     let result = |cx: &mut TestAppContext| shell.read_with(cx, |s, _| s.state.connection_result.clone());
     on_screen(cx, window, |window, cx| {
         fill(window, cx, "llm-address", "https://llm.example");
@@ -582,7 +582,7 @@ fn drafts_typed_after_a_successful_save_survive_a_refresh(cx: &mut TestAppContex
 fn another_profile_discards_the_drafts_and_saves_only_to_itself(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         fill(window, cx, "llm-address", "https://kim.example");
         fill(window, cx, "llm-model", "kim-model");
@@ -637,7 +637,7 @@ fn a_stdio_connector_is_listed_read_only(cx: &mut TestAppContext) {
         .connectors
         .insert("local".into(), serde_json::to_value(&section).unwrap());
     rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         assert_eq!(
             row(window, "local", "address").as_deref(),

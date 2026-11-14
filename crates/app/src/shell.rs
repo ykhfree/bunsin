@@ -17,6 +17,9 @@ pub struct Shell {
     commands: mpsc::UnboundedSender<UiCommand>,
     pub(crate) privacy: PrivacyForm,
     pub(crate) connections: ConnectionsForm,
+    /// False: the inbox and the audit log are shown. True: the settings forms are shown.
+    /// The two never share the window, so the forms cannot squeeze the inbox.
+    pub settings_open: bool,
 }
 
 impl Shell {
@@ -47,6 +50,7 @@ impl Shell {
             commands,
             privacy: PrivacyForm::new(window, cx),
             connections: ConnectionsForm::new(window, cx),
+            settings_open: false,
         }
     }
 
@@ -86,6 +90,13 @@ pub(crate) fn labelled(id: impl Into<SharedString>, text: impl Into<SharedString
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The forms are built first. The lists below borrow `cx` until they are drawn.
+        let forms = self.settings_open.then(|| {
+            (
+                self.connections_section(cx).into_any_element(),
+                self.privacy_section(cx).into_any_element(),
+            )
+        });
         let snapshot = self.state.snapshot.as_ref();
         let stopped = snapshot.is_some_and(|s| s.kill_switch);
         let status = match snapshot {
@@ -154,6 +165,56 @@ impl Render for Shell {
             )))
         });
 
+        let page = if let Some((connections, privacy)) = forms {
+            div()
+                .id("settings")
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_wrap()
+                .gap_4()
+                .overflow_y_scroll()
+                .child(connections)
+                .child(privacy)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                // Long lines must not push the settings columns out of the window.
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div().flex().gap_3().child(labelled("status", status)).child(
+                        Button::new("kill-switch")
+                            .label(if stopped { "Resume changes" } else { "Stop all changes" })
+                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped)))),
+                    ),
+                )
+                .child(labelled("error", self.state.error.clone().unwrap_or_default()))
+                .child(labelled("inbox-count", format!("Approval inbox: {}", inbox.len())))
+                .child(
+                    div()
+                        .id("inbox")
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .overflow_y_scroll()
+                        .children(inbox),
+                )
+                .child(labelled("audit-count", format!("Audit log: {} entries", audit.len())))
+                .child(
+                    div()
+                        .id("audit")
+                        .flex()
+                        .flex_col()
+                        .overflow_y_scroll()
+                        .children(audit_rows),
+                )
+                .into_any_element()
+        };
+
         div()
             .size_full()
             .flex()
@@ -165,49 +226,29 @@ impl Render for Shell {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new("tab-inbox")
+                                    .label("Inbox")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(Button::new("tab-settings").label("Settings").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.settings_open = true;
+                                    cx.notify();
+                                },
+                            ))),
+                    )
                     .child("Profiles")
                     .children(profiles),
             )
-            .child(
-                div()
-                    .flex_1()
-                    // Long lines must not push the settings columns out of the window.
-                    .min_w(px(0.))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div().flex().gap_3().child(labelled("status", status)).child(
-                            Button::new("kill-switch")
-                                .label(if stopped { "Resume changes" } else { "Stop all changes" })
-                                .on_click(
-                                    cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped))),
-                                ),
-                        ),
-                    )
-                    .child(labelled("error", self.state.error.clone().unwrap_or_default()))
-                    .child(labelled("inbox-count", format!("Approval inbox: {}", inbox.len())))
-                    .child(
-                        div()
-                            .id("inbox")
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .overflow_y_scroll()
-                            .children(inbox),
-                    )
-                    .child(labelled("audit-count", format!("Audit log: {} entries", audit.len())))
-                    .child(
-                        div()
-                            .id("audit")
-                            .flex()
-                            .flex_col()
-                            .overflow_y_scroll()
-                            .children(audit_rows),
-                    ),
-            )
-            .child(self.privacy_section(cx))
-            .child(self.connections_section(cx))
+            .child(page)
     }
 }
 

@@ -508,7 +508,12 @@ impl Engine {
         match state {
             ApprovalState::Draft => Ok(Outcome::Drafted { inbox_id: item.id }),
             ApprovalState::Pending => Ok(Outcome::PendingApproval { inbox_id: item.id }),
-            _ => self.execute(ctx, &item).await,
+            _ => {
+                // The event is closed before the call starts. If a step after the call fails,
+                // a later delivery of the event must not make the same write again.
+                store.finish_event(key).map_err(store_error)?;
+                self.execute(ctx, &item).await
+            }
         }
     }
 
@@ -517,6 +522,7 @@ impl Engine {
         event.text = redactor.redact(&event.text, counts);
         // An author is often an email address.
         event.author = redactor.redact(&event.author, counts);
+        event.thread = event.thread.map(|thread| redactor.redact(&thread, counts));
         event
     }
 

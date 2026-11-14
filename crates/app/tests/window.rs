@@ -6,7 +6,7 @@ use bunsin_api::EngineApi;
 use bunsin_app::shell::Shell;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
-use common::window::{REFRESH, label, on_screen, open, runtime, value, wait_until};
+use common::window::{REFRESH, label, on_screen, open, open_settings, runtime, value, wait_until};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{App, AppContext, Entity, TestAppContext, Window};
 
@@ -120,7 +120,7 @@ fn wait_for_saves(cx: &mut TestAppContext, shell: &Entity<Shell>, n: u64) {
 fn the_privacy_section_shows_the_server_settings(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, _| {
         // The defaults: every built-in kind on, no custom pattern, nothing to save.
         for id in TOGGLES {
@@ -164,7 +164,7 @@ fn the_privacy_section_shows_the_server_settings(cx: &mut TestAppContext) {
 fn saved_settings_are_the_ones_the_server_uses(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.click("privacy-email", cx);
         assert_eq!(window.find("privacy-email").checked(), Some(false));
@@ -229,7 +229,7 @@ fn remove_and_save_deletes_the_pattern_on_the_server(cx: &mut TestAppContext) {
         ..PrivacyConfig::default()
     };
     rt.block_on(rig.engine.set_privacy("kim", stored)).unwrap();
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "pattern-count"), "Custom patterns: 2");
         window.click("remove-pattern-0", cx);
@@ -251,7 +251,7 @@ fn remove_and_save_deletes_the_pattern_on_the_server(cx: &mut TestAppContext) {
 fn a_refused_pattern_shows_the_server_error_and_keeps_the_form(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.click("privacy-phone", cx);
         type_pattern(window, cx, "bad", "(unclosed");
@@ -280,7 +280,7 @@ fn a_refused_pattern_shows_the_server_error_and_keeps_the_form(cx: &mut TestAppC
 fn a_refresh_does_not_overwrite_the_form_being_edited(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.click("privacy-phone", cx);
         type_pattern(window, cx, "half typed", "NOT-ADDED");
@@ -313,7 +313,7 @@ fn a_refresh_does_not_overwrite_the_form_being_edited(cx: &mut TestAppContext) {
 fn edits_after_a_successful_save_survive_a_refresh(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| window.click("save-privacy", cx));
     wait_for_saves(cx, &shell, 1);
     on_screen(cx, window, |window, cx| {
@@ -344,7 +344,7 @@ fn edits_after_a_successful_save_survive_a_refresh(cx: &mut TestAppContext) {
 fn another_profile_discards_the_draft_and_saves_only_to_itself(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.click("privacy-phone", cx);
         type_pattern(window, cx, "kim only", "KIM-[0-9]+");
@@ -384,7 +384,7 @@ fn another_profile_discards_the_draft_and_saves_only_to_itself(cx: &mut TestAppC
 fn add_with_an_empty_field_adds_no_row(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, _shell) = open(cx, &rt, &rig);
+    let (window, _shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         window.click("add-pattern", cx);
         assert_eq!(label(window, "privacy-message"), "Enter a label and a pattern.");
@@ -417,7 +417,7 @@ fn save_is_refused_while_the_add_fields_hold_text(cx: &mut TestAppContext) {
     const UNADDED: &str = "Add the pattern or clear the fields first";
     let rt = runtime();
     let rig = rt.block_on(common::rig());
-    let (window, shell) = open(cx, &rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| window.click("save-privacy", cx));
     wait_for_saves(cx, &shell, 1);
     on_screen(cx, window, |window, cx| {
