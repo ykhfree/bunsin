@@ -357,6 +357,8 @@ async fn the_settings_file_cannot_leave_a_value_behind_or_use_one_as_a_token() {
     engine.set_profile_config("kim", config.clone()).await.unwrap();
     let error = engine.connector_tools("kim", "thief").await.unwrap_err();
     assert!(!error.to_string().contains(SECRET), "{error}");
+    // This rule stopped it: the value was not entered for an address.
+    assert!(error.to_string().contains("was entered for another address"), "{error}");
     // The value was stored for the environment of a command, so no request carries it.
     assert!(
         seen.lock().unwrap().iter().all(Option::is_none),
@@ -369,4 +371,44 @@ async fn the_settings_file_cannot_leave_a_value_behind_or_use_one_as_a_token() {
     config.connectors.remove("thief");
     engine.set_profile_config("kim", config).await.unwrap();
     assert!(keys(dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn a_variable_that_the_settings_name_without_a_value_is_reported_as_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path(), true).await;
+    // The settings file names two secret variables. It cannot give their values.
+    let mut config = engine.profile_config("kim").await.unwrap();
+    config.connectors.insert(
+        "local".into(),
+        json!({"mcp": {"transport": "stdio", "command": "/opt/mcp/does-not-exist", "args": [], "env": {}},
+               "secret_env": ["API_TOKEN", "SECOND"]}),
+    );
+    engine.set_profile_config("kim", config).await.unwrap();
+    let shown = engine.connections("kim").await.unwrap().connectors["local"].clone();
+    assert_eq!(shown.secret_env, ["API_TOKEN", "SECOND"]);
+    assert_eq!(shown.secret_env_missing, ["API_TOKEN", "SECOND"]);
+
+    // One gets its value. The other is left out, so it is removed.
+    let update = CommandConnectorUpdate {
+        env: Default::default(),
+        ..with_secrets(&[("API_TOKEN", set(SECRET))])
+    };
+    engine.set_command_connector("kim", "local", update).await.unwrap();
+    let shown = engine.connections("kim").await.unwrap().connectors["local"].clone();
+    assert_eq!(shown.secret_env, ["API_TOKEN"]);
+    assert!(shown.secret_env_missing.is_empty());
+
+    // A settings file without the name removes the value for good, and the log says so.
+    let mut config = engine.profile_config("kim").await.unwrap();
+    config.connectors.get_mut("local").unwrap()["secret_env"] = json!([]);
+    engine.set_profile_config("kim", config).await.unwrap();
+    assert!(keys(dir.path()).is_empty());
+    let audit = engine.snapshot("kim").await.unwrap().audit;
+    assert!(
+        audit
+            .iter()
+            .any(|entry| entry.kind == "secret_values_removed" && entry.detail == json!({"count": 1})),
+        "{audit:?}"
+    );
 }

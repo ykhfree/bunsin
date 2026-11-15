@@ -93,6 +93,14 @@ fn command_texts(args: &[String], env: &BTreeMap<String, String>) -> Option<(Str
     })
 }
 
+/// The secret variables of a connector that have a value on the server.
+fn stored_secrets(connector: &ConnectorConnection) -> impl Iterator<Item = &String> {
+    connector
+        .secret_env
+        .iter()
+        .filter(|name| !connector.secret_env_missing.contains(name))
+}
+
 /// How many arguments and variables a command has, for the list and the form.
 fn counts_text(args: usize, env: usize, secrets: usize) -> String {
     let plural = |count: usize, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
@@ -407,10 +415,11 @@ impl ConnectionsForm {
         self.args.update(cx, |area, cx| area.set_value(args, window, cx));
         self.env.update(cx, |area, cx| area.set_value(env, window, cx));
         // The stored values stay on the server. The draft keeps each of them until the owner changes it.
+        // A name without a value on the server is not in the draft: "keep" would be refused.
+        // The form names it, and the owner adds it with a value.
         self.secrets = connector
             .map(|c| {
-                c.secret_env
-                    .iter()
+                stored_secrets(c)
                     .map(|name| (name.clone(), SecretChange::Keep))
                     .collect()
             })
@@ -484,11 +493,10 @@ impl ConnectionsForm {
                             && command.display().to_string() == text(&self.command, cx)
                             && *args == parse_args(&Self::raw(&self.args, cx))
                             && parse_env(&Self::raw(&self.env, cx)).as_ref() == Ok(env)
-                            && self.secrets.len() == base.secret_env.len()
-                            && self
-                                .secrets
-                                .iter()
-                                .all(|(name, change)| *change == SecretChange::Keep && base.secret_env.contains(name))
+                            && self.secrets.len() == stored_secrets(base).count()
+                            && self.secrets.iter().all(|(name, change)| {
+                                *change == SecretChange::Keep && stored_secrets(base).any(|stored| stored == name)
+                            })
                             && self.secret_fields_empty(cx)
                     }
                 }
@@ -1052,6 +1060,14 @@ impl Shell {
                             .into_any_element()
                     })
                     .collect();
+                // The settings can name a secret variable that has no value yet.
+                let missing = match &form.connector_base {
+                    Some((_, base)) if !base.secret_env_missing.is_empty() => format!(
+                        "No value is stored for: {}. Add each with its value. A save without it removes the variable.",
+                        base.secret_env_missing.join(", ")
+                    ),
+                    _ => String::new(),
+                };
                 let args = parse_args(&ConnectionsForm::raw(&form.args, cx)).len();
                 let counts = match parse_env(&ConnectionsForm::raw(&form.env, cx)) {
                     Ok(env) => counts_text(args, env.len(), form.secrets.len()),
@@ -1083,6 +1099,11 @@ impl Shell {
                     )
                     .into_any_element(),
                     labelled_as("secret-help", SECRET_HELP, quiet(SECRET_HELP, cx)).into_any_element(),
+                    div()
+                        .text_sm()
+                        .text_color(palette(cx).waiting)
+                        .child(labelled("secret-missing", missing))
+                        .into_any_element(),
                     div().flex().flex_col().gap_1().children(secret_rows).into_any_element(),
                     div()
                         .flex()

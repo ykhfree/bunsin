@@ -257,7 +257,10 @@ bunsind connector-remove kim jira                # removes the connector and its
     settings. `config-show` and the form after **Edit** show them. The connector list
     shows only the program and how many of each there are.
   - Secret values are entered in the window only. The settings file can name a secret
-    variable (`"secret_env": ["API_TOKEN"]`), but not give its value. A plain value that
+    variable (`"secret_env": ["API_TOKEN"]`), but not give its value: the form then says
+    that no value is stored for it. A settings file without the name removes the stored
+    value for good, so `config-set` with an older file removes the values that the file
+    does not name. A plain value that
     is in the settings already is not moved: enter it as a secret variable and delete its
     plain line.
   - Encryption protects the stored value. While the program runs, the value is in the

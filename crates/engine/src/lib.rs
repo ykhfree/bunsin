@@ -1089,7 +1089,7 @@ impl EngineApi for Engine {
             Self::check_config(&config)?;
             Self::save_config(&store, &config)?;
             // A settings file can drop a secret variable or its connector. Its value goes too.
-            Self::prune_env_secrets(&store, &config)?;
+            self.prune_env_secrets(&store, &config)?;
             // The next use builds the clients again from the new settings.
             self.runtimes.lock().expect("engine lock").remove(profile);
             self.audit(&store, "config_changed", None, json!({}))

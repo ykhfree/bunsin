@@ -1857,7 +1857,7 @@ fn the_secret_value_goes_to_the_server_as_it_was_typed_and_is_not_printed(cx: &m
         let options = gpui_kit::WindowOptions {
             window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
                 origin: Default::default(),
-                size: gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(1800.)),
+                size: gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2100.)),
             })),
             ..Default::default()
         };
@@ -1900,4 +1900,51 @@ fn the_secret_value_goes_to_the_server_as_it_was_typed_and_is_not_printed(cx: &m
         printed.contains("API_TOKEN") && !printed.contains("two words"),
         "{printed}"
     );
+}
+
+#[gpui_kit::test]
+fn a_secret_variable_without_a_value_is_not_shown_as_stored(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // The settings file names a secret variable. It cannot give the value.
+    let section = ConnectorSection {
+        mcp: McpConfig::Stdio {
+            command: "/opt/mcp/does-not-exist".into(),
+            args: vec![],
+            env: Default::default(),
+        },
+        token_secret: None,
+        token_header: None,
+        secret_env: ["API_TOKEN".to_owned()].into(),
+    };
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config
+        .connectors
+        .insert("local".into(), serde_json::to_value(&section).unwrap());
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| click_row(window, cx, "local", "edit"));
+    on_screen(cx, window, |window, cx| {
+        // No row says "stored" for it. The form says what is missing.
+        assert!(window.try_find("secret-API_TOKEN").is_none());
+        assert_eq!(
+            label(window, "secret-missing"),
+            "No value is stored for: API_TOKEN. Add each with its value. A save without it removes the variable."
+        );
+        type_secret(window, cx, "API_TOKEN", SECRET_VALUE);
+        window.click("add-secret", cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("save-connector", cx));
+    wait_for_commands(cx, &shell, 1);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "connector-result"), "Saved: local")
+    });
+    let stored = rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"].clone();
+    assert_eq!(stored.secret_env, ["API_TOKEN"]);
+    assert!(stored.secret_env_missing.is_empty());
+    on_screen(cx, window, |window, cx| click_row(window, cx, "local", "edit"));
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "secret-API_TOKEN"), "API_TOKEN: stored on the server");
+        assert_eq!(label(window, "secret-missing"), "");
+    });
 }

@@ -61,6 +61,16 @@ impl Engine {
         for (name, value) in &config.connectors {
             let section = connector_section(name, value)?;
             let token = self.token_source(profile, &store, section.token_secret.as_deref())?;
+            let mut secret_env_missing = Vec::new();
+            for variable in &section.secret_env {
+                if store
+                    .secret(&env_secret_key(name, variable))
+                    .map_err(store_error)?
+                    .is_none()
+                {
+                    secret_env_missing.push(variable.clone());
+                }
+            }
             connectors.insert(
                 name.clone(),
                 ConnectorConnection {
@@ -68,6 +78,7 @@ impl Engine {
                     token,
                     token_header: section.token_header,
                     secret_env: section.secret_env.into_iter().collect(),
+                    secret_env_missing,
                 },
             );
         }
@@ -243,7 +254,7 @@ impl Engine {
     /// Deletes every stored value of a secret environment variable that `config` no longer names.
     /// Every path that stores settings calls this, so a removed variable or connector leaves
     /// no value behind, whichever way it was removed.
-    pub(crate) fn prune_env_secrets(store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
+    pub(crate) fn prune_env_secrets(&self, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
         let mut named = std::collections::BTreeSet::new();
         for (name, value) in &config.connectors {
             // Settings that cannot be read name no variable. Validation refused them before.
@@ -251,10 +262,16 @@ impl Engine {
                 named.extend(section.secret_env.iter().map(|variable| env_secret_key(name, variable)));
             }
         }
+        let mut removed = 0;
         for key in store.secret_keys().map_err(store_error)? {
             if key.starts_with(ENV_SECRET_PREFIX) && !named.contains(&key) {
                 store.delete_secret(&key).map_err(store_error)?;
+                removed += 1;
             }
+        }
+        if removed > 0 {
+            // A removed value cannot be brought back, so the log says that it happened.
+            self.audit(store, "secret_values_removed", None, json!({"count": removed}))?;
         }
         Ok(())
     }
@@ -344,7 +361,7 @@ impl Engine {
         }
         self.commit_connections(profile, &store, &loaded, &config)?;
         // The values of removed variables go only after the settings are stored.
-        Self::prune_env_secrets(&store, &config)?;
+        self.prune_env_secrets(&store, &config)?;
         // The arguments and the variables can hold secrets. The log names only the connector.
         self.audit(
             &store,
@@ -363,7 +380,7 @@ impl Engine {
         // The token goes with the connector. The server stores a connector's token only under this key.
         store.delete_secret(&connector_secret_key(name)).map_err(store_error)?;
         self.commit_connections(profile, &store, &loaded, &config)?;
-        Self::prune_env_secrets(&store, &config)?;
+        self.prune_env_secrets(&store, &config)?;
         self.audit(&store, "connection_removed", None, json!({"target": name}))
     }
 }

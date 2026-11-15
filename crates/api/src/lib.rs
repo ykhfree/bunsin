@@ -216,6 +216,10 @@ pub struct ConnectorConnection {
     /// The names of the secret environment variables of a command. Their values are never sent.
     #[serde(default)]
     pub secret_env: Vec<String>,
+    /// The names in `secret_env` for which the server has no value. A settings file can name
+    /// a variable, but only the window gives it a value.
+    #[serde(default)]
+    pub secret_env_missing: Vec<String>,
 }
 
 /// What to do with the value of one secret environment variable when a command is saved.
