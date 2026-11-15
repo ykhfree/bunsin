@@ -216,7 +216,10 @@ bunsind connector-remove kim jira                # removes the connector and its
   that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
   The token is copied once to the server: a later change in the Keychain does not reach
-  it. macOS can ask you to allow the access if another app made the item.
+  it. macOS can ask you to allow the access if another app made the item. The window
+  does not respond while macOS asks. The read finds application passwords of the login
+  Keychain only: not "Internet password" items, and not items of iCloud Keychain or the
+  Passwords app. Only the LLM token has this feature.
 - With `--wire openai-chat` or `openai-responses`, `llm-set` needs `--base-url` and `--model`.
   Only the Claude format has defaults.
 - A Claude API key that is not scoped to one workspace also needs a workspace ID. Set

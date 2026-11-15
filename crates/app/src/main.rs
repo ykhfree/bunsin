@@ -55,7 +55,7 @@ fn main() {
                 cx.new(|cx| {
                     let mut view = AppView::new(handle, source, window, cx);
                     // The connections form can copy a token from an item of the login Keychain.
-                    view.set_keychain(Arc::new(MacKeychain));
+                    view.set_keychain(Arc::new(MacKeychain), cx);
                     view
                 })
             })

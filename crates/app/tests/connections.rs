@@ -1360,6 +1360,18 @@ fn the_keychain_token_is_sent_as_it_is_and_never_for_another_profile(cx: &mut Te
         ("kim".to_owned(), TokenChange::Set(KEYCHAIN_VALUE.into()))
     );
 
+    // A read that fails after a good one empties the token field: Save must not send the earlier token.
+    // The scripted bridge answered no save, so the fields are still open.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "kim")
+    });
+    assert_eq!(keychain_message(cx, window), KEYCHAIN_READ);
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "nobody");
+        window.click("save-llm", cx);
+    });
+    assert_eq!(last_save(cx), ("kim".to_owned(), TokenChange::Keep));
+
     // A token that was read for one profile is dropped when another profile is selected.
     on_screen(cx, window, |window, cx| {
         read_keychain(window, cx, "api.anthropic.com", "kim")

@@ -421,7 +421,12 @@ impl Shell {
             form.keychain_message = Some(KEYCHAIN_FIELDS.to_owned());
             return;
         }
-        form.keychain_message = Some(match self.keychain.password(&service, &account) {
+        let found = self.keychain.password(&service, &account);
+        // A token from an earlier read must not stay in the field beside "was not read".
+        if !matches!(&found, Ok(password) if !password.trim().is_empty()) {
+            set(&form.llm_token, "", window, cx);
+        }
+        form.keychain_message = Some(match found {
             Ok(password) if password.trim().is_empty() => KEYCHAIN_EMPTY.to_owned(),
             Ok(password) => {
                 // A save reads every field without the space around its text, so a line end

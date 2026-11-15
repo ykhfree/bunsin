@@ -3,7 +3,9 @@
 mod common;
 
 use bunsin_app::connect::{AppView, Source};
-use bunsin_app::connection::{Connection, MemoryTokenStore, TokenStore, load_connection, save_connection};
+use bunsin_app::connection::{
+    Connection, KeychainLookup, MemoryTokenStore, TokenStore, load_connection, save_connection,
+};
 use bunsin_daemon::server::{Running, ServeConfig, serve};
 use common::window::screen_texts;
 use gpui_kit::test::TestWindowExt;
@@ -97,7 +99,18 @@ impl Test {
         &self,
         cx: &mut TestAppContext,
         source: Source,
+        size: (f32, f32),
+    ) -> (AnyWindowHandle, Entity<AppView>) {
+        self.open_as(cx, source, size, None)
+    }
+
+    /// Builds the view as `main.rs` does: `AppView::new`, then the Keychain lookup, in one step.
+    fn open_as(
+        &self,
+        cx: &mut TestAppContext,
+        source: Source,
         (width, height): (f32, f32),
+        keychain: Option<Arc<dyn KeychainLookup>>,
     ) -> (AnyWindowHandle, Entity<AppView>) {
         // The server wakes the view from tokio threads. Tell the test scheduler.
         cx.executor().allow_parking();
@@ -113,7 +126,13 @@ impl Test {
                 ..Default::default()
             };
             let (window, view) = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| AppView::new(handle, source, window, cx))
+                cx.new(|cx| {
+                    let mut view = AppView::new(handle, source, window, cx);
+                    if let Some(keychain) = keychain {
+                        view.set_keychain(keychain, cx);
+                    }
+                    view
+                })
             })
             .unwrap();
             (window, view)
@@ -481,4 +500,83 @@ fn the_connected_window_fills_a_laptop_screen_and_its_controls_do_not_overlap(cx
         })
     });
     assert_eq!(t.server.rig.slack.calls().len(), 1);
+}
+
+/// A Keychain with one item. No test reads the real Keychain.
+struct OneItem;
+
+impl KeychainLookup for OneItem {
+    fn password(&self, service: &str, account: &str) -> Result<String, String> {
+        match (service, account) {
+            ("bunsin-test", "me") => Ok("throwaway".into()),
+            _ => Err("no item".into()),
+        }
+    }
+}
+
+/// Opens the settings and reads the item `bunsin-test` / `me`. Returns the message of the read.
+fn read_item(cx: &mut TestAppContext, window: AnyWindowHandle) -> String {
+    let step = |cx: &mut TestAppContext, id: &'static str| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        })
+        .unwrap();
+    };
+    step(cx, "tab-settings");
+    step(cx, "open-keychain");
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("keychain-service", cx);
+        window.input("bunsin-test", cx);
+        window.click("keychain-account", cx);
+        window.input("me", cx);
+        window.click("read-keychain", cx);
+    })
+    .unwrap();
+    label(cx, window, "keychain-message").unwrap_or_default()
+}
+
+const READ: &str = "The token is in the token field now. Save sends it to the server.";
+
+#[gpui_kit::test]
+fn the_main_window_of_the_app_reads_the_keychain_after_every_connect(cx: &mut TestAppContext) {
+    let t = Test::new();
+    // A saved connection connects inside `AppView::new`, before the app sets the lookup.
+    t.save_good_connection();
+    let keychain: Arc<dyn KeychainLookup> = Arc::new(OneItem);
+    let (window, view) = t.open_as(cx, t.saved(), (1280., 1400.), Some(keychain));
+    wait_until(cx, &view, "the shell with a snapshot", shell_loaded);
+    assert_eq!(read_item(cx, window), READ);
+
+    // A new main window after Disconnect and a second connect has the lookup too.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("disconnect", cx);
+    })
+    .unwrap();
+    wait_until(cx, &view, "the connect screen", |view, _| view.shell().is_none());
+    // The address stays in the form after Disconnect. Only the token is typed again.
+    let token = t.server.token.clone();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("token", cx);
+        window.input(&token, cx);
+        window.click("connect", cx);
+    })
+    .unwrap();
+    wait_until(cx, &view, "the second shell", shell_loaded);
+    assert_eq!(read_item(cx, window), READ);
+}
+
+#[gpui_kit::test]
+fn a_window_without_the_lookup_of_the_app_reads_no_keychain(cx: &mut TestAppContext) {
+    let t = Test::new();
+    t.save_good_connection();
+    let (window, view) = t.open_sized(cx, t.saved(), (1280., 1400.));
+    wait_until(cx, &view, "the shell with a snapshot", shell_loaded);
+    assert_eq!(
+        read_item(cx, window),
+        "The token was not read: this window cannot read the Keychain."
+    );
 }

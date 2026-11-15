@@ -196,7 +196,9 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token을 읽습니다.
   항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.
   token은 서버로 한 번 복사됩니다. 이후 Keychain에서 값을 바꿔도 서버에는 반영되지 않습니다.
-  다른 앱이 만든 항목이면 macOS가 접근 허용 여부를 물을 수 있습니다.
+  다른 앱이 만든 항목이면 macOS가 접근 허용 여부를 물을 수 있습니다. macOS가 묻는 동안 창은 반응하지 않습니다.
+  읽을 수 있는 것은 로그인 Keychain의 "응용 프로그램 암호"뿐입니다. "인터넷 암호" 항목, iCloud Keychain, 암호 앱의 항목은 찾지 못합니다.
+  이 기능은 LLM token에만 있습니다.
 - `--wire openai-chat`이나 `openai-responses`에서는 `llm-set`에 `--base-url`과 `--model`이 필요합니다.
   기본값은 Claude 형식에만 있습니다.
 - 한 workspace에 묶이지 않은 Claude API key는 workspace ID도 필요합니다. 설정 파일의 `llm` 항목에 `"workspace_id"`를 넣으십시오.

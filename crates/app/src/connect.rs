@@ -80,12 +80,16 @@ impl AppView {
         view
     }
 
-    /// The shell, after a connection.
-    /// Lets the main window read items of the Keychain. Only the real app calls this, before a connection.
-    pub fn set_keychain(&mut self, keychain: Arc<dyn KeychainLookup>) {
+    /// Lets the main window read items of the Keychain. Only the real app calls this.
+    /// A main window that exists already gets the lookup too, so the order of the calls does not matter.
+    pub fn set_keychain(&mut self, keychain: Arc<dyn KeychainLookup>, cx: &mut Context<Self>) {
+        if let Some(shell) = &self.shell {
+            shell.update(cx, |shell, _| shell.set_keychain(keychain.clone()));
+        }
         self.keychain = keychain;
     }
 
+    /// The shell, after a connection.
     pub fn shell(&self) -> Option<&Entity<Shell>> {
         self.shell.as_ref()
     }
