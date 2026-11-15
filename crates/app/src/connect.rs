@@ -1,7 +1,7 @@
 //! The window root: the connect screen, and the shell after a connection.
 
 use crate::bridge::{REFRESH_EVERY, spawn_bridge};
-use crate::connection::{Connection, TokenStore, client, load_connection, save_connection};
+use crate::connection::{Connection, KeychainLookup, NoKeychain, TokenStore, client, load_connection, save_connection};
 use crate::shell::{Shell, labelled, labelled_as};
 use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{ApiError, ApiResult, EngineApi};
@@ -31,6 +31,8 @@ pub struct AppView {
     error: Option<String>,
     connecting: bool,
     shell: Option<Entity<Shell>>,
+    /// Given to the shell, for reading an existing Keychain item. Inert unless the app sets one.
+    keychain: Arc<dyn KeychainLookup>,
 }
 
 impl AppView {
@@ -70,6 +72,7 @@ impl AppView {
             error,
             connecting: false,
             shell: None,
+            keychain: Arc::new(NoKeychain),
         };
         if let (Some(connection), Some(token)) = (known, token) {
             view.connect(connection, token, window, cx);
@@ -78,6 +81,11 @@ impl AppView {
     }
 
     /// The shell, after a connection.
+    /// Lets the main window read items of the Keychain. Only the real app calls this, before a connection.
+    pub fn set_keychain(&mut self, keychain: Arc<dyn KeychainLookup>) {
+        self.keychain = keychain;
+    }
+
     pub fn shell(&self) -> Option<&Entity<Shell>> {
         self.shell.as_ref()
     }
@@ -167,7 +175,12 @@ impl AppView {
         // The token now lives in the client and the token store, not in the form.
         self.token.update(cx, |input, cx| input.set_value("", window, cx));
         let (commands, states) = spawn_bridge(&self.runtime, engine, REFRESH_EVERY);
-        self.shell = Some(cx.new(|cx| Shell::new(states, commands, window, cx)));
+        let keychain = self.keychain.clone();
+        self.shell = Some(cx.new(|cx| {
+            let mut shell = Shell::new(states, commands, window, cx);
+            shell.set_keychain(keychain);
+            shell
+        }));
     }
 
     /// Ends the session. The shell holds the bridge's command sender.

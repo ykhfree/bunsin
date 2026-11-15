@@ -1202,3 +1202,179 @@ fn the_window_says_that_a_test_runs_until_its_result_arrives(cx: &mut TestAppCon
         assert_eq!(label(window, "llm-test"), "Works: the endpoint answered");
     });
 }
+
+const KEYCHAIN_VALUE: &str = "sk-keychain-VALUE-41c7";
+const KEYCHAIN_READ: &str = "The token is in the token field now. Save sends it to the server.";
+
+/// A Keychain with one item. It counts the lookups. No test reads the real Keychain.
+#[derive(Default)]
+struct FakeKeychain(std::sync::Mutex<usize>);
+
+impl bunsin_app::connection::KeychainLookup for FakeKeychain {
+    fn password(&self, service: &str, account: &str) -> Result<String, String> {
+        *self.0.lock().unwrap() += 1;
+        match (service, account) {
+            // The stored password has a line end after it, as a pasted secret often has.
+            ("api.anthropic.com", "kim") => Ok(format!("  {KEYCHAIN_VALUE}\n")),
+            ("empty.example", "kim") => Ok(" \n".into()),
+            _ => Err("the login Keychain has no item with this service and account".into()),
+        }
+    }
+}
+
+/// Fills the Keychain fields, which must be open, and presses the read button.
+fn read_keychain(window: &mut Window, cx: &mut App, service: &str, account: &str) {
+    fill(window, cx, "keychain-service", service);
+    fill(window, cx, "keychain-account", account);
+    window.click("read-keychain", cx);
+}
+
+fn keychain_message(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle) -> String {
+    on_screen(cx, window, |window, _| label(window, "keychain-message"))
+}
+
+#[gpui_kit::test]
+fn a_token_is_copied_from_a_keychain_item_and_goes_to_the_server_only_by_save(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    // The fields are hidden until the owner asks for them.
+    on_screen(cx, window, |window, cx| {
+        assert!(window.try_find("keychain-service").is_none());
+        window.click("open-keychain", cx);
+    });
+    // A window that was given no Keychain says so and reads nothing.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "kim")
+    });
+    assert_eq!(
+        keychain_message(cx, window),
+        "The token was not read: this window cannot read the Keychain."
+    );
+
+    let keychain = std::sync::Arc::new(FakeKeychain::default());
+    shell.update(cx, |shell, _| shell.set_keychain(keychain.clone()));
+    let lookups = || *keychain.0.lock().unwrap();
+    // Without a service or an account there is no lookup.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "  ")
+    });
+    assert_eq!(
+        keychain_message(cx, window),
+        "Enter the service (Where) and the account of the Keychain item."
+    );
+    assert_eq!(lookups(), 0);
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "lee")
+    });
+    assert_eq!(
+        keychain_message(cx, window),
+        "The token was not read: the login Keychain has no item with this service and account."
+    );
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "empty.example", "kim")
+    });
+    assert_eq!(
+        keychain_message(cx, window),
+        "The password of the Keychain item is empty."
+    );
+    // The names are used without the spaces around them.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, " api.anthropic.com ", "kim")
+    });
+    assert_eq!(lookups(), 3);
+    // A refresh keeps the fields and the token that was read.
+    std::thread::sleep(REFRESH * 4);
+    cx.run_until_parked();
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "keychain-message"), KEYCHAIN_READ);
+        assert_eq!(value(window, "keychain-account"), "kim");
+        // The token is in the masked field only.
+        assert_eq!(window.find("llm-token").role(), Some(gpui_kit::Role::PasswordInput));
+        assert_not_on_screen(window, KEYCHAIN_VALUE, ANTHROPIC_BASE_URL);
+    });
+    // Nothing went to the server yet.
+    assert!(rt.block_on(rig.engine.connections("kim")).unwrap().llm.is_none());
+
+    on_screen(cx, window, |window, cx| window.click("save-llm", cx));
+    wait_for_commands(cx, &shell, 1);
+    let saved = rt.block_on(rig.engine.connections("kim")).unwrap().llm.unwrap();
+    assert_eq!(saved.token, TokenSource::Stored);
+    let state = shell.read_with(cx, |s, _| format!("{:?}", s.state));
+    assert!(!state.contains(KEYCHAIN_VALUE), "{state}");
+    on_screen(cx, window, |window, _| {
+        // A successful save empties and hides the Keychain fields.
+        assert!(window.try_find("keychain-service").is_none());
+        assert!(window.try_find("keychain-message").is_none());
+        assert_not_on_screen(window, KEYCHAIN_VALUE, ANTHROPIC_BASE_URL);
+    });
+}
+
+#[gpui_kit::test]
+fn the_keychain_token_is_sent_as_it_is_and_never_for_another_profile(cx: &mut TestAppContext) {
+    use bunsin_api::Connections;
+    use bunsin_app::bridge::{UiCommand, UiState};
+    use gpui_kit::AppContext;
+    // The test is the bridge: it sends the states, and it answers no command.
+    let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(gpui_kit::init);
+    let (window, _shell) = cx.update(|cx| {
+        gpui_kit::open_window(Default::default(), cx, |window, cx| {
+            cx.new(|cx| {
+                let mut shell = Shell::new(receiver, commands, window, cx);
+                shell.set_keychain(std::sync::Arc::new(FakeKeychain::default()));
+                shell
+            })
+        })
+        .unwrap()
+    });
+    let profile = |id: &str| UiState {
+        selected: Some(id.into()),
+        connections: Some(Connections {
+            llm: None,
+            connectors: Default::default(),
+        }),
+        connected: true,
+        ..UiState::default()
+    };
+    let mut last_save = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        let sent: Vec<_> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+        match sent.last() {
+            Some(UiCommand::SaveLlm { profile, update }) => (profile.clone(), update.token.clone()),
+            other => panic!("expected a save of the endpoint, got {other:?}"),
+        }
+    };
+    states.send(profile("kim")).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
+    on_screen(cx, window, |window, cx| window.click("open-keychain", cx));
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "kim");
+        window.click("save-llm", cx);
+    });
+    // The token goes without the spaces and the line end around it.
+    assert_eq!(
+        last_save(cx),
+        ("kim".to_owned(), TokenChange::Set(KEYCHAIN_VALUE.into()))
+    );
+
+    // A token that was read for one profile is dropped when another profile is selected.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "kim")
+    });
+    assert_eq!(keychain_message(cx, window), KEYCHAIN_READ);
+    states.send(profile("lee")).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert!(window.try_find("keychain-service").is_none());
+        window.click("open-keychain", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(value(window, "keychain-service"), "");
+        assert_eq!(label(window, "keychain-message"), "");
+        window.click("save-llm", cx);
+    });
+    assert_eq!(last_save(cx), ("lee".to_owned(), TokenChange::Keep));
+}

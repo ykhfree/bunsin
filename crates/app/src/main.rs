@@ -1,7 +1,7 @@
 //! The Bunsin desktop app: a window that manages agents on a Bunsin server.
 
 use bunsin_app::connect::{AppView, Source};
-use bunsin_app::connection::{Connection, KeychainTokenStore};
+use bunsin_app::connection::{Connection, KeychainTokenStore, MacKeychain};
 use gpui_kit::{AppContext, Global, WindowOptions};
 use std::sync::Arc;
 
@@ -52,7 +52,12 @@ fn main() {
                         window.refresh();
                     })
                     .detach();
-                cx.new(|cx| AppView::new(handle, source, window, cx))
+                cx.new(|cx| {
+                    let mut view = AppView::new(handle, source, window, cx);
+                    // The connections form can copy a token from an item of the login Keychain.
+                    view.set_keychain(Arc::new(MacKeychain));
+                    view
+                })
             })
             .expect("the window opens");
         });

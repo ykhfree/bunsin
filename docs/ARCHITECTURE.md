@@ -62,6 +62,13 @@
 - 서버 주소와 CA 경로는 `connection.json`에 저장한다(macOS: `~/Library/Application Support/Bunsin/`).
   접속 token은 macOS Keychain에 저장한다. token은 JSON 파일, 오류 문구, 접근성 label에 들어가지 않는다.
 - token 입력칸은 가려져 있고, 값을 보여 주는 토글이 없다.
+- **기존 Keychain 항목에서 LLM token 복사.** 창이 Mac의 로그인 Keychain에서 서비스와 계정으로 항목을 찾아
+  가려진 token 칸에 넣는다. Save를 눌러야 서버로 간다. 복사이지 연결이 아니다: 이후 Keychain의 변경은 서버에 가지 않는다.
+  - Keychain 접근은 `KeychainLookup` trait 뒤에 있다. 실제 구현(`MacKeychain`)은 `main.rs`만 설치한다.
+    그 외의 창과 모든 테스트는 아무것도 읽지 않는 `NoKeychain`을 쓴다.
+  - 오류 문구는 직접 쓴다. `keyring`의 일부 오류는 암호의 바이트를 담고 있어서, 오류를 그대로 출력하지 않는다.
+  - 읽기는 창의 주 스레드에서 실행된다. macOS가 접근 허용을 묻는 동안 창은 반응하지 않는다.
+  - 대상은 LLM token뿐이다. 커넥터 token에는 없다. 실제 Keychain으로는 확인하지 않았다.
 - **모양.** 색과 공통 요소는 `theme.rs`에 있다. 라이트와 다크 두 팔레트가 있고, 창은 시스템 설정을 따른다.
   강조색은 서명 잉크의 파랑이다(승인은 서명이다). 왼쪽 열에 화면 메뉴, 프로필, 접속 상태가 있고,
   모든 화면 위에 agent 상태와 정지 스위치가 있다. Inbox는 승인 카드 목록과 활동 기록(감사 로그)을 나란히 둔다.

@@ -296,6 +296,25 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     })
     .unwrap();
     shot(&mut cx, window, dir, &name("settings-test"));
+
+    // The Keychain fields, opened. This window was given no Keychain, so a read says so.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("llm-token-state", ScrollDelta::Pixels(point(px(0.), px(330.))), cx);
+        window.render_frame(cx);
+        window.click("open-keychain", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("keychain-service", cx);
+        window.input("api.anthropic.com", cx);
+        window.click("keychain-account", cx);
+        window.input("kim", cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("settings-keychain"));
 }
 
 fn main() {

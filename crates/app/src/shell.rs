@@ -24,6 +24,8 @@ pub struct Shell {
     pub(crate) privacy: PrivacyForm,
     pub(crate) connections: ConnectionsForm,
     pub(crate) notes: NotesForm,
+    /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
+    pub(crate) keychain: std::sync::Arc<dyn crate::connection::KeychainLookup>,
     /// The views never share the window, so no form can squeeze the inbox.
     pub view: View,
 }
@@ -69,8 +71,14 @@ impl Shell {
             privacy: PrivacyForm::new(window, cx),
             connections: ConnectionsForm::new(window, cx),
             notes: NotesForm::new(window, cx),
+            keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
         }
+    }
+
+    /// Lets the connections form read items of the Keychain. Only the real app calls this.
+    pub fn set_keychain(&mut self, keychain: std::sync::Arc<dyn crate::connection::KeychainLookup>) {
+        self.keychain = keychain;
     }
 
     pub(crate) fn send(&self, command: UiCommand) {

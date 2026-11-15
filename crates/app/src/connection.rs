@@ -74,6 +74,47 @@ impl TokenStore for KeychainTokenStore {
     }
 }
 
+/// Reads the password of one item that exists in the Keychain of this Mac.
+/// The error is a short text for the window. It never holds a part of the password.
+pub trait KeychainLookup {
+    fn password(&self, service: &str, account: &str) -> Result<String, String>;
+}
+
+/// The login Keychain of macOS, through the `keyring` crate. It finds a generic password
+/// by its service ("Where" in Keychain Access) and its account, whichever app made it.
+pub struct MacKeychain;
+
+impl KeychainLookup for MacKeychain {
+    fn password(&self, service: &str, account: &str) -> Result<String, String> {
+        keyring::Entry::new(service, account)
+            .and_then(|entry| entry.get_password())
+            .map_err(|error| keychain_error(&error))
+    }
+}
+
+/// Why an item could not be read. Some errors of the crate hold the bytes of the password,
+/// so each text is written here and no error is printed as it is.
+pub fn keychain_error(error: &keyring::Error) -> String {
+    match error {
+        keyring::Error::NoEntry => "the login Keychain has no item with this service and account",
+        keyring::Error::NoStorageAccess(_) => "the Keychain did not give access to the item",
+        keyring::Error::BadEncoding(_) | keyring::Error::BadDataFormat(..) => "the password of the item is not text",
+        keyring::Error::Ambiguous(_) => "more than one item has this service and account",
+        keyring::Error::Invalid(..) | keyring::Error::TooLong(..) => "the service or the account is not valid",
+        _ => "the Keychain could not read the item",
+    }
+    .to_owned()
+}
+
+/// The lookup of a window that was given none: tests and windows outside the real app.
+pub struct NoKeychain;
+
+impl KeychainLookup for NoKeychain {
+    fn password(&self, _: &str, _: &str) -> Result<String, String> {
+        Err("this window cannot read the Keychain".to_owned())
+    }
+}
+
 /// A token store in memory, for tests.
 #[derive(Default)]
 pub struct MemoryTokenStore(Mutex<Option<String>>);
@@ -175,5 +216,24 @@ mod tests {
         let error = client(&connection, "bsn_x").unwrap_err();
         assert!(matches!(error, ApiError::Invalid(_)), "{error:?}");
         assert!(error.to_string().contains("/nonexistent/ca.pem"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod keychain_tests {
+    use super::keychain_error;
+
+    #[test]
+    fn no_error_text_holds_bytes_of_the_password() {
+        let secret = b"sk-secret-\xff-value".to_vec();
+        let bad = keyring::Error::BadEncoding(secret);
+        assert_eq!(keychain_error(&bad), "the password of the item is not text");
+        assert_eq!(
+            keychain_error(&keyring::Error::NoEntry),
+            "the login Keychain has no item with this service and account"
+        );
+        // An error this code does not name gets a fixed text, not the text of the crate.
+        let other = keyring::Error::BadStoreFormat("sk-secret".into());
+        assert_eq!(keychain_error(&other), "the Keychain could not read the item");
     }
 }
