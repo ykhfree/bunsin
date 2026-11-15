@@ -323,6 +323,7 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
         command: "/usr/local/bin/npx".into(),
         args: vec!["-y".into(), "example-mcp-server".into()],
         env: [("EXAMPLE_API_TOKEN".to_owned(), "fixture-value".to_owned())].into(),
+        secret_env: Default::default(),
         expected: Expected::Unchecked,
     };
     rt.block_on(rig.engine.set_command_connector("kim", "files", command))

@@ -525,6 +525,7 @@ impl Shell {
                 command: text(&form.command, cx).into(),
                 args: parse_args(&ConnectionsForm::raw(&form.args, cx)),
                 env,
+                secret_env: Default::default(),
                 expected,
             };
             form.connector_message = None;

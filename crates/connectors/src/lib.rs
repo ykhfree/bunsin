@@ -10,6 +10,7 @@ use rmcp::service::{RoleClient, RunningService, ServiceError};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::fmt;
 
 pub use bunsin_core::settings::McpConfig;
@@ -43,6 +44,17 @@ impl McpConnector {
         name: impl Into<String>,
         config: McpConfig,
         token: Option<TokenAuth<'_>>,
+    ) -> Result<Self, ConnectorError> {
+        Self::connect_with_env(name, config, token, &BTreeMap::new()).await
+    }
+
+    /// Like `connect`. A command gets `secret_env` as more environment variables.
+    /// These values go to the child process only. They are not kept in the connector.
+    pub async fn connect_with_env(
+        name: impl Into<String>,
+        config: McpConfig,
+        token: Option<TokenAuth<'_>>,
+        secret_env: &BTreeMap<String, String>,
     ) -> Result<Self, ConnectorError> {
         let client = match &config {
             McpConfig::Http { url } => {
@@ -91,7 +103,7 @@ impl McpConnector {
                     )));
                 }
                 let mut cmd = tokio::process::Command::new(command);
-                cmd.args(args).envs(env);
+                cmd.args(args).envs(env).envs(secret_env);
                 let transport = TokioChildProcess::new(cmd)
                     .map_err(|e| ConnectorError::Transport(format!("cannot start `{}`: {e}", command.display())))?;
                 ().serve(transport).await

@@ -686,6 +686,7 @@ fn store_command(rt: &tokio::runtime::Runtime, rig: &common::Rig, name: &str, mc
         mcp,
         token_secret: None,
         token_header: None,
+        secret_env: Default::default(),
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config

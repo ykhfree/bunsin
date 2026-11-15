@@ -213,6 +213,28 @@ pub struct ConnectorConnection {
     /// The header that carries the token as it is. `None`: `Authorization: Bearer <token>`.
     #[serde(default)]
     pub token_header: Option<String>,
+    /// The names of the secret environment variables of a command. Their values are never sent.
+    #[serde(default)]
+    pub secret_env: Vec<String>,
+}
+
+/// What to do with the value of one secret environment variable when a command is saved.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretChange {
+    /// Keep the stored value. Refused if no value is stored.
+    Keep,
+    Set(String),
+}
+
+impl std::fmt::Debug for SecretChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The value is left out on purpose.
+        f.write_str(match self {
+            SecretChange::Keep => "Keep",
+            SecretChange::Set(_) => "Set([REDACTED])",
+        })
+    }
 }
 
 /// The LLM endpoint and the connectors of a profile, without any token.
@@ -259,6 +281,10 @@ pub struct CommandConnectorUpdate {
     /// Extra environment variables of the program. They are stored as plain text.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Environment variables whose values the server encrypts and does not show again.
+    /// A stored variable that is not named here is removed with its value.
+    #[serde(default)]
+    pub secret_env: BTreeMap<String, SecretChange>,
     /// The connector the caller loaded, or `None` for a new connector.
     #[serde(default)]
     pub expected: Expected<Option<ConnectorConnection>>,

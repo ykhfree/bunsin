@@ -1,7 +1,7 @@
 //! The plain settings types that the server, the command line and the app share.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// The HTTP API shape that an LLM endpoint speaks.
@@ -74,6 +74,41 @@ pub struct ConnectorSection {
     /// `None`: the token goes as `Authorization: Bearer <token>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_header: Option<String>,
+    /// The names of environment variables of a command whose values the server keeps encrypted.
+    /// The values are not in the settings. A connector with an address has none.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub secret_env: BTreeSet<String>,
+}
+
+/// True if `name` can name an environment variable: a letter or `_`, then letters, digits and `_`,
+/// at most 64 characters.
+pub fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Every key of a secret environment variable starts with this. No token key that the server
+/// chooses does: those start with `MCP_` or are `LLM`.
+pub const ENV_SECRET_PREFIX: &str = "ENV_";
+
+/// The secret key of one secret environment variable of a connector.
+/// The variable name is written as hex, because a key has only upper-case letters and digits
+/// in groups. The last group is the variable and the groups before it are the connector, so
+/// two variables never give the same key.
+pub fn env_secret_key(connector: &str, variable: &str) -> String {
+    let hex: String = variable.bytes().map(|byte| format!("{byte:02X}")).collect();
+    format!(
+        "{ENV_SECRET_PREFIX}{}_{hex}",
+        connector.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// What a secret environment variable is stored for, in the place of a token's address.
+/// It is not an address, so the value is never accepted as the token of an address.
+pub fn env_secret_origin(connector: &str) -> String {
+    format!("environment of connector {connector}")
 }
 
 /// Headers that the HTTP client or the MCP transport sets itself. A token must not replace them.

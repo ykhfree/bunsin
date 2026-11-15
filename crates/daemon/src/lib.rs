@@ -12,7 +12,10 @@ pub mod server;
 use bunsin_api::ProfileConfig;
 use bunsin_connectors::{McpConnector, TokenAuth};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
-use bunsin_core::settings::{ConnectorSection, LlmSection, McpConfig, check_token_header, origin_of};
+use bunsin_core::settings::{
+    ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key, env_secret_origin, origin_of,
+    valid_env_name,
+};
 use bunsin_engine::{Backends, ProfileSecrets, Runtime};
 use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig};
 use serde_json::Value;
@@ -204,12 +207,22 @@ impl RealBackends {
                         command.display()
                     ));
                 }
-                if let Some(bad) = env.keys().find(|key| !valid_env_name(key)) {
+                if let Some(twice) = section.secret_env.iter().find(|key| env.contains_key(*key)) {
+                    return Err(format!(
+                        "connector `{name}`: the variable `{twice}` is in both lists of environment variables"
+                    ));
+                }
+                if let Some(bad) = env.keys().chain(&section.secret_env).find(|key| !valid_env_name(key)) {
                     return Err(format!(
                         "connector `{name}`: `{bad}` is not a name of an environment variable: \
                          use a-z, A-Z, 0-9 and `_`, and do not start with a digit"
                     ));
                 }
+            }
+            McpConfig::Http { .. } if !section.secret_env.is_empty() => {
+                return Err(format!(
+                    "connector `{name}` has an address. Secret environment variables are for a command"
+                ));
             }
             McpConfig::Http { url } => self
                 .upstream
@@ -254,7 +267,8 @@ impl RealBackends {
             token,
             header: section.token_header.as_deref(),
         });
-        let connect = McpConnector::connect(name, section.mcp, auth);
+        let secret_env = stored_env(name, &section, secrets)?;
+        let connect = McpConnector::connect_with_env(name, section.mcp, auth, &secret_env);
         match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
             Ok(Ok(connector)) => Ok(connector),
             Ok(Err(error)) => Err(format!("connector `{name}` cannot connect: {error}")),
@@ -310,11 +324,32 @@ impl Backends for RealBackends {
     }
 }
 
-/// True if `name` can name an environment variable: a letter or `_`, then letters, digits and `_`.
-fn valid_env_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+/// The decrypted values of the secret environment variables of a command, by variable name.
+/// They go into the environment of the program when it starts, and nowhere else.
+fn stored_env(
+    name: &str,
+    section: &ConnectorSection,
+    secrets: &ProfileSecrets,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut env = BTreeMap::new();
+    for variable in &section.secret_env {
+        let value = match secrets.get(&env_secret_key(name, variable)) {
+            Some(Ok(stored)) if stored.origin == env_secret_origin(name) => stored.value.clone(),
+            Some(Ok(_)) => {
+                return Err(format!(
+                    "connector `{name}`: the stored value of `{variable}` was not entered for this connector"
+                ));
+            }
+            Some(Err(error)) => return Err(error.clone()),
+            None => {
+                return Err(format!(
+                    "connector `{name}`: no value is stored for the variable `{variable}`. Enter it in the window"
+                ));
+            }
+        };
+        env.insert(variable.clone(), value);
+    }
+    Ok(env)
 }
 
 #[cfg(test)]
@@ -684,5 +719,76 @@ mod tests {
             runtime.llm.as_ref().err().map(String::as_str),
             Some("the profile has no `llm` settings")
         );
+    }
+
+    #[test]
+    fn the_program_gets_each_secret_variable_under_its_name_and_nothing_else_does() {
+        let section: ConnectorSection = serde_json::from_value(json!({
+            "mcp": {"transport": "stdio", "command": "/opt/mcp/x", "args": [], "env": {"REGION": "eu"}},
+            "secret_env": ["API_TOKEN", "other_key"]
+        }))
+        .unwrap();
+        let entry = |connector: &str, variable: &str, value: &str| {
+            let secret = bunsin_engine::StoredSecret {
+                value: value.to_owned(),
+                origin: env_secret_origin(connector),
+            };
+            (env_secret_key(connector, variable), Ok(secret))
+        };
+        let mut secrets: ProfileSecrets = [
+            entry("local", "API_TOKEN", "value-one"),
+            entry("local", "other_key", "value two\nwith a line"),
+            // A variable of another connector is not given to this one.
+            entry("other", "API_TOKEN", "not-for-local"),
+        ]
+        .into();
+        let env = stored_env("local", &section, &secrets).unwrap();
+        // The values are as they were entered. The plain variable is not in this map.
+        let expected: BTreeMap<String, String> = [
+            ("API_TOKEN".to_owned(), "value-one".to_owned()),
+            ("other_key".to_owned(), "value two\nwith a line".to_owned()),
+        ]
+        .into();
+        assert_eq!(env, expected);
+
+        // A missing value stops the start, and the error names the variable and no value.
+        secrets.remove(&env_secret_key("local", "other_key"));
+        let error = stored_env("local", &section, &secrets).unwrap_err();
+        assert!(
+            error.contains("no value is stored for the variable `other_key`"),
+            "{error}"
+        );
+        assert!(!error.contains("value-one"), "{error}");
+        // A value that was stored for something else is refused.
+        let token = bunsin_engine::StoredSecret {
+            value: "a-token".to_owned(),
+            origin: "https://mcp.example.com:443".to_owned(),
+        };
+        secrets.insert(env_secret_key("local", "other_key"), Ok(token));
+        let error = stored_env("local", &section, &secrets).unwrap_err();
+        assert!(error.contains("was not entered for this connector"), "{error}");
+        assert!(!error.contains("a-token"), "{error}");
+        // A value that cannot be decrypted is an error too.
+        secrets.insert(env_secret_key("local", "other_key"), Err("cannot be opened".to_owned()));
+        assert_eq!(stored_env("local", &section, &secrets).unwrap_err(), "cannot be opened");
+    }
+
+    #[test]
+    fn secret_variables_are_checked_in_the_settings() {
+        let b = backends(&[], true);
+        let section = |mcp: Value, secret_env: Value| json!({"mcp": mcp, "secret_env": secret_env});
+        let command = json!({"transport": "stdio", "command": "/opt/mcp/x", "args": [], "env": {"REGION": "eu"}});
+        let ok = config(
+            Value::Null,
+            &[("local", section(command.clone(), json!(["API_TOKEN"])))],
+        );
+        assert_eq!(b.validate("kim", &ok), Ok(()));
+        let twice = config(Value::Null, &[("local", section(command.clone(), json!(["REGION"])))]);
+        assert!(b.validate("kim", &twice).unwrap_err().contains("in both lists"));
+        let bad = config(Value::Null, &[("local", section(command, json!(["1BAD"])))]);
+        assert!(b.validate("kim", &bad).unwrap_err().contains("environment variable"));
+        let address = json!({"transport": "http", "url": "https://mcp.example.com/x"});
+        let http = config(Value::Null, &[("wiki", section(address, json!(["API_TOKEN"])))]);
+        assert!(b.validate("kim", &http).unwrap_err().contains("are for a command"));
     }
 }

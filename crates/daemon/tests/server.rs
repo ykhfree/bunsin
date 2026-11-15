@@ -724,6 +724,7 @@ async fn a_command_connector_goes_through_the_server_rules_of_its_own_profile() 
         command: "/opt/mcp/does-not-exist".into(),
         args: vec!["--stdio".into()],
         env: [("API_TOKEN".to_owned(), "env-secret-77".to_owned())].into(),
+        secret_env: Default::default(),
         expected: Expected::Unchecked,
     };
     // This server was started without the flag. The refusal names the flag.
