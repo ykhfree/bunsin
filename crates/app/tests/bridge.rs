@@ -2,12 +2,14 @@ mod common;
 
 use bunsin_api::{
     Connections, ConnectorUpdate, EngineApi, Expected, LlmUpdate, PrivacyUpdate, TokenChange, TokenSource,
+    WikiPageUpdate,
 };
-use bunsin_app::bridge::{ConnectionResult, SaveError, UiCommand, UiState, apply, refresh, spawn_bridge};
+use bunsin_app::bridge::{ConnectionResult, NoteResult, SaveError, UiCommand, UiState, apply, refresh, spawn_bridge};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use bunsin_core::settings::Wire;
 use bunsin_core::tool::{PinSet, pin};
+use bunsin_core::wiki::WikiText;
 use bunsin_testkit::tool;
 
 /// An engine with no profile.
@@ -763,4 +765,161 @@ async fn a_connector_save_against_a_changed_server_is_a_conflict_not_an_error() 
             url: "https://first.example/jira".into()
         }
     );
+}
+
+fn note(body: &str, expected_revision: Option<u64>) -> WikiPageUpdate {
+    WikiPageUpdate {
+        text: WikiText {
+            title: "Team".into(),
+            summary: "Who does what".into(),
+            body: body.into(),
+        },
+        expected_revision,
+    }
+}
+
+fn open_note(profile: &str, slug: &str) -> UiCommand {
+    UiCommand::OpenNote {
+        profile: profile.into(),
+        slug: slug.into(),
+    }
+}
+
+#[tokio::test]
+async fn the_state_holds_the_index_and_the_open_page_of_the_selected_profile() {
+    let rig = common::rig().await;
+    rig.engine
+        .set_wiki_page("kim", "team", note("Kim leads.", None))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert_eq!(state.notes.as_ref().unwrap()[0].slug, "team");
+    assert_eq!(state.open_note, None);
+
+    apply(&*rig.engine, &mut state, open_note("kim", "team")).await;
+    let open = state.open_note.clone().unwrap();
+    assert_eq!((open.profile.as_str(), open.slug.as_str()), ("kim", "team"));
+    assert_eq!(open.page.unwrap().text.body, "Kim leads.");
+
+    // A refresh brings the page as the server has it now.
+    rig.engine
+        .set_wiki_page("kim", "team", note("Lee leads.", None))
+        .await
+        .unwrap();
+    refresh(&*rig.engine, &mut state).await;
+    let page = state.open_note.clone().unwrap().page.unwrap();
+    assert_eq!((page.text.body.as_str(), page.revision), ("Lee leads.", 2));
+
+    // The page of one profile is never shown for another.
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
+    assert_eq!(state.open_note, None);
+    assert_eq!(state.notes, Some(vec![]));
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("kim".into())).await;
+    assert_eq!(state.open_note, None);
+}
+
+#[tokio::test]
+async fn a_missing_page_is_not_a_lost_connection() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    apply(&*rig.engine, &mut state, open_note("kim", "no-such-page")).await;
+    assert!(state.connected);
+    assert_eq!(state.error, None);
+    assert!(state.snapshot.is_some());
+    let open = state.open_note.clone().unwrap();
+    assert_eq!((open.slug.as_str(), open.page), ("no-such-page", None));
+}
+
+#[tokio::test]
+async fn a_notes_command_for_an_unselected_profile_does_nothing() {
+    let rig = common::rig().await;
+    rig.engine
+        .set_wiki_page("lee", "team", note("Lee leads.", None))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert_eq!(state.selected.as_deref(), Some("kim"));
+
+    apply(&*rig.engine, &mut state, open_note("lee", "team")).await;
+    assert_eq!(state.open_note, None);
+    assert!(state.error.clone().unwrap().contains("another profile"));
+
+    let save = UiCommand::SaveNote {
+        profile: "lee".into(),
+        slug: "team".into(),
+        update: note("Overwritten.", None),
+    };
+    apply(&*rig.engine, &mut state, save).await;
+    assert!(matches!(
+        &state.note_result,
+        Some(NoteResult::Saved { result: Err(SaveError::Failed(error)), .. }) if error.contains("another profile")
+    ));
+    let delete = UiCommand::DeleteNote {
+        profile: "lee".into(),
+        slug: "team".into(),
+    };
+    apply(&*rig.engine, &mut state, delete).await;
+    assert!(matches!(
+        &state.note_result,
+        Some(NoteResult::Deleted { result: Err(_), .. })
+    ));
+    assert_eq!(state.note_commands, 2);
+    assert_eq!(
+        rig.engine.wiki_page("lee", "team").await.unwrap().text.body,
+        "Lee leads."
+    );
+}
+
+#[tokio::test]
+async fn a_save_opens_the_page_and_a_conflict_or_a_delete_does_not() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let save = |update| UiCommand::SaveNote {
+        profile: "kim".into(),
+        slug: "team".into(),
+        update,
+    };
+    apply(&*rig.engine, &mut state, save(note("Kim leads.", Some(0)))).await;
+    assert!(matches!(
+        &state.note_result,
+        Some(NoteResult::Saved { result: Ok(()), .. })
+    ));
+    assert_eq!(state.open_note.clone().unwrap().page.unwrap().revision, 1);
+    assert_eq!(state.notes.as_ref().unwrap().len(), 1);
+
+    // "The page must not exist yet" is refused now, and the stored text stays.
+    apply(&*rig.engine, &mut state, UiCommand::CloseNote).await;
+    apply(&*rig.engine, &mut state, save(note("Second.", Some(0)))).await;
+    assert!(matches!(
+        &state.note_result,
+        Some(NoteResult::Saved {
+            result: Err(SaveError::Conflict),
+            ..
+        })
+    ));
+    assert_eq!(state.open_note, None);
+    assert_eq!(
+        rig.engine.wiki_page("kim", "team").await.unwrap().text.body,
+        "Kim leads."
+    );
+    // The result of a notes command does not stay for the next command.
+    apply(&*rig.engine, &mut state, open_note("kim", "team")).await;
+    assert_eq!(state.note_result, None);
+    assert_eq!(state.note_commands, 2);
+
+    let delete = UiCommand::DeleteNote {
+        profile: "kim".into(),
+        slug: "team".into(),
+    };
+    apply(&*rig.engine, &mut state, delete).await;
+    assert!(matches!(
+        &state.note_result,
+        Some(NoteResult::Deleted { result: Ok(()), .. })
+    ));
+    assert_eq!(state.open_note, None);
+    assert_eq!(state.notes, Some(vec![]));
 }

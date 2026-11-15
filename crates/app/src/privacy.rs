@@ -2,7 +2,7 @@
 //! profile's settings. Only Save sends the draft to the server.
 
 use crate::bridge::{SaveError, UiCommand, UiState};
-use crate::shell::{Shell, labelled};
+use crate::shell::{CONFLICT, Shell, labelled};
 use bunsin_api::{Expected, PrivacyUpdate};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use gpui_kit::component::button::Button;
@@ -253,6 +253,7 @@ impl Shell {
             .children(form.conflict.then(|| {
                 Self::conflict_warning(
                     "privacy",
+                    CONFLICT,
                     Self::load_privacy,
                     |this, cx| this.save_privacy(true, cx),
                     cx,

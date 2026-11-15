@@ -5,11 +5,12 @@
 
 use bunsin_api::{
     ApiError, ApiResult, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PrivacyUpdate, ProfileSnapshot,
-    ToolsReport,
+    ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
 use bunsin_core::tool::PinSet;
+use bunsin_core::wiki::{WikiPage, WikiSummary};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -50,6 +51,45 @@ pub enum UiCommand {
         profile: String,
         name: String,
         shown: PinSet,
+    },
+    /// Opens a page of the notes. The page is then reloaded with every refresh.
+    OpenNote {
+        profile: String,
+        slug: String,
+    },
+    /// Stops loading the open page.
+    CloseNote,
+    /// Stores the owner's text for a page. After a successful save that page is the open one.
+    SaveNote {
+        profile: String,
+        slug: String,
+        update: WikiPageUpdate,
+    },
+    DeleteNote {
+        profile: String,
+        slug: String,
+    },
+}
+
+/// The page of the notes that the window has open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenNote {
+    pub profile: String,
+    pub slug: String,
+    /// None: the server has no page with this name.
+    pub page: Option<WikiPage>,
+}
+
+/// What the last notes command did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NoteResult {
+    Saved {
+        slug: String,
+        result: Result<(), SaveError>,
+    },
+    Deleted {
+        slug: String,
+        result: Result<(), String>,
     },
 }
 
@@ -103,6 +143,14 @@ pub struct UiState {
     pub connection_result: Option<ConnectionResult>,
     /// How many connection commands the bridge has run. It changes once per command.
     pub connection_commands: u64,
+    /// The index of the selected profile's notes: one entry per page.
+    pub notes: Option<Vec<WikiSummary>>,
+    /// The page the window has open, as the server has it.
+    pub open_note: Option<OpenNote>,
+    /// The result of the last command, if it was `SaveNote` or `DeleteNote`. A failure is shown here, not in `error`.
+    pub note_result: Option<NoteResult>,
+    /// How many `SaveNote` and `DeleteNote` commands the bridge has run.
+    pub note_commands: u64,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -147,6 +195,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.error = None;
     state.privacy_result = None;
     state.connection_result = None;
+    state.note_result = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
     let result = match (command, selected) {
@@ -186,6 +235,38 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.connection_result = Some(ConnectionResult::ToolsApproved { name, result });
             Ok(())
         }
+        (UiCommand::OpenNote { profile, slug }, _) => check_selected(selected, &profile).map(|()| {
+            state.open_note = Some(OpenNote {
+                profile,
+                slug,
+                page: None,
+            });
+        }),
+        (UiCommand::CloseNote, _) => {
+            state.open_note = None;
+            Ok(())
+        }
+        (UiCommand::SaveNote { profile, slug, update }, _) => {
+            let call = async { api.set_wiki_page(&profile, &slug, update).await.map(|_| ()) };
+            let result = save_for(selected, &profile, call).await;
+            if result.is_ok() {
+                state.open_note = Some(OpenNote {
+                    profile,
+                    slug: slug.clone(),
+                    page: None,
+                });
+            }
+            state.note_result = Some(NoteResult::Saved { slug, result });
+            Ok(())
+        }
+        (UiCommand::DeleteNote { profile, slug }, _) => {
+            let result = for_profile(selected, &profile, api.delete_wiki_page(&profile, &slug)).await;
+            if result.is_ok() {
+                state.open_note = None;
+            }
+            state.note_result = Some(NoteResult::Deleted { slug, result });
+            Ok(())
+        }
         (_, None) => Err("no profile is selected".to_owned()),
         (UiCommand::Approve(id), Some(profile)) => match api.approve(profile, id, None).await {
             Ok(Outcome::ExecutionFailed { error, .. }) => Err(format!("the call failed: {error}")),
@@ -206,24 +287,48 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     if state.connection_result.is_some() {
         state.connection_commands += 1;
     }
+    if state.note_result.is_some() {
+        state.note_commands += 1;
+    }
     if let Err(error) = result {
         state.error = Some(error);
     }
     reload(api, state).await;
 }
 
-async fn load_profile(api: &dyn EngineApi, profile: &str) -> ApiResult<(ProfileSnapshot, PrivacyConfig, Connections)> {
-    Ok((
-        api.snapshot(profile).await?,
-        api.privacy(profile).await?,
-        api.connections(profile).await?,
-    ))
+/// What the window shows of one profile.
+struct Loaded {
+    snapshot: ProfileSnapshot,
+    privacy: PrivacyConfig,
+    connections: Connections,
+    notes: Vec<WikiSummary>,
+    /// The open page. None if no page is open or the server has no such page.
+    page: Option<WikiPage>,
+}
+
+async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<&str>) -> ApiResult<Loaded> {
+    Ok(Loaded {
+        snapshot: api.snapshot(profile).await?,
+        privacy: api.privacy(profile).await?,
+        connections: api.connections(profile).await?,
+        notes: api.wiki_index(profile).await?,
+        page: match open {
+            None => None,
+            // A page that is gone is not a failure of the connection.
+            Some(slug) => match api.wiki_page(profile, slug).await {
+                Ok(page) => Some(page),
+                Err(ApiError::NotFound(_)) => None,
+                Err(error) => return Err(error),
+            },
+        },
+    })
 }
 
 async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.snapshot = None;
     state.privacy = None;
     state.connections = None;
+    state.notes = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -238,13 +343,22 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     if !state.selected.as_ref().is_some_and(known) {
         state.selected = state.profiles.first().map(|p| p.id.clone());
     }
+    // A page stays open only while its profile is the selected one.
+    if state.open_note.as_ref().map(|open| &open.profile) != state.selected.as_ref() {
+        state.open_note = None;
+    }
+    let open = state.open_note.as_ref().map(|open| open.slug.clone());
     match &state.selected {
         // The window is connected only if every call succeeds.
-        Some(profile) => match load_profile(api, profile).await {
-            Ok((snapshot, privacy, connections)) => {
-                state.snapshot = Some(snapshot);
-                state.privacy = Some(privacy);
-                state.connections = Some(connections);
+        Some(profile) => match load_profile(api, profile, open.as_deref()).await {
+            Ok(loaded) => {
+                state.snapshot = Some(loaded.snapshot);
+                state.privacy = Some(loaded.privacy);
+                state.connections = Some(loaded.connections);
+                state.notes = Some(loaded.notes);
+                if let Some(open) = &mut state.open_note {
+                    open.page = loaded.page;
+                }
                 state.connected = true;
             }
             Err(error) => state.error = Some(error.to_string()),

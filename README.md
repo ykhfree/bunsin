@@ -295,7 +295,10 @@ and the sources of its facts. It works like a small wiki that the agent writes.
   the agent may do.
 - The agent proposes a page only from something it read in that event, changes an
   existing page only after it read that page, and cannot delete pages.
-- You can write and delete pages yourself:
+- You can read, write and delete pages yourself. In the window, the **Notes** view lists
+  the pages. Select a page to read and edit it, or make a new page. Save warns you if the
+  page changed on the server meanwhile. Delete asks once before it deletes.
+- The same on the command line:
 
 ```sh
 bunsind wiki-list kim
@@ -307,7 +310,8 @@ bunsind wiki-export kim ./notes        # index.md and pages/*.md
 ```
 
 Not built yet: a periodic check for stale or conflicting pages, applying changes without
-approval, loading a Confluence space in advance, and a page browser in the window.
+approval, loading a Confluence space in advance, full-text search, and the page history
+in the window (use `wiki-history`).
 
 ### Work with the agent
 

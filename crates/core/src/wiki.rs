@@ -38,7 +38,7 @@ pub enum WikiAuthor {
 }
 
 /// The text of a page.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WikiText {
     pub title: String,

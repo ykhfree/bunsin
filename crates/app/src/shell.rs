@@ -1,7 +1,8 @@
-//! The main window: profiles, kill switch, approval inbox, audit log, privacy settings and connections.
+//! The main window: profiles, kill switch, approval inbox, audit log, notes, privacy settings and connections.
 
 use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
+use crate::notes_form::NotesForm;
 use crate::privacy::PrivacyForm;
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
@@ -17,9 +18,20 @@ pub struct Shell {
     commands: mpsc::UnboundedSender<UiCommand>,
     pub(crate) privacy: PrivacyForm,
     pub(crate) connections: ConnectionsForm,
-    /// False: the inbox and the audit log are shown. True: the settings forms are shown.
-    /// The two never share the window, so the forms cannot squeeze the inbox.
-    pub settings_open: bool,
+    pub(crate) notes: NotesForm,
+    /// The views never share the window, so no form can squeeze the inbox.
+    pub view: View,
+}
+
+/// What the main part of the window shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// The approval inbox and the audit log.
+    Inbox,
+    /// The pages of the agent's notes.
+    Notes,
+    /// The connections and the privacy filter.
+    Settings,
 }
 
 impl Shell {
@@ -35,6 +47,7 @@ impl Shell {
                 let updated = this.update_in(cx, |shell, window, cx| {
                     shell.privacy.receive(&state, window, cx);
                     shell.connections.receive(&state, window, cx);
+                    shell.notes.receive(&state, window, cx);
                     shell.state = state;
                     cx.notify();
                 });
@@ -50,7 +63,8 @@ impl Shell {
             commands,
             privacy: PrivacyForm::new(window, cx),
             connections: ConnectionsForm::new(window, cx),
-            settings_open: false,
+            notes: NotesForm::new(window, cx),
+            view: View::Inbox,
         }
     }
 
@@ -135,6 +149,7 @@ impl Shell {
     /// The conflict warning of form `id`, with its two choices.
     pub(crate) fn conflict_warning(
         id: &str,
+        text: &'static str,
         load: fn(&mut Self, &mut Window, &mut Context<Self>),
         save_anyway: fn(&mut Self, &mut Context<Self>),
         cx: &Context<Self>,
@@ -143,14 +158,14 @@ impl Shell {
             .flex()
             .flex_col()
             .gap_1()
-            .child(labelled(format!("{id}-conflict"), CONFLICT))
+            .child(labelled(format!("{id}-conflict"), text))
             .child(
                 div()
                     .flex()
                     .gap_2()
                     .child(
                         Button::new(SharedString::from(format!("{id}-load")))
-                            .label("Load the server's settings")
+                            .label("Load the server's version")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 load(this, window, cx);
                                 cx.notify();
@@ -177,7 +192,8 @@ pub(crate) fn labelled(id: impl Into<SharedString>, text: impl Into<SharedString
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The forms are built first. The lists below borrow `cx` until they are drawn.
-        let forms = self.settings_open.then(|| {
+        let notes = (self.view == View::Notes).then(|| self.notes_section(cx).into_any_element());
+        let forms = (self.view == View::Settings).then(|| {
             (
                 self.connections_section(cx).into_any_element(),
                 self.privacy_section(cx).into_any_element(),
@@ -267,7 +283,9 @@ impl Render for Shell {
             )))
         });
 
-        let page = if let Some((connections, privacy)) = forms {
+        let page = if let Some(notes) = notes {
+            notes
+        } else if let Some((connections, privacy)) = forms {
             div()
                 .id("settings")
                 .flex_1()
@@ -334,23 +352,19 @@ impl Render for Shell {
                     .flex_col()
                     .gap_2()
                     .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new("tab-inbox")
-                                    .label("Inbox")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings_open = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(Button::new("tab-settings").label("Settings").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.settings_open = true;
+                        div().flex().gap_2().children(
+                            [
+                                ("tab-inbox", "Inbox", View::Inbox),
+                                ("tab-notes", "Notes", View::Notes),
+                                ("tab-settings", "Settings", View::Settings),
+                            ]
+                            .map(|(id, text, view)| {
+                                Button::new(id).label(text).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.view = view;
                                     cx.notify();
-                                },
-                            ))),
+                                }))
+                            }),
+                        ),
                     )
                     .child("Profiles")
                     .children(profiles),

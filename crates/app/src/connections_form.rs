@@ -3,7 +3,7 @@
 //! A typed token goes from its masked field into the command, and nowhere else.
 
 use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
-use crate::shell::{Shell, labelled};
+use crate::shell::{CONFLICT, Shell, labelled};
 use bunsin_api::{
     ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange, TokenSource, ToolsReport,
 };
@@ -509,6 +509,7 @@ impl Shell {
             .children(form.llm_conflict.then(|| {
                 Self::conflict_warning(
                     "llm",
+                    CONFLICT,
                     Self::load_server_llm,
                     |this, cx| this.save_llm(this.connections.llm_remove_token, true, cx),
                     cx,
@@ -578,6 +579,7 @@ impl Shell {
                 (form.connector_conflict.as_ref() == Some(&text(&form.name, cx))).then(|| {
                     Self::conflict_warning(
                         "connector",
+                        CONFLICT,
                         Self::load_server_connector,
                         |this, cx| this.save_connector(this.connections.connector_remove_token, true, cx),
                         cx,
