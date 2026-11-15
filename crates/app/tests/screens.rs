@@ -5,12 +5,13 @@
 
 mod common;
 
-use bunsin_api::{ConnectorUpdate, EngineApi, Expected, TokenChange, WikiPageUpdate};
+use bunsin_api::{ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, WikiPageUpdate};
 use bunsin_app::bridge::{NoteResult, SaveError, UiCommand, UiState, apply};
 use bunsin_app::connect::{AppView, Source};
 use bunsin_app::connection::MemoryTokenStore;
 use bunsin_app::shell::Shell;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::settings::Wire;
 use bunsin_core::wiki::WikiText;
 use gpui_kit::assets::Assets;
 use gpui_kit::component::ThemeMode;
@@ -271,6 +272,30 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     };
     states.send(on(check)).unwrap();
     shot(&mut cx, window, dir, &name("settings"));
+
+    // The result of a test of the endpoint, and the connector form with its header field.
+    let llm = LlmUpdate {
+        wire: Wire::OpenAiResponses,
+        base_url: "https://llm.example.com/v1".into(),
+        model: "example-model".into(),
+        timeout_secs: 120,
+        token: TokenChange::Set("fixture-token".into()),
+        expected: Expected::Unchecked,
+    };
+    rt.block_on(rig.engine.set_llm("kim", llm)).unwrap();
+    rig.llm.reply(
+        r#"{"kind":"ignore","rationale":"connection test","summary":null,"tool":null,"args_json":null}"#,
+        41,
+    );
+    let test = UiCommand::TestLlm { profile: "kim".into() };
+    states.send(on(test)).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("llm-token-state", ScrollDelta::Pixels(point(px(0.), px(-330.))), cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("settings-test"));
 }
 
 fn main() {

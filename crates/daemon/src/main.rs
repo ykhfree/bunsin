@@ -9,6 +9,7 @@ use bunsin_api::{
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
+use bunsin_core::settings::Wire;
 use bunsin_daemon::server::{Poller, ServeConfig, serve};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::Engine;
@@ -231,11 +232,14 @@ enum Command {
         profile: String,
         #[arg(long, value_parser = ["anthropic-messages", "openai-chat", "openai-responses"], default_value = "anthropic-messages")]
         wire: String,
-        /// The default is the Claude API.
-        #[arg(long, default_value = bunsin_core::settings::ANTHROPIC_BASE_URL)]
-        base_url: String,
-        #[arg(long, default_value = bunsin_core::settings::ANTHROPIC_DEFAULT_MODEL)]
-        model: String,
+        /// With the format anthropic-messages, the default is the Claude API.
+        /// The other formats have no default.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// With the format anthropic-messages, the default is a Claude model.
+        /// The other formats have no default.
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long, default_value_t = 120)]
         timeout_secs: u64,
         #[command(flatten)]
@@ -252,6 +256,7 @@ enum Command {
         url: String,
         /// The header that carries the token as it is, for example X-API-Key.
         /// Without it, the token goes as `Authorization: Bearer <token>`.
+        /// Give it with every `connector-set` of this connector: a call without it sets Bearer again.
         #[arg(long)]
         token_header: Option<String>,
         #[command(flatten)]
@@ -635,11 +640,17 @@ async fn run(cli: Cli) -> Result<(), String> {
             timeout_secs,
             token,
         } => {
-            let wire = serde_json::from_value(serde_json::Value::String(wire)).map_err(|e| e.to_string())?;
+            let wire: Wire = serde_json::from_value(serde_json::Value::String(wire)).map_err(|e| e.to_string())?;
+            // The Claude address and model fit only the Claude format.
+            let default = |value: Option<String>, name: &str, claude: &str| match (value, wire) {
+                (Some(value), _) => Ok(value),
+                (None, Wire::AnthropicMessages) => Ok(claude.to_owned()),
+                (None, _) => Err(format!("give {name}: this format has no default")),
+            };
             let update = LlmUpdate {
                 wire,
-                base_url,
-                model,
+                base_url: default(base_url, "--base-url", bunsin_core::settings::ANTHROPIC_BASE_URL)?,
+                model: default(model, "--model", bunsin_core::settings::ANTHROPIC_DEFAULT_MODEL)?,
                 timeout_secs,
                 token: token.change()?,
                 expected: bunsin_api::Expected::Unchecked,

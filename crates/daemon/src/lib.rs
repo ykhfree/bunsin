@@ -12,7 +12,7 @@ pub mod server;
 use bunsin_api::ProfileConfig;
 use bunsin_connectors::{McpConnector, TokenAuth};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
-use bunsin_core::settings::{ConnectorSection, LlmSection, McpConfig, origin_of};
+use bunsin_core::settings::{ConnectorSection, LlmSection, McpConfig, check_token_header, origin_of};
 use bunsin_engine::{Backends, ProfileSecrets, Runtime};
 use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig};
 use serde_json::Value;
@@ -184,6 +184,11 @@ impl RealBackends {
     fn connector_section(&self, name: &str, section: &Value) -> Result<ConnectorSection, String> {
         let section: ConnectorSection = serde_json::from_value(section.clone())
             .map_err(|e| format!("the settings of connector `{name}` are invalid: {e}"))?;
+        // Every way to store settings and every connect passes here. A token header such as `Host`
+        // would change where an allowed address leads.
+        if let Some(header) = &section.token_header {
+            check_token_header(header).map_err(|e| format!("connector `{name}`: {e}"))?;
+        }
         match &section.mcp {
             McpConfig::Stdio { .. } if !self.allow_stdio => {
                 return Err(format!(

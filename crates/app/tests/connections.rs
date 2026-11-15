@@ -1113,6 +1113,8 @@ fn test_sends_one_request_to_the_saved_endpoint_and_shows_the_result(cx: &mut Te
             label(window, "llm-message"),
             "Save the endpoint first. The test uses the saved settings."
         );
+        // The earlier "Works" was for the saved model. It is not shown beside another one.
+        assert_eq!(label(window, "llm-test"), "");
         fill(window, cx, "llm-model", "m");
     });
     assert_eq!(rig.llm.requests().len(), before + 1);
@@ -1130,4 +1132,73 @@ fn test_sends_one_request_to_the_saved_endpoint_and_shows_the_result(cx: &mut Te
         assert_not_on_screen(window, TOKEN, "https://llm.example/v1");
     });
     assert_eq!(rig.llm.requests().len(), before + 2);
+}
+
+#[gpui_kit::test]
+fn the_window_says_that_a_test_runs_until_its_result_arrives(cx: &mut TestAppContext) {
+    use bunsin_api::{Connections, LlmConnection, LlmTest};
+    use bunsin_app::bridge::{ConnectionResult, UiState};
+    use gpui_kit::AppContext;
+    // The test is the bridge: it sends the states, and it answers no command.
+    let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(gpui_kit::init);
+    let (window, _shell) = cx.update(|cx| {
+        gpui_kit::open_window(Default::default(), cx, |window, cx| {
+            cx.new(|cx| Shell::new(receiver, commands, window, cx))
+        })
+        .unwrap()
+    });
+    let saved = UiState {
+        selected: Some("kim".into()),
+        connections: Some(Connections {
+            llm: Some(LlmConnection {
+                wire: Wire::OpenAiResponses,
+                base_url: "https://llm.example/v1".into(),
+                model: "m".into(),
+                timeout_secs: 120,
+                token: TokenSource::Stored,
+            }),
+            connectors: Default::default(),
+        }),
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(saved.clone()).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
+    on_screen(cx, window, |window, cx| window.click("test-llm", cx));
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "llm-test"),
+            "Testing… One short request goes to the endpoint. It waits for the answer up to the timeout."
+        );
+    });
+    // The first command was the refresh of a new window. The second is the test.
+    let sent: Vec<_> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+    assert_eq!(
+        sent.last(),
+        Some(&bunsin_app::bridge::UiCommand::TestLlm { profile: "kim".into() })
+    );
+
+    // A refresh without a new command result does not end the text.
+    states.send(saved.clone()).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "llm-test").starts_with("Testing…"))
+    });
+
+    let done = UiState {
+        connection_result: Some(ConnectionResult::LlmTested(Ok(LlmTest {
+            works: true,
+            detail: "the endpoint answered".into(),
+        }))),
+        connection_commands: 1,
+        ..saved
+    };
+    states.send(done).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "llm-test"), "Works: the endpoint answered");
+    });
 }

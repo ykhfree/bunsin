@@ -540,6 +540,8 @@ impl Shell {
         // The result of the last test, or that a test runs now.
         let (test_text, test_works) = match &self.state.connection_result {
             _ if form.llm_testing => (TESTING.to_owned(), None),
+            // A result describes the saved endpoint. Beside a changed form it would describe another one.
+            _ if llm_changed => (String::new(), None),
             Some(ConnectionResult::LlmTested(Ok(test))) if test.works => {
                 (format!("Works: {}", test.detail), Some(true))
             }
@@ -634,8 +636,15 @@ impl Shell {
             );
         }
         let llm_section = llm_section
-            .child(labelled("llm-message", form.llm_message.unwrap_or_default()))
-            .child(labelled("llm-result", llm_result))
+            // The status texts share one box, so empty ones leave no band of gaps.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .text_sm()
+                    .child(labelled("llm-message", form.llm_message.unwrap_or_default()))
+                    .child(labelled("llm-result", llm_result)),
+            )
             .children(form.llm_conflict.then(|| {
                 Self::conflict_warning(
                     "llm",

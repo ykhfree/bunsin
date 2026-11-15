@@ -208,6 +208,27 @@ fn settings_round_trip_and_unsafe_settings_are_refused() {
         "stdio settings",
     );
     assert!(error.contains("--allow-stdio-connectors"), "{error}");
+
+    // The settings file cannot name a token header that the connection sets itself.
+    config["connectors"] = serde_json::json!({
+        "wiki": {"mcp": {"transport": "http", "url": "https://mcp.example.com/wiki"}, "token_secret": null,
+                 "token_header": "Host"}
+    });
+    std::fs::write(&file, config.to_string()).unwrap();
+    let error = stderr_of_failure(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "a reserved token header",
+    );
+    assert!(error.contains("cannot carry a token"), "{error}");
+    let stored = stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show");
+    assert!(!stored.contains("token_header"), "{stored}");
+    // Another header name is accepted in the file.
+    config["connectors"]["wiki"]["token_header"] = serde_json::json!("X-API-Key");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set with a token header",
+    );
 }
 
 #[test]
@@ -299,6 +320,33 @@ fn llm_test_reports_why_the_endpoint_does_not_work() {
     assert!(
         error.contains("the endpoint does not work: the LLM cannot be used: the profile has no `llm` settings"),
         "{error}"
+    );
+    // Another format than Claude's has no default address or model.
+    let error = stderr_of_failure(
+        server.run(&kim, &["llm-set", "kim", "--wire", "openai-responses"]),
+        "llm-set without an address",
+    );
+    assert!(error.contains("give --base-url: this format has no default"), "{error}");
+    let set = [
+        "llm-set",
+        "kim",
+        "--wire",
+        "openai-responses",
+        "--base-url",
+        "https://llm.example.com/v1",
+    ];
+    let error = stderr_of_failure(server.run(&kim, &set), "llm-set without a model");
+    assert!(error.contains("give --model: this format has no default"), "{error}");
+    stdout_of(server.run(&kim, &[&set[..], &["--model", "m"]].concat()), "llm-set");
+    assert!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections")
+            .starts_with("llm\topenai-responses\thttps://llm.example.com/v1\tm\tno token\n")
+    );
+    // The Claude format keeps its defaults.
+    stdout_of(server.run(&kim, &["llm-set", "kim"]), "llm-set with defaults");
+    assert!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections")
+            .starts_with("llm\tanthropic-messages\thttps://api.anthropic.com\tclaude-opus-5-5\t")
     );
     // A token tests only its own profile.
     let error = stderr_of_failure(server.run(&kim, &["llm-test", "lee"]), "llm-test for another profile");

@@ -226,7 +226,9 @@
 - 커넥터는 권한을 판단하지 않는다. 엔진이 호출 전에 정책과 pin을 검사한다.
 - OAuth는 아직 없다. HTTP transport는 token을 `Authorization: Bearer <token>`으로 보낸다.
   커넥터 설정의 `token_header`가 있으면 그 헤더가 token을 그대로 담는다(예: `X-API-Key`).
-  연결이 스스로 정하는 헤더(`Host`, `Content-Type`, `Mcp-Session-Id` 등)는 거부한다. token이 없는 커넥터는 두 헤더 모두 보내지 않는다.
+  연결이 스스로 정하는 헤더(`Host`, `Content-Type`, `Mcp-Session-Id` 등)는 거부한다.
+  이 검사는 주소 규칙과 같은 자리에 있어서, 설정 파일로 저장할 때와 접속할 때 모두 지난다.
+  `Host`를 바꿀 수 있으면 허용된 주소로 보낸 요청이 다른 가상 호스트로 갈 수 있기 때문이다. token이 없는 커넥터는 두 헤더 모두 보내지 않는다.
   LLM token의 헤더는 wire 형식이 정하고, 바꿀 수 없다.
 - HTTP transport는 redirect를 따르지 않는다.
 - 실제 Slack, Jira, Confluence MCP 서버로는 아직 연결해 보지 않았다. 테스트는 로컬 rmcp 서버를 쓴다.

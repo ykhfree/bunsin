@@ -210,7 +210,10 @@ bunsind connector-remove kim jira                # removes the connector and its
   agent needs.
 - A connector needs no token: leave the token out. A token goes as `Authorization: Bearer
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
-  window. That header then carries the token as it is.
+  window. That header then carries the token as it is. Give `--token-header` with every
+  `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
+- With `--wire openai-chat` or `openai-responses`, `llm-set` needs `--base-url` and `--model`.
+  Only the Claude format has defaults.
 - A Claude API key that is not scoped to one workspace also needs a workspace ID. Set
   `"workspace_id"` in the `llm` section of the settings file.
 - The server stores each token encrypted and never sends it back. `connections` shows
