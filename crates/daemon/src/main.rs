@@ -88,6 +88,8 @@ enum Command {
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
         /// Let profile settings name commands that run on this machine as MCP servers.
+        /// Every profile owner can then start any program as the user of this server.
+        /// Use it only if you trust every profile owner.
         #[arg(long)]
         allow_stdio_connectors: bool,
         /// An LLM or MCP host that profile settings may name. Repeat it for more hosts.

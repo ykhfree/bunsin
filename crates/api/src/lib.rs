@@ -234,7 +234,7 @@ pub struct LlmUpdate {
     pub expected: Expected<Option<LlmConnection>>,
 }
 
-/// A connector that is reached over HTTP. Other transports are set by the server operator.
+/// A connector that is reached over HTTP. A connector that runs a command has `CommandConnectorUpdate`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorUpdate {
     pub url: String,

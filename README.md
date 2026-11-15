@@ -161,7 +161,10 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   (repeatable): then only the listed hosts are allowed, including an internal gateway
   over `http://`.
 - **Local MCP commands.** MCP servers that run as a command on the server need
-  `--allow-stdio-connectors`.
+  `--allow-stdio-connectors`. With this flag, every profile owner can make the server
+  start any program, in the window or in the settings file. The program runs as the user
+  of the server, so it can read the data of the other profiles and the key file. Use the
+  flag only on a server whose profile owners you all trust, such as a server for yourself.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 

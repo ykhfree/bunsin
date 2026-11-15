@@ -329,9 +329,16 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
         .unwrap();
     states.send(on(UiCommand::Refresh)).unwrap();
     cx.run_until_parked();
+    // The list with a command and an address.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.scroll("llm-token-state", ScrollDelta::Pixels(point(px(0.), px(-760.))), cx);
+        window.scroll("llm-token-state", ScrollDelta::Pixels(point(px(0.), px(-520.))), cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("settings-connectors"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("connector-count", ScrollDelta::Pixels(point(px(0.), px(-240.))), cx);
         window.render_frame(cx);
         window.within("connector-kind").click(1usize, cx);
     })
