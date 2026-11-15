@@ -138,8 +138,8 @@ pub enum ConnectionResult {
 }
 
 /// What the window shows. Every field comes from the engine. No token is ever in it.
-/// The arguments and the environment variables of a command connector are in it: the server
-/// stores them as plain settings, and they can hold a secret.
+/// The arguments and the plain environment variables of a command connector are in it. The value
+/// of a secret variable is not: the state holds only its name.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiState {
     pub profiles: Vec<ProfileInfo>,

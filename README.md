@@ -248,9 +248,20 @@ bunsind connector-remove kim jira                # removes the connector and its
     started again with the flag.
   - The program runs on the server computer with the rights of the server. Use this only
     on a server whose profile owners you trust.
-  - The arguments and the environment variables are stored as plain text in the settings,
-    not encrypted like a token. `config-show` and the form after **Edit** show them. The
-    connector list shows only the program and how many of each there are.
+  - Put a secret, such as an API token, into a **secret variable**: its name, its value
+    in the masked field, then **Add**. The server encrypts the value like a token, gives
+    it to the program in its environment, and does not show it again. The settings hold
+    only the name. To replace a value, add the variable again. To remove it, use
+    **Remove** in its row, then save.
+  - The arguments and the other environment variables are stored as plain text in the
+    settings. `config-show` and the form after **Edit** show them. The connector list
+    shows only the program and how many of each there are.
+  - Secret values are entered in the window only. The settings file can name a secret
+    variable (`"secret_env": ["API_TOKEN"]`), but not give its value. A plain value that
+    is in the settings already is not moved: enter it as a secret variable and delete its
+    plain line.
+  - Encryption protects the stored value. While the program runs, the value is in the
+    environment of that program on the server.
   - A name keeps its kind. To turn an address into a command or back, remove the
     connector first.
 

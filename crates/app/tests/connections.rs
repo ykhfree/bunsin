@@ -1667,3 +1667,237 @@ fn the_keychain_token_is_sent_as_it_is_and_never_for_another_profile(cx: &mut Te
     });
     assert_eq!(last_save(cx), ("lee".to_owned(), TokenChange::Keep));
 }
+
+const SECRET_VALUE: &str = "sv-secret-VALUE-63e0";
+
+/// Types a secret variable into its fields. Does not press Add.
+fn type_secret(window: &mut Window, cx: &mut App, name: &str, value: &str) {
+    fill(window, cx, "secret-name", name);
+    fill(window, cx, "secret-value", value);
+}
+
+fn secret_names(rt: &tokio::runtime::Runtime, rig: &common::Rig) -> Vec<String> {
+    rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"]
+        .secret_env
+        .clone()
+}
+
+#[gpui_kit::test]
+fn a_secret_variable_is_added_masked_saved_kept_and_removed(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    choose_command(cx, window);
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "local");
+        fill(window, cx, "connector-command", "/opt/mcp/does-not-exist");
+        // Add needs a name and a value.
+        fill(window, cx, "secret-name", "API_TOKEN");
+        window.click("add-secret", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "connector-message"),
+            "Enter the name and the value of the secret variable."
+        );
+        assert!(window.try_find("secret-API_TOKEN").is_none());
+        type_secret(window, cx, "API_TOKEN", SECRET_VALUE);
+        // The value sits in a masked field that reports no value.
+        assert_eq!(window.find("secret-value").role(), Some(gpui_kit::Role::PasswordInput));
+        window.click("add-secret", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "secret-API_TOKEN"), "API_TOKEN: new value, not saved yet");
+        assert_eq!(
+            label(window, "connector-counts"),
+            "0 arguments, 0 environment variables, 1 secret variable"
+        );
+        assert_eq!(value(window, "secret-name"), "");
+        assert_not_on_screen(window, SECRET_VALUE, "API_TOKEN: new value");
+        // A typed variable that Add did not take is not saved without a word.
+        type_secret(window, cx, "SECOND", "second-value-19");
+        window.click("save-connector", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "connector-message"),
+            "Add the secret variable or clear its fields first."
+        );
+        window.click("add-secret", cx);
+    });
+    std::thread::sleep(REFRESH * 2);
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
+
+    on_screen(cx, window, |window, cx| window.click("save-connector", cx));
+    wait_for_commands(cx, &shell, 1);
+    assert_eq!(secret_names(&rt, &rig), ["API_TOKEN", "SECOND"]);
+    // The values are in no state of the window and in no answer of the server.
+    let state = shell.read_with(cx, |s, _| format!("{:?}", s.state));
+    assert!(state.contains("API_TOKEN") && !state.contains(SECRET_VALUE) && !state.contains("second-value-19"));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            row(window, "local", "command-counts").as_deref(),
+            Some("0 arguments, 0 environment variables, 2 secret variables")
+        );
+        assert_not_on_screen(window, SECRET_VALUE, "runs the command");
+        click_row(window, cx, "local", "edit");
+    });
+    // Edit shows the names. A save of another change keeps the stored values.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "secret-API_TOKEN"), "API_TOKEN: stored on the server");
+        assert_eq!(label(window, "secret-SECOND"), "SECOND: stored on the server");
+        assert_not_on_screen(window, SECRET_VALUE, "stored on the server");
+        fill_area(window, cx, "connector-args", "--stdio");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "connector-result"), "Saved: local")
+    });
+    assert_eq!(secret_names(&rt, &rig), ["API_TOKEN", "SECOND"]);
+
+    // A removed row removes the variable on the server with the next save.
+    on_screen(cx, window, |window, cx| click_row(window, cx, "local", "edit"));
+    on_screen(cx, window, |window, cx| window.click("remove-secret-SECOND", cx));
+    on_screen(cx, window, |window, cx| {
+        assert!(window.try_find("secret-SECOND").is_none());
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 3);
+    assert_eq!(secret_names(&rt, &rig), ["API_TOKEN"]);
+}
+
+#[gpui_kit::test]
+fn a_secret_draft_follows_the_draft_rules_and_the_server_reason_is_shown(cx: &mut TestAppContext) {
+    use bunsin_api::{CommandConnectorUpdate, SecretChange};
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let stored = |arg: &str, token: SecretChange| CommandConnectorUpdate {
+        command: "/opt/mcp/does-not-exist".into(),
+        args: vec![arg.into()],
+        env: [("REGION".to_owned(), "eu".to_owned())].into(),
+        secret_env: [("API_TOKEN".to_owned(), token)].into(),
+        expected: Expected::Unchecked,
+    };
+    let first = stored("--first", SecretChange::Set(SECRET_VALUE.into()));
+    rt.block_on(rig.engine.set_command_connector("kim", "local", first))
+        .unwrap();
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    let server_arg = |cx: &mut TestAppContext, shell: &Entity<Shell>, arg: &'static str| {
+        wait_until(cx, shell, "the outside change", move |s| {
+            s.state.connections.as_ref().is_some_and(
+                |c| matches!(&c.connectors["local"].mcp, McpConfig::Stdio { args, .. } if args == &[arg.to_owned()]),
+            )
+        });
+    };
+    on_screen(cx, window, |window, cx| click_row(window, cx, "local", "edit"));
+    // An unchanged draft follows the server.
+    let second = stored("--second", SecretChange::Keep);
+    rt.block_on(rig.engine.set_command_connector("kim", "local", second))
+        .unwrap();
+    server_arg(cx, &shell, "--second");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(area(window, "connector-args"), "--second");
+        // A typed secret value makes the draft a changed one, before Add.
+        type_secret(window, cx, "OTHER", "typed-value-55");
+    });
+    let third = stored("--third", SecretChange::Keep);
+    rt.block_on(rig.engine.set_command_connector("kim", "local", third))
+        .unwrap();
+    server_arg(cx, &shell, "--third");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(area(window, "connector-args"), "--second");
+        assert_eq!(value(window, "secret-name"), "OTHER");
+        // The same name as a plain variable: the server refuses it, and the draft stays.
+        type_secret(window, cx, "REGION", "typed-value-55");
+        window.click("add-secret", cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("save-connector", cx));
+    wait_for_commands(cx, &shell, 1);
+    on_screen(cx, window, |window, cx| {
+        // The draft started from an older state, so the conflict comes first.
+        assert_eq!(label(window, "connector-conflict"), CONFLICT);
+        window.click("connector-save-anyway", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    on_screen(cx, window, |window, cx| {
+        let result = label(window, "connector-result");
+        assert!(result.contains("in both lists"), "{result}");
+        assert!(!result.contains("typed-value-55"), "{result}");
+        assert_eq!(label(window, "secret-REGION"), "REGION: new value, not saved yet");
+        // Another profile gets no row and no typed value.
+        type_secret(window, cx, "THIRD", "typed-value-55");
+        window.click("profile-lee", cx);
+    });
+    wait_until(cx, &shell, "the other profile", |s| {
+        s.state.selected.as_deref() == Some("lee") && s.state.connections.is_some()
+    });
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("secret-REGION").is_none());
+        assert!(window.try_find("secret-API_TOKEN").is_none());
+        assert_eq!(value(window, "secret-name"), "");
+        assert_not_on_screen(window, "typed-value-55", "Lee (lee)");
+    });
+    // The stored variable of the first profile is as it was.
+    assert_eq!(secret_names(&rt, &rig), ["API_TOKEN"]);
+}
+
+#[gpui_kit::test]
+fn the_secret_value_goes_to_the_server_as_it_was_typed_and_is_not_printed(cx: &mut TestAppContext) {
+    use bunsin_api::{Connections, SecretChange};
+    use bunsin_app::bridge::{UiCommand, UiState};
+    use gpui_kit::AppContext;
+    // The test is the bridge: it sends the states, and it answers no command.
+    let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(gpui_kit::init);
+    let (window, _shell) = cx.update(|cx| {
+        // The page scrolls. The window holds all of it, because a test cannot click below the fold.
+        let options = gpui_kit::WindowOptions {
+            window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+                origin: Default::default(),
+                size: gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(1800.)),
+            })),
+            ..Default::default()
+        };
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| Shell::new(receiver, commands, window, cx))
+        })
+        .unwrap()
+    });
+    let state = UiState {
+        selected: Some("kim".into()),
+        connections: Some(Connections {
+            llm: None,
+            connectors: Default::default(),
+        }),
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(state).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
+    choose_command(cx, window);
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "local");
+        fill(window, cx, "connector-command", "/opt/mcp/does-not-exist");
+        // A space inside the value is part of it.
+        type_secret(window, cx, "API_TOKEN", "two words");
+        window.click("add-secret", cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("save-connector", cx));
+    cx.run_until_parked();
+    let sent: Vec<_> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+    let Some(UiCommand::SaveCommandConnector { update, .. }) = sent.last() else {
+        panic!("expected a save of the command, got {:?}", sent.last());
+    };
+    let expected = [("API_TOKEN".to_owned(), SecretChange::Set("two words".to_owned()))].into();
+    assert_eq!(update.secret_env, expected);
+    // The command can be logged: its debug text holds the name and not the value.
+    let printed = format!("{:?}", sent.last());
+    assert!(
+        printed.contains("API_TOKEN") && !printed.contains("two words"),
+        "{printed}"
+    );
+}

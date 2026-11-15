@@ -365,6 +365,33 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     })
     .unwrap();
     shot(&mut cx, window, dir, &name("settings-command"));
+
+    // The secret variables of the command: one that was added, and one that is being typed.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("connector-command", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("secret-name", cx);
+        window.input("EXAMPLE_API_TOKEN", cx);
+        window.click("secret-value", cx);
+        window.input("fixture-value", cx);
+        window.click("add-secret", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("secret-name", cx);
+        window.input("EXAMPLE_SECOND_KEY", cx);
+        window.click("secret-value", cx);
+        window.input("fixture-value", cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("settings-secrets"));
 }
 
 fn main() {

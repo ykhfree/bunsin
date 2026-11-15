@@ -6,8 +6,8 @@ use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
 use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
 use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{
-    CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange,
-    TokenSource, ToolsReport,
+    CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, SecretChange,
+    TokenChange, TokenSource, ToolsReport,
 };
 use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, McpConfig, Wire, default_timeout_secs};
 use bunsin_core::tool::pin;
@@ -33,6 +33,10 @@ const HELP: &str = "Leave a token field empty to keep the stored token. \
 const COMMAND_HELP: &str = "The server starts this program and talks to it. \
     The operator of the server must allow that: the server starts with --allow-stdio-connectors.";
 const KIND_TAKEN: &str = "A connector with this name is of the other kind. Remove it first, or use another name.";
+const SECRET_HELP: &str = "Secret variables, such as an API token. The server encrypts each value, \
+    gives it to the program, and does not show it again.";
+const SECRET_FIELDS: &str = "Enter the name and the value of the secret variable.";
+const SECRET_UNADDED: &str = "Add the secret variable or clear its fields first.";
 const ENV_LINE: &str = "Write each environment variable as NAME=value, one in a line.";
 const ENV_TWICE: &str = "An environment variable is in the list twice.";
 const NOT_EDITABLE: &str = "This connector has an empty argument or a line break in a value. \
@@ -90,13 +94,17 @@ fn command_texts(args: &[String], env: &BTreeMap<String, String>) -> Option<(Str
 }
 
 /// How many arguments and variables a command has, for the list and the form.
-fn counts_text(args: usize, env: usize) -> String {
+fn counts_text(args: usize, env: usize, secrets: usize) -> String {
     let plural = |count: usize, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
-    format!(
+    let mut text = format!(
         "{}, {}",
         plural(args, "argument", "arguments"),
         plural(env, "environment variable", "environment variables")
-    )
+    );
+    if secrets > 0 {
+        text.push_str(&format!(", {}", plural(secrets, "secret variable", "secret variables")));
+    }
+    text
 }
 const KEYCHAIN_HELP: &str = "Or copy the token from an item of the login Keychain of this Mac. \
     Keychain Access shows the service of an item as Where. The token is copied once: \
@@ -138,6 +146,11 @@ pub struct ConnectionsForm {
     args: Entity<TextareaState>,
     /// The environment variables of the command, `NAME=value` in each line.
     env: Entity<TextareaState>,
+    /// The secret variables of the command draft: a stored value that stays, or a new value.
+    secrets: BTreeMap<String, SecretChange>,
+    secret_name: Entity<InputState>,
+    /// Masked. Add moves the typed value into `secrets`.
+    secret_value: Entity<InputState>,
     /// The window's own message about the last LLM save that it did not send.
     llm_message: Option<&'static str>,
     /// The window's own message about the last connector save that it did not send.
@@ -239,7 +252,10 @@ impl ConnectionsForm {
             kind: Kind::Address,
             command: input("/usr/local/bin/npx", window, cx),
             args: cx.new(|cx| TextareaState::new(window, cx).placeholder("-y\nsome-mcp-server")),
-            env: cx.new(|cx| TextareaState::new(window, cx).placeholder("API_TOKEN=value")),
+            env: cx.new(|cx| TextareaState::new(window, cx).placeholder("REGION=eu")),
+            secrets: BTreeMap::new(),
+            secret_name: input("API_TOKEN", window, cx),
+            secret_value: token(window, cx),
             llm_message: None,
             connector_message: None,
             llm_base: None,
@@ -390,9 +406,40 @@ impl ConnectionsForm {
         set(&self.command, &command, window, cx);
         self.args.update(cx, |area, cx| area.set_value(args, window, cx));
         self.env.update(cx, |area, cx| area.set_value(env, window, cx));
+        // The stored values stay on the server. The draft keeps each of them until the owner changes it.
+        self.secrets = connector
+            .map(|c| {
+                c.secret_env
+                    .iter()
+                    .map(|name| (name.clone(), SecretChange::Keep))
+                    .collect()
+            })
+            .unwrap_or_default();
+        set(&self.secret_name, "", window, cx);
+        set(&self.secret_value, "", window, cx);
         self.connector_base = connector.map(|c| (name.to_owned(), c.clone()));
         self.connector_message = None;
         self.connector_conflict = None;
+    }
+
+    /// True if no secret variable is typed that Add has not taken.
+    fn secret_fields_empty(&self, cx: &App) -> bool {
+        text(&self.secret_name, cx).is_empty() && self.secret_value.read(cx).value().is_empty()
+    }
+
+    /// Moves the typed secret variable into the draft. Its value leaves the field.
+    fn add_secret(&mut self, window: &mut Window, cx: &mut App) {
+        let name = text(&self.secret_name, cx);
+        // The value is used as it is. A space can be part of it.
+        let value = self.secret_value.read(cx).value().to_string();
+        if name.is_empty() || value.is_empty() {
+            self.connector_message = Some(SECRET_FIELDS);
+            return;
+        }
+        self.secrets.insert(name, SecretChange::Set(value));
+        set(&self.secret_name, "", window, cx);
+        set(&self.secret_value, "", window, cx);
+        self.connector_message = None;
     }
 
     /// The text of an area as it is. A space at the start of a line is part of an argument.
@@ -437,6 +484,12 @@ impl ConnectionsForm {
                             && command.display().to_string() == text(&self.command, cx)
                             && *args == parse_args(&Self::raw(&self.args, cx))
                             && parse_env(&Self::raw(&self.env, cx)).as_ref() == Ok(env)
+                            && self.secrets.len() == base.secret_env.len()
+                            && self
+                                .secrets
+                                .iter()
+                                .all(|(name, change)| *change == SecretChange::Keep && base.secret_env.contains(name))
+                            && self.secret_fields_empty(cx)
                     }
                 }
         })
@@ -521,11 +574,16 @@ impl Shell {
                     return;
                 }
             };
+            // A typed variable that Add did not take would not be saved.
+            if !form.secret_fields_empty(cx) {
+                form.connector_message = Some(SECRET_UNADDED);
+                return;
+            }
             let update = CommandConnectorUpdate {
                 command: text(&form.command, cx).into(),
                 args: parse_args(&ConnectionsForm::raw(&form.args, cx)),
                 env,
-                secret_env: Default::default(),
+                secret_env: form.secrets.clone(),
                 expected,
             };
             form.connector_message = None;
@@ -654,7 +712,7 @@ impl Shell {
             // hold a secret, so they are shown only in the form, after Edit.
             McpConfig::Stdio { command, args, env } => {
                 let runs = format!("runs the command {}", command.display());
-                let counts = counts_text(args.len(), env.len());
+                let counts = counts_text(args.len(), env.len(), connector.secret_env.len());
                 row = row
                     .child(labelled_as("address", runs.clone(), quiet(runs, cx)))
                     .child(labelled_as("command-counts", counts.clone(), quiet(counts, cx)));
@@ -966,9 +1024,37 @@ impl Shell {
                 .into_any_element(),
             ],
             Kind::Command => {
+                // The rows name each secret variable. A value is never on screen.
+                let secret_rows: Vec<AnyElement> = form
+                    .secrets
+                    .iter()
+                    .map(|(name, change)| {
+                        let state = match change {
+                            SecretChange::Keep => "stored on the server",
+                            SecretChange::Set(_) => "new value, not saved yet",
+                        };
+                        let removed = name.clone();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(labelled(format!("secret-{name}"), format!("{name}: {state}")))
+                            .child(
+                                Button::new(SharedString::from(format!("remove-secret-{name}")))
+                                    .small()
+                                    .ghost()
+                                    .label("Remove")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.connections.secrets.remove(&removed);
+                                        cx.notify();
+                                    })),
+                            )
+                            .into_any_element()
+                    })
+                    .collect();
                 let args = parse_args(&ConnectionsForm::raw(&form.args, cx)).len();
                 let counts = match parse_env(&ConnectionsForm::raw(&form.env, cx)) {
-                    Ok(env) => counts_text(args, env.len()),
+                    Ok(env) => counts_text(args, env.len(), form.secrets.len()),
                     Err(message) => message.to_owned(),
                 };
                 vec![
@@ -989,13 +1075,47 @@ impl Shell {
                     )
                     .into_any_element(),
                     field(
-                        "Environment variables: NAME=value, one in each line. The server stores them as plain text.",
+                        "Environment variables that are not secret: NAME=value, one in each line",
                         div()
                             .id("connector-env")
                             .child(Textarea::new(&form.env).aria_label("Environment variables").h(px(76.))),
                         cx,
                     )
                     .into_any_element(),
+                    labelled_as("secret-help", SECRET_HELP, quiet(SECRET_HELP, cx)).into_any_element(),
+                    div().flex().flex_col().gap_1().children(secret_rows).into_any_element(),
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_2()
+                        .child(
+                            field(
+                                "Name of the secret variable",
+                                Input::new(&form.secret_name)
+                                    .id("secret-name")
+                                    .aria_label("Name of the secret variable"),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            field(
+                                "Value",
+                                // Masked, with no toggle that would show the value.
+                                Input::new(&form.secret_value)
+                                    .id("secret-value")
+                                    .aria_label("Value of the secret variable"),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(Button::new("add-secret").outline().label("Add").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.connections.add_secret(window, cx);
+                                cx.notify();
+                            },
+                        )))
+                        .into_any_element(),
                     labelled_as("connector-counts", counts.clone(), quiet(counts, cx)).into_any_element(),
                 ]
             }
@@ -1140,8 +1260,15 @@ mod tests {
         assert_eq!(command_texts(&["two\nlines".to_owned()], &env(&[])), None);
         assert_eq!(command_texts(&[], &env(&[("TOKEN", "line\nbreak")])), None);
         assert_eq!(command_texts(&[], &env(&[("A=B", "v")])), None);
-        assert_eq!(counts_text(1, 0), "1 argument, 0 environment variables");
-        assert_eq!(counts_text(0, 1), "0 arguments, 1 environment variable");
+        assert_eq!(counts_text(1, 0, 0), "1 argument, 0 environment variables");
+        assert_eq!(
+            counts_text(0, 1, 2),
+            "0 arguments, 1 environment variable, 2 secret variables"
+        );
+        assert_eq!(
+            counts_text(2, 2, 1),
+            "2 arguments, 2 environment variables, 1 secret variable"
+        );
     }
 
     #[test]
