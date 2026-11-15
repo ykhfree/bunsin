@@ -44,7 +44,18 @@ impl Fixture {
         let path = self.path(name);
         std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARMUP\" ] && exit 0\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let warmup = Command::new(&path).env("WARMUP", "1").status().unwrap();
+        // On Linux, a test on another thread can fork while this file is open for writing.
+        // Its child holds the file open until it calls exec, and running the file then fails
+        // with "Text file busy". The child lets go within milliseconds.
+        let warmup = (0..50)
+            .find_map(|_| match Command::new(&path).env("WARMUP", "1").status() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    None
+                }
+                result => Some(result.unwrap()),
+            })
+            .expect("the script stayed busy for a second");
         assert!(warmup.success());
         path
     }
