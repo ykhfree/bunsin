@@ -714,3 +714,32 @@ async fn the_notes_are_read_and_written_through_the_server() {
     assert_eq!(history[0].as_ref().unwrap().text.body, "Kim leads.");
     assert_eq!(history[1], None);
 }
+
+#[tokio::test]
+async fn a_command_connector_goes_through_the_server_rules_of_its_own_profile() {
+    use bunsin_api::{CommandConnectorUpdate, Expected};
+    let rig = rig().await;
+    let kim = rig.kim();
+    let update = || CommandConnectorUpdate {
+        command: "/opt/mcp/does-not-exist".into(),
+        args: vec!["--stdio".into()],
+        env: [("API_TOKEN".to_owned(), "env-secret-77".to_owned())].into(),
+        expected: Expected::Unchecked,
+    };
+    // This server was started without the flag. The refusal names the flag.
+    let error = kim.set_command_connector("kim", "local", update()).await.unwrap_err();
+    assert!(
+        matches!(error, ApiError::Invalid(ref m) if m.contains("--allow-stdio-connectors")),
+        "{error:?}"
+    );
+    assert!(!format!("{error:?}").contains("env-secret-77"));
+    // A token changes only its own profile.
+    let error = kim.set_command_connector("lee", "local", update()).await.unwrap_err();
+    assert!(
+        matches!(error, ApiError::Unauthorized(_) | ApiError::NotAllowed(_)),
+        "{error:?}"
+    );
+    for profile in ["kim", "lee"] {
+        assert!(rig.engine.connections(profile).await.unwrap().connectors.is_empty());
+    }
+}

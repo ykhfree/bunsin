@@ -24,6 +24,7 @@
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
 //! | DELETE | `/v1/profiles/{p}/connections/connectors/{c}` | | |
+//! | PUT | `/v1/profiles/{p}/connections/connectors/{c}/command` | `CommandConnectorUpdate` | |
 //! | GET | `/v1/profiles/{p}/wiki` | | `[WikiSummary]` |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}` | | `WikiPage` |
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |

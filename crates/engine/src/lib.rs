@@ -10,8 +10,9 @@ mod secrets;
 pub use secrets::{ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest, LlmUpdate, Outcome,
-    PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
+    LlmUpdate, Outcome, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
+    ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -1181,6 +1182,15 @@ impl EngineApi for Engine {
         update: ConnectorUpdate,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.save_connector(profile, name, update) })
+    }
+
+    fn set_command_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: CommandConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_command_connector(profile, name, update) })
     }
 
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {

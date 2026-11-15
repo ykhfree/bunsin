@@ -7,8 +7,8 @@
 use crate::secrets::StoredSecret;
 use crate::{Engine, internal, store_error};
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate,
-    ProfileConfig, TokenChange, TokenSource,
+    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorConnection, ConnectorUpdate, Expected,
+    LlmConnection, LlmUpdate, ProfileConfig, TokenChange, TokenSource,
 };
 use bunsin_core::settings::{
     ConnectorSection, LLM_SECRET_KEY, LlmSection, McpConfig, check_token_header, connector_secret_key, origin_of,
@@ -189,15 +189,15 @@ impl Engine {
         let url = update.url.trim().to_owned();
         // An earlier entry may name its secret itself (set with `config-set`). A kept token keeps that name.
         let earlier = match config.connectors.get(name) {
-            // A connector that runs as a command on the server is set by its operator.
-            // This call must not replace it with an address the caller chose.
+            // A name keeps its kind. The owner removes the connector to make another kind of it,
+            // so a save of an address never turns a command into something else by accident.
             Some(value) => match connector_section(name, value)? {
                 ConnectorSection {
                     mcp: McpConfig::Stdio { .. },
                     ..
                 } => {
                     return Err(ApiError::Invalid(format!(
-                        "connector `{name}` runs as a command on the server and cannot be changed here"
+                        "connector `{name}` runs a command on the server. Remove it first to give the name an address"
                     )));
                 }
                 section => section.token_secret,
@@ -236,6 +236,60 @@ impl Engine {
         self.commit_connections(profile, &store, &loaded, &config)?;
         let detail = json!({"target": name, "token": Self::token_note(&update.token)});
         self.audit(&store, "connection_changed", None, detail)
+    }
+
+    /// Saves a connector that the server starts as a command. The backends refuse it unless the
+    /// server operator allows such connectors. That is the rule for the settings file too.
+    pub(crate) fn save_command_connector(
+        &self,
+        profile: &str,
+        name: &str,
+        update: CommandConnectorUpdate,
+    ) -> ApiResult<()> {
+        if !valid_connector_name(name) {
+            return Err(ApiError::Invalid(format!(
+                "the connector name `{name}` is invalid: use 1 to 32 of a-z, 0-9 and `-`"
+            )));
+        }
+        let store = self.store(profile)?;
+        if let Expected::Value(expected) = &update.expected
+            && *expected != self.read_connections(profile)?.connectors.get(name).cloned()
+        {
+            return Err(ApiError::Conflict(format!(
+                "connector `{name}` is not the one this form loaded"
+            )));
+        }
+        let (loaded, mut config) = Self::config_with_text(&store)?;
+        // A name keeps its kind, as in `save_connector`.
+        if let Some(value) = config.connectors.get(name)
+            && matches!(connector_section(name, value)?.mcp, McpConfig::Http { .. })
+        {
+            return Err(ApiError::Invalid(format!(
+                "connector `{name}` has an address. Remove it first to give the name a command"
+            )));
+        }
+        let section = ConnectorSection {
+            mcp: McpConfig::Stdio {
+                command: update.command,
+                args: update.args,
+                env: update.env,
+            },
+            token_secret: None,
+            token_header: None,
+        };
+        config
+            .connectors
+            .insert(name.to_owned(), serde_json::to_value(&section).map_err(internal)?);
+        self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
+        Self::check_config(&config)?;
+        self.commit_connections(profile, &store, &loaded, &config)?;
+        // The arguments and the variables can hold secrets. The log names only the connector.
+        self.audit(
+            &store,
+            "connection_changed",
+            None,
+            json!({"target": name, "kind": "command"}),
+        )
     }
 
     pub(crate) fn delete_connector(&self, profile: &str, name: &str) -> ApiResult<()> {

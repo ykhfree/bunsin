@@ -248,6 +248,22 @@ pub struct ConnectorUpdate {
     pub expected: Expected<Option<ConnectorConnection>>,
 }
 
+/// A connector that the server starts as a command (the stdio transport).
+/// The server stores it only if its operator allows such connectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandConnectorUpdate {
+    /// The absolute path of the program.
+    pub command: std::path::PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables of the program. They are stored as plain text.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// The connector the caller loaded, or `None` for a new connector.
+    #[serde(default)]
+    pub expected: Expected<Option<ConnectorConnection>>,
+}
+
 /// What one test request to the LLM endpoint did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmTest {
@@ -356,6 +372,13 @@ pub trait EngineApi: Send + Sync {
         profile: &'a str,
         name: &'a str,
         update: ConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>>;
+    /// Saves a connector that the server starts as a command.
+    fn set_command_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: CommandConnectorUpdate,
     ) -> BoxFuture<'a, ApiResult<()>>;
     /// Removes a connector and its stored token.
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;

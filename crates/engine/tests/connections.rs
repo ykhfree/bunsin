@@ -450,7 +450,7 @@ async fn a_connector_that_runs_as_a_command_is_not_replaced_by_an_address() {
         .set_connector("kim", "wiki", connector("https://attacker.example/mcp", set("t")))
         .await;
     assert!(
-        matches!(result, Err(ApiError::Invalid(ref m)) if m.contains("runs as a command")),
+        matches!(result, Err(ApiError::Invalid(ref m)) if m.contains("runs a command on the server")),
         "{result:?}"
     );
     assert_eq!(

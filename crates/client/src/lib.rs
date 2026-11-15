@@ -2,8 +2,9 @@
 
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate, Outcome, PollPreview,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
+    Outcome, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
@@ -290,6 +291,18 @@ impl EngineApi for RemoteEngine {
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connections/connectors/{name}"));
+            self.send_only(Method::PUT, &path, Some(&update)).await
+        })
+    }
+
+    fn set_command_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: CommandConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connections/connectors/{name}/command"));
             self.send_only(Method::PUT, &path, Some(&update)).await
         })
     }

@@ -196,7 +196,21 @@ impl RealBackends {
                      The server operator must start the server with --allow-stdio-connectors"
                 ));
             }
-            McpConfig::Stdio { .. } => {}
+            // Every way to store settings and every start of the command passes these checks.
+            McpConfig::Stdio { command, env, .. } => {
+                if !command.is_absolute() {
+                    return Err(format!(
+                        "connector `{name}`: the command must be an absolute path, got `{}`",
+                        command.display()
+                    ));
+                }
+                if let Some(bad) = env.keys().find(|key| !valid_env_name(key)) {
+                    return Err(format!(
+                        "connector `{name}`: `{bad}` is not a name of an environment variable: \
+                         use a-z, A-Z, 0-9 and `_`, and do not start with a digit"
+                    ));
+                }
+            }
             McpConfig::Http { url } => self
                 .upstream
                 .check(&format!("the address of connector `{name}`"), url)?,
@@ -294,6 +308,13 @@ impl Backends for RealBackends {
         }
         Ok(())
     }
+}
+
+/// True if `name` can name an environment variable: a letter or `_`, then letters, digits and `_`.
+fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 #[cfg(test)]
@@ -468,7 +489,11 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert!(error.starts_with("connector `slack` cannot connect"), "{error}");
+        // A relative command is refused before anything starts. The error names the connector.
+        assert!(
+            error.starts_with("connector `slack`: the command must be an absolute path"),
+            "{error}"
+        );
 
         // The operator allows this host, so the request is tried and fails at connect.
         let b = RealBackends::new(

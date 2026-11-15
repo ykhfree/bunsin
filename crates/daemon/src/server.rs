@@ -12,8 +12,8 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
-    ApiError, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome, PollPreview, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
+    PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::PrivacyConfig;
@@ -236,6 +236,16 @@ async fn put_llm(
     Ok(Json(engine.set_llm(&profile, update).await?))
 }
 
+async fn put_command_connector(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, name)): Path<(String, String)>,
+    Json(update): Json<CommandConnectorUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_command_connector(&profile, &name, update).await?))
+}
+
 async fn put_connector(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -328,6 +338,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             &profile("connections/connectors/{name}"),
             put(put_connector).delete(delete_connector),
+        )
+        .route(
+            &profile("connections/connectors/{name}/command"),
+            put(put_command_connector),
         )
         .with_state(engine)
 }
