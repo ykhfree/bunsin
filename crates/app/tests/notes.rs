@@ -682,7 +682,54 @@ fn a_page_of_the_agent_shows_its_sources_and_a_waiting_change(cx: &mut TestAppCo
         );
         // The page itself did not change.
         assert_eq!(body(window), "The team deploys on Fridays.");
+        assert_eq!(
+            label(window, "note-agent-page"),
+            "If you save a change, the page counts as written by you, and its list of sources is removed."
+        );
     });
+
+    // Save without a change stores nothing: the page stays the agent's, with its sources.
+    let before = commands(cx, &shell);
+    on_screen(cx, window, |window, cx| window.click("note-save", cx));
+    let_refreshes_pass(cx);
+    assert_eq!(commands(cx, &shell), before);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "note-message"), "Nothing changed, so nothing was saved.");
+    });
+    let page = rt.block_on(rig.engine.wiki_page("kim", "deploy-schedule")).unwrap();
+    assert_eq!(
+        (page.revision, page.author, page.sources.len()),
+        (1, WikiAuthor::Agent, 2)
+    );
+
+    // A saved change makes the page the owner's. The waiting change of the agent can then not be approved.
+    let before = commands(cx, &shell);
+    on_screen(cx, window, |window, cx| {
+        retype_body(window, cx, "The team deploys on Mondays.");
+        window.click("note-save", cx);
+    });
+    let result = wait_for_result(cx, &shell, before);
+    assert!(matches!(result, NoteResult::Saved { result: Ok(()), .. }), "{result:?}");
+    let page = rt.block_on(rig.engine.wiki_page("kim", "deploy-schedule")).unwrap();
+    assert_eq!(
+        (page.revision, page.author, page.sources.len()),
+        (2, WikiAuthor::Owner, 0)
+    );
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("note-agent-page").is_none())
+    });
+    let waiting = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    let waiting = waiting
+        .iter()
+        .find(|i| i.state.as_str() == "pending" && matches!(i.body, bunsin_core::records::InboxBody::WikiChange { .. }))
+        .unwrap()
+        .id;
+    let refused = rt.block_on(rig.engine.approve("kim", waiting, None));
+    assert!(matches!(refused, Err(ApiError::NotAllowed(_))), "{refused:?}");
+    assert_eq!(
+        rt.block_on(page_body(&rig, "deploy-schedule")),
+        "The team deploys on Mondays."
+    );
 }
 
 #[gpui_kit::test]
@@ -730,4 +777,74 @@ fn a_late_state_does_not_replace_a_new_page(cx: &mut TestAppContext) {
         assert_eq!(body(window), "A new text.");
     });
     drop(shell);
+}
+
+#[gpui_kit::test]
+fn a_save_is_not_forgotten_if_the_reload_after_it_fails(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let page = rt.block_on(rig.engine.wiki_page("kim", "team")).unwrap();
+    // The test is the bridge: it sends the states, and it answers no command.
+    let (commands, _received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(gpui_kit::init);
+    let (window, _shell) = cx.update(|cx| {
+        gpui_kit::open_window(Default::default(), cx, |window, cx| {
+            cx.new(|cx| Shell::new(receiver, commands, window, cx))
+        })
+        .unwrap()
+    });
+    let open = |page| UiState {
+        selected: Some("kim".into()),
+        notes: Some(vec![]),
+        open_note: Some(OpenNote {
+            profile: "kim".into(),
+            slug: "team".into(),
+            page: Some(page),
+        }),
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(open(page.clone())).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| window.click("tab-notes", cx));
+    on_screen(cx, window, |window, cx| {
+        retype_body(window, cx, "My edit.");
+        window.click("note-save", cx);
+    });
+    // The server stored the text, but the reload after the save got no answer.
+    let saved = Some(NoteResult::Saved {
+        slug: "team".into(),
+        result: Ok(()),
+    });
+    let mut stored = page.clone();
+    stored.text.body = "My edit.".into();
+    stored.revision = 2;
+    states
+        .send(UiState {
+            note_result: saved.clone(),
+            note_commands: 1,
+            connected: false,
+            ..open(page)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    // The next refresh has an answer. It still carries the result of the save.
+    states
+        .send(UiState {
+            note_result: saved,
+            note_commands: 1,
+            ..open(stored)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "note-heading"),
+            "Page `team` · revision 2 · written by you"
+        );
+        assert_eq!(label(window, "note-changes"), "");
+        assert_eq!(label(window, "note-result"), "Saved");
+    });
 }

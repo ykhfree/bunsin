@@ -19,6 +19,8 @@ const UNSAVED: &str = "This page has changes that are not saved.";
 const GONE: &str = "The server has no such page any more. Save anyway stores it again.";
 const PENDING: &str = "A change by the agent for this page waits in the inbox. \
     If you save here, that change can no longer be approved.";
+const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
+const AGENT_PAGE: &str = "If you save a change, the page counts as written by you, and its list of sources is removed.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
 
 /// What the fields hold.
@@ -135,16 +137,17 @@ impl NotesForm {
     /// if the user opened it, if a save just succeeded, or if the fields still equal the loaded
     /// page and the server has a newer one.
     pub fn receive(&mut self, state: &UiState, window: &mut Window, cx: &mut App) {
-        let new = state.note_commands != self.commands_seen;
-        self.commands_seen = state.note_commands;
         if self.profile != state.selected {
             self.profile = state.selected.clone();
             self.close(window, cx);
         }
         // Without an answer from the server, the state says nothing about the pages.
+        // The result of a command waits for the next state that has an answer.
         if !state.connected {
             return;
         }
+        let new = state.note_commands != self.commands_seen;
+        self.commands_seen = state.note_commands;
         let mut saved = false;
         match (&state.note_result, new) {
             (Some(NoteResult::Saved { slug, result }), true) if self.edits(slug, cx) => match result {
@@ -240,6 +243,13 @@ impl Shell {
         let (Some(profile), Some(draft)) = (form.profile.clone(), &form.draft) else {
             return;
         };
+        // A save without a change would still store a new revision in the owner's name.
+        if let Draft::Page { gone: false, .. } = draft
+            && !form.changed(cx)
+        {
+            form.message = Some(UNCHANGED.to_owned());
+            return;
+        }
         let (slug, expected_revision) = match draft {
             Draft::New => (form.slug.read(cx).value().trim().to_owned(), Some(0)),
             Draft::Page { base, .. } => (base.slug.clone(), (!anyway).then_some(base.revision)),
@@ -444,6 +454,10 @@ impl Shell {
             .child(labelled("note-result", result))
             .children(page.is_some_and(|(_, gone)| gone).then(|| labelled("note-gone", GONE)))
             .children(pending.then(|| labelled("note-pending", PENDING)))
+            .children(
+                page.is_some_and(|(base, _)| base.author == WikiAuthor::Agent)
+                    .then(|| labelled("note-agent-page", AGENT_PAGE)),
+            )
             .children(form.conflict.then(|| {
                 Self::conflict_warning(
                     "note",
