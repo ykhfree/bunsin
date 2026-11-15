@@ -99,6 +99,7 @@ async fn fixture() -> (common::Rig, UiState) {
     let connector = ConnectorUpdate {
         url: "https://mcp.example.com/slack".into(),
         token: TokenChange::Set("fixture-token".into()),
+        token_header: None,
         expected: Expected::Unchecked,
     };
     rig.engine.set_connector("kim", "slack", connector).await.unwrap();

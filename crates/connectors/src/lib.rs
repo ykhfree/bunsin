@@ -14,6 +14,21 @@ use std::fmt;
 
 pub use bunsin_core::settings::McpConfig;
 
+/// The token of an HTTP connector and the header that carries it.
+#[derive(Clone, Copy)]
+pub struct TokenAuth<'a> {
+    pub token: &'a str,
+    /// `None`: `Authorization: Bearer <token>`. `Some(name)`: `<name>: <token>`.
+    pub header: Option<&'a str>,
+}
+
+impl<'a> TokenAuth<'a> {
+    /// The token as `Authorization: Bearer <token>`.
+    pub fn bearer(token: &'a str) -> Self {
+        Self { token, header: None }
+    }
+}
+
 /// A connected MCP client session.
 pub struct McpConnector {
     name: String,
@@ -23,22 +38,40 @@ pub struct McpConnector {
 
 impl McpConnector {
     /// Starts the transport and does the MCP handshake.
-    /// `token` is the bearer token for the HTTP transport. The stdio transport rejects a token.
+    /// `token` is the token for the HTTP transport. The stdio transport rejects a token.
     pub async fn connect(
         name: impl Into<String>,
         config: McpConfig,
-        token: Option<&str>,
+        token: Option<TokenAuth<'_>>,
     ) -> Result<Self, ConnectorError> {
         let client = match &config {
             McpConfig::Http { url } => {
                 let mut transport = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-                if let Some(token) = token {
+                let mut headers = reqwest::header::HeaderMap::new();
+                match token {
+                    None => {}
                     // rmcp sends this value as `Authorization: Bearer <token>`.
-                    transport = transport.auth_header(token);
+                    Some(TokenAuth { token, header: None }) => transport = transport.auth_header(token),
+                    // The named header carries the token as it is, on every request of this client.
+                    Some(TokenAuth {
+                        token,
+                        header: Some(name),
+                    }) => {
+                        // The errors name the header. They never hold the token.
+                        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                            ConnectorError::Transport(format!("`{name}` is not a valid HTTP header name"))
+                        })?;
+                        let mut value = reqwest::header::HeaderValue::from_str(token).map_err(|_| {
+                            ConnectorError::Transport("the token is not a valid HTTP header value".into())
+                        })?;
+                        value.set_sensitive(true);
+                        headers.insert(name, value);
+                    }
                 }
-                // A redirect could carry the bearer token to another host, and could reach a host
+                // A redirect could carry the token to another host, and could reach a host
                 // that the server's address rules refused. The client therefore follows none.
                 let http = reqwest::Client::builder()
+                    .default_headers(headers)
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))?;
@@ -48,7 +81,7 @@ impl McpConnector {
             McpConfig::Stdio { command, args, env } => {
                 if token.is_some() {
                     return Err(ConnectorError::Transport(
-                        "a bearer token applies only to the HTTP transport".into(),
+                        "a token applies only to the HTTP transport".into(),
                     ));
                 }
                 if !command.is_absolute() {

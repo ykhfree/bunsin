@@ -13,24 +13,28 @@ const TOKEN: &str = "xoxb-stored-token-93ac";
 struct Recorder {
     url: String,
     seen: Arc<Mutex<Vec<Option<String>>>>,
+    /// The `X-API-Key` header of every request.
+    keys: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl Recorder {
     async fn start() -> Self {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let record = |State(seen): State<Arc<Mutex<Vec<Option<String>>>>>, headers: HeaderMap| async move {
-            let auth = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            seen.lock().unwrap().push(auth);
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        type Seen = Arc<Mutex<Vec<Option<String>>>>;
+        let record = |State((seen, keys)): State<(Seen, Seen)>, headers: HeaderMap| async move {
+            let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+            seen.lock().unwrap().push(header("authorization"));
+            keys.lock().unwrap().push(header("x-api-key"));
             StatusCode::UNAUTHORIZED
         };
-        let app = axum::Router::new().fallback(record).with_state(seen.clone());
+        let app = axum::Router::new()
+            .fallback(record)
+            .with_state((seen.clone(), keys.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
-        Self { url, seen }
+        Self { url, seen, keys }
     }
 
     fn got_token(&self) -> bool {
@@ -61,6 +65,7 @@ fn update(url: &str, token: TokenChange) -> ConnectorUpdate {
     ConnectorUpdate {
         url: url.to_owned(),
         token,
+        token_header: None,
         expected: bunsin_api::Expected::Unchecked,
     }
 }
@@ -145,4 +150,92 @@ async fn a_connector_without_a_token_sends_no_authorization_header() {
     let _ = engine.connector_tools("kim", "wiki").await;
     assert!(server.requests() > 0);
     assert!(server.seen.lock().unwrap().iter().all(Option::is_none));
+}
+
+#[tokio::test]
+async fn a_named_header_carries_the_token_and_authorization_is_not_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path()).await;
+    let server = Recorder::start().await;
+    let with_key = ConnectorUpdate {
+        token_header: Some("X-API-Key".into()),
+        ..update(&server.url, TokenChange::Set(TOKEN.into()))
+    };
+    engine.set_connector("kim", "wiki", with_key).await.unwrap();
+    let shown = engine.connections("kim").await.unwrap().connectors["wiki"].clone();
+    assert_eq!(shown.token_header.as_deref(), Some("X-API-Key"));
+
+    let error = engine.connector_tools("kim", "wiki").await.unwrap_err();
+    assert!(!error.to_string().contains(TOKEN), "{error}");
+    assert!(server.requests() > 0);
+    // The token is sent as it is: no `Bearer` before it, and not in `Authorization`.
+    assert!(
+        server
+            .keys
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|key| key.as_deref() == Some(TOKEN))
+    );
+    assert!(server.seen.lock().unwrap().iter().all(Option::is_none));
+
+    // Without a header name the same token goes back to `Authorization: Bearer`.
+    let bearer = update(&server.url, TokenChange::Keep);
+    engine.set_connector("kim", "wiki", bearer).await.unwrap();
+    let before = server.requests();
+    let _ = engine.connector_tools("kim", "wiki").await;
+    let auth = server.seen.lock().unwrap()[before..].to_vec();
+    assert!(
+        !auth.is_empty()
+            && auth
+                .iter()
+                .all(|a| a.as_deref() == Some(format!("Bearer {TOKEN}").as_str()))
+    );
+    assert!(server.keys.lock().unwrap()[before..].iter().all(Option::is_none));
+}
+
+#[tokio::test]
+async fn a_header_name_without_a_token_sends_no_token_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path()).await;
+    let server = Recorder::start().await;
+    let no_token = ConnectorUpdate {
+        token_header: Some("X-API-Key".into()),
+        ..update(&server.url, TokenChange::Keep)
+    };
+    engine.set_connector("kim", "wiki", no_token).await.unwrap();
+    let _ = engine.connector_tools("kim", "wiki").await;
+    assert!(server.requests() > 0);
+    assert!(server.keys.lock().unwrap().iter().all(Option::is_none));
+    assert!(server.seen.lock().unwrap().iter().all(Option::is_none));
+}
+
+#[tokio::test]
+async fn a_header_that_the_connection_sets_itself_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path()).await;
+    let server = Recorder::start().await;
+    for name in [
+        "Host",
+        "content-type",
+        "Mcp-Session-Id",
+        "X API Key",
+        "X-Key:evil",
+        "X-Key\r\nHost",
+    ] {
+        let bad = ConnectorUpdate {
+            token_header: Some(name.into()),
+            ..update(&server.url, TokenChange::Set(TOKEN.into()))
+        };
+        let error = engine.set_connector("kim", "wiki", bad).await.unwrap_err();
+        assert!(matches!(error, ApiError::Invalid(_)), "{name}: {error:?}");
+    }
+    // Nothing was stored for the refused connector, and nothing was sent.
+    assert!(engine.connections("kim").await.unwrap().connectors.is_empty());
+    assert_eq!(server.requests(), 0);
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    assert!(store.secret_keys().unwrap().is_empty());
 }

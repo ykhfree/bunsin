@@ -244,6 +244,10 @@ enum Command {
         name: String,
         #[arg(long)]
         url: String,
+        /// The header that carries the token as it is, for example X-API-Key.
+        /// Without it, the token goes as `Authorization: Bearer <token>`.
+        #[arg(long)]
+        token_header: Option<String>,
         #[command(flatten)]
         token: TokenArgs,
     },
@@ -602,7 +606,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     bunsin_core::settings::McpConfig::Http { url } => url.clone(),
                     bunsin_core::settings::McpConfig::Stdio { command, .. } => format!("command {}", command.display()),
                 };
-                println!("{name}\t{address}\t{}", source(connector.token));
+                let header = match &connector.token_header {
+                    Some(header) => format!("\tin the header {header}"),
+                    None => String::new(),
+                };
+                println!("{name}\t{address}\t{}{header}", source(connector.token));
             }
         }
         Command::LlmSet {
@@ -631,11 +639,13 @@ async fn run(cli: Cli) -> Result<(), String> {
             profile,
             name,
             url,
+            token_header,
             token,
         } => {
             let update = ConnectorUpdate {
                 url,
                 token: token.change()?,
+                token_header,
                 expected: bunsin_api::Expected::Unchecked,
             };
             connect(&remote)?

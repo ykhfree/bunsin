@@ -264,3 +264,26 @@ fn the_server_refuses_a_public_address_without_tls_and_a_second_instance() {
     let second = operator(dir.path(), &["serve", "--listen", "127.0.0.1:0"]);
     assert!(stderr_of_failure(second, "second serve").contains("another engine"));
 }
+
+#[test]
+fn a_connector_takes_a_header_for_its_token_and_needs_no_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let set = ["connector-set", "kim", "wiki", "--url", "https://mcp.example.com/wiki"];
+    // No token and no header: the connector is saved without a token.
+    stdout_of(server.run(&kim, &set), "connector-set");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        "llm\tnot set\nwiki\thttps://mcp.example.com/wiki\tno token\n"
+    );
+    let with_header = [&set[..], &["--token-header", "X-API-Key"]].concat();
+    stdout_of(server.run(&kim, &with_header), "connector-set with a header");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        "llm\tnot set\nwiki\thttps://mcp.example.com/wiki\tno token\tin the header X-API-Key\n"
+    );
+    let reserved = [&set[..], &["--token-header", "Content-Type"]].concat();
+    let error = stderr_of_failure(server.run(&kim, &reserved), "a reserved header");
+    assert!(error.contains("cannot carry a token"), "{error}");
+}

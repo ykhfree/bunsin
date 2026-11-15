@@ -210,6 +210,9 @@ pub struct LlmConnection {
 pub struct ConnectorConnection {
     pub mcp: McpConfig,
     pub token: TokenSource,
+    /// The header that carries the token as it is. `None`: `Authorization: Bearer <token>`.
+    #[serde(default)]
+    pub token_header: Option<String>,
 }
 
 /// The LLM endpoint and the connectors of a profile, without any token.
@@ -236,6 +239,10 @@ pub struct LlmUpdate {
 pub struct ConnectorUpdate {
     pub url: String,
     pub token: TokenChange,
+    /// The header that carries the token as it is, for example `X-API-Key`.
+    /// `None`: the token goes as `Authorization: Bearer <token>`.
+    #[serde(default)]
+    pub token_header: Option<String>,
     /// The connector the caller loaded, or `None` for a new connector.
     #[serde(default)]
     pub expected: Expected<Option<ConnectorConnection>>,

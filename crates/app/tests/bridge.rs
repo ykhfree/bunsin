@@ -346,6 +346,7 @@ fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
     ConnectorUpdate {
         url: url.into(),
         token,
+        token_header: None,
         expected: bunsin_api::Expected::Unchecked,
     }
 }
@@ -735,6 +736,7 @@ async fn a_connector_save_against_a_changed_server_is_a_conflict_not_an_error() 
             "kim",
             "jira",
             ConnectorUpdate {
+                token_header: None,
                 expected: Expected::Value(None),
                 ..connector("https://first.example/jira", TokenChange::Keep)
             },
@@ -745,6 +747,7 @@ async fn a_connector_save_against_a_changed_server_is_a_conflict_not_an_error() 
         profile: "kim".into(),
         name: "jira".into(),
         update: ConnectorUpdate {
+            token_header: None,
             expected: Expected::Value(None),
             ..connector("https://second.example/jira", TokenChange::Keep)
         },

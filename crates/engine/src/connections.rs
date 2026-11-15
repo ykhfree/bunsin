@@ -11,7 +11,8 @@ use bunsin_api::{
     ProfileConfig, TokenChange, TokenSource,
 };
 use bunsin_core::settings::{
-    ConnectorSection, LLM_SECRET_KEY, LlmSection, McpConfig, connector_secret_key, origin_of, valid_connector_name,
+    ConnectorSection, LLM_SECRET_KEY, LlmSection, McpConfig, check_token_header, connector_secret_key, origin_of,
+    valid_connector_name,
 };
 use bunsin_store::ProfileStore;
 use serde_json::{Value, json};
@@ -65,6 +66,7 @@ impl Engine {
                 ConnectorConnection {
                     mcp: section.mcp,
                     token,
+                    token_header: section.token_header,
                 },
             );
         }
@@ -211,9 +213,19 @@ impl Engine {
             TokenChange::Set(_) => true,
             TokenChange::Clear => false,
         };
+        let token_header = update
+            .token_header
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        if let Some(name) = &token_header {
+            check_token_header(name).map_err(ApiError::Invalid)?;
+        }
         let section = ConnectorSection {
             mcp: McpConfig::Http { url: url.clone() },
             token_secret: will_have_token.then(|| key.clone()),
+            token_header,
         };
         config
             .connectors

@@ -27,6 +27,7 @@ fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
     ConnectorUpdate {
         url: url.into(),
         token,
+        token_header: None,
         expected: bunsin_api::Expected::Unchecked,
     }
 }

@@ -68,8 +68,48 @@ pub fn default_timeout_secs() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct ConnectorSection {
     pub mcp: McpConfig,
-    /// The key of the secret that holds the bearer token, if the MCP server needs one.
+    /// The key of the secret that holds the token, if the MCP server needs one.
     pub token_secret: Option<String>,
+    /// The HTTP header that carries the token as it is, for example `X-API-Key`.
+    /// `None`: the token goes as `Authorization: Bearer <token>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_header: Option<String>,
+}
+
+/// Headers that the HTTP client or the MCP transport sets itself. A token must not replace them.
+const RESERVED_HEADERS: [&str; 12] = [
+    "host",
+    "content-length",
+    "content-type",
+    "accept",
+    "connection",
+    "transfer-encoding",
+    "upgrade",
+    "te",
+    "trailer",
+    "mcp-session-id",
+    "mcp-protocol-version",
+    "last-event-id",
+];
+
+/// Checks the name of a header that carries a connector's token:
+/// 1 to 64 of a-z, A-Z, 0-9, `-` and `_`, and not a header that the transport sets.
+pub fn check_token_header(name: &str) -> Result<(), String> {
+    let valid = (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !valid {
+        return Err(format!(
+            "the header name `{name}` is invalid: use 1 to 64 of a-z, A-Z, 0-9, `-` and `_`"
+        ));
+    }
+    if RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "the header `{name}` is set by the connection itself and cannot carry a token"
+        ));
+    }
+    Ok(())
 }
 
 /// The secret key of the LLM token when the server chooses the name.

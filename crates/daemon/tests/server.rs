@@ -280,6 +280,7 @@ async fn a_token_reaches_only_its_own_profile() {
         let connector = ConnectorUpdate {
             url: "https://attacker.example/mcp".into(),
             token: TokenChange::Keep,
+            token_header: None,
             expected: bunsin_api::Expected::Unchecked,
         };
         refused(kim.set_connector(other, "slack", connector).await);
@@ -602,6 +603,7 @@ async fn connections_and_their_tokens_are_saved_through_the_server_and_never_com
     let jira = ConnectorUpdate {
         url: "https://mcp.example.com/jira".into(),
         token: TokenChange::Set("jira-token".into()),
+        token_header: None,
         expected: bunsin_api::Expected::Unchecked,
     };
     kim.set_connector("kim", "jira", jira).await.unwrap();
@@ -621,6 +623,7 @@ async fn connections_and_their_tokens_are_saved_through_the_server_and_never_com
     let internal = ConnectorUpdate {
         url: "http://169.254.169.254/x".into(),
         token: TokenChange::Set("t".into()),
+        token_header: None,
         expected: bunsin_api::Expected::Unchecked,
     };
     let error = kim.set_connector("kim", "meta", internal).await.unwrap_err();

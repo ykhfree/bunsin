@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::{Next, from_fn};
 use axum::response::IntoResponse;
-use bunsin_connectors::{McpConfig, McpConnector};
+use bunsin_connectors::{McpConfig, McpConnector, TokenAuth};
 use bunsin_core::ports::{Connector, ConnectorError};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
@@ -199,7 +199,7 @@ async fn bearer_token_is_sent_and_kept_out_of_debug_and_errors() {
     let url = serve_http(TestServer::default(), Some(TOKEN)).await;
     let config = McpConfig::Http { url: url.clone() };
 
-    let connector = McpConnector::connect("jira", config.clone(), Some(TOKEN))
+    let connector = McpConnector::connect("jira", config.clone(), Some(TokenAuth::bearer(TOKEN)))
         .await
         .expect("the server accepts the right token");
     // Every request carries the token, not only the handshake.
@@ -209,7 +209,7 @@ async fn bearer_token_is_sent_and_kept_out_of_debug_and_errors() {
     assert!(!debug.contains(TOKEN), "Debug leaks the token: {debug}");
 
     let wrong = "wrong-token-77e1";
-    let error = connect_error(McpConnector::connect("jira", config.clone(), Some(wrong)).await);
+    let error = connect_error(McpConnector::connect("jira", config.clone(), Some(TokenAuth::bearer(wrong))).await);
     assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
     for text in [error.to_string(), format!("{error:?}")] {
         assert!(!text.contains(wrong), "the error leaks the token: {text}");
@@ -231,7 +231,7 @@ async fn connecting_to_a_dead_address_is_a_transport_error() {
 
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        McpConnector::connect("confluence", config, Some(TOKEN)),
+        McpConnector::connect("confluence", config, Some(TokenAuth::bearer(TOKEN))),
     )
     .await
     .expect("connect gives up within 10 s");
@@ -284,7 +284,7 @@ async fn stdio_rejects_a_token() {
         env: BTreeMap::new(),
     };
 
-    let error = connect_error(McpConnector::connect("local", config, Some(TOKEN)).await);
+    let error = connect_error(McpConnector::connect("local", config, Some(TokenAuth::bearer(TOKEN))).await);
 
     assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
     assert!(!error.to_string().contains(TOKEN));
@@ -360,7 +360,7 @@ async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host(
 
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        McpConnector::connect("slack", McpConfig::Http { url }, Some(TOKEN)),
+        McpConnector::connect("slack", McpConfig::Http { url }, Some(TokenAuth::bearer(TOKEN))),
     )
     .await
     .expect("connect returns");

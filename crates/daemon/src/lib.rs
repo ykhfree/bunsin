@@ -10,7 +10,7 @@
 pub mod server;
 
 use bunsin_api::ProfileConfig;
-use bunsin_connectors::McpConnector;
+use bunsin_connectors::{McpConnector, TokenAuth};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::settings::{ConnectorSection, LlmSection, McpConfig, origin_of};
 use bunsin_engine::{Backends, ProfileSecrets, Runtime};
@@ -231,7 +231,11 @@ impl RealBackends {
             .map(|key| self.token(profile, key, address, secrets))
             .transpose()?;
         // A server that starts but never answers must not block the profile forever.
-        let connect = McpConnector::connect(name, section.mcp, token.as_deref());
+        let auth = token.as_deref().map(|token| TokenAuth {
+            token,
+            header: section.token_header.as_deref(),
+        });
+        let connect = McpConnector::connect(name, section.mcp, auth);
         match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
             Ok(Ok(connector)) => Ok(connector),
             Ok(Err(error)) => Err(format!("connector `{name}` cannot connect: {error}")),

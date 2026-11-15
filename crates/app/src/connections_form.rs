@@ -45,6 +45,8 @@ pub struct ConnectionsForm {
     name: Entity<InputState>,
     address: Entity<InputState>,
     token: Entity<InputState>,
+    /// The header that carries the connector's token. Empty: `Authorization: Bearer`.
+    token_header: Entity<InputState>,
     /// The window's own message about the last LLM save that it did not send.
     llm_message: Option<&'static str>,
     /// The window's own message about the last connector save that it did not send.
@@ -144,6 +146,7 @@ impl ConnectionsForm {
             name: input("Name, for example jira", window, cx),
             address: input("https://mcp.example.com/mcp", window, cx),
             token: token(window, cx),
+            token_header: input("Authorization: Bearer", window, cx),
             llm_message: None,
             connector_message: None,
             llm_base: None,
@@ -253,6 +256,8 @@ impl ConnectionsForm {
         set(&self.name, if url.is_some() { name } else { "" }, window, cx);
         set(&self.address, url.unwrap_or_default(), window, cx);
         set(&self.token, "", window, cx);
+        let header = connector.and_then(|c| c.token_header.as_deref()).unwrap_or_default();
+        set(&self.token_header, header, window, cx);
         self.connector_base = connector
             .filter(|_| url.is_some())
             .map(|c| (name.to_owned(), c.clone()));
@@ -266,6 +271,7 @@ impl ConnectionsForm {
             text(&self.name, cx) == *name
                 && http_url(base) == Some(text(&self.address, cx).as_str())
                 && text(&self.token, cx).is_empty()
+                && base.token_header.as_deref().unwrap_or_default() == text(&self.token_header, cx).trim()
         })
     }
 }
@@ -349,6 +355,7 @@ impl Shell {
         let update = ConnectorUpdate {
             url: text(&form.address, cx),
             token,
+            token_header: Some(text(&form.token_header, cx).trim().to_owned()).filter(|name| !name.is_empty()),
             expected,
         };
         self.send(UiCommand::SaveConnector { profile, name, update });
@@ -407,7 +414,11 @@ impl Shell {
                         "token",
                         token_text(connector.token),
                         quiet(token_text(connector.token), cx),
-                    ));
+                    ))
+                    .children(connector.token_header.as_ref().map(|header| {
+                        let text = format!("sent in the header {header}");
+                        labelled_as("token-header", text.clone(), quiet(text, cx))
+                    }));
                 let (edit_name, edited) = (name.to_owned(), connector.clone());
                 let remove = UiCommand::RemoveConnector {
                     profile: profile.to_owned(),
@@ -609,10 +620,17 @@ impl Shell {
                 cx,
             ))
             .child(field(
-                "Token",
+                "Token. Leave it empty if the server needs none.",
                 Input::new(&form.token)
                     .id("connector-token")
                     .aria_label("Connector token"),
+                cx,
+            ))
+            .child(field(
+                "Header that carries the token. Leave it empty for Authorization: Bearer.",
+                Input::new(&form.token_header)
+                    .id("connector-token-header")
+                    .aria_label("Header for the token"),
                 cx,
             ))
             .child(

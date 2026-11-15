@@ -29,6 +29,7 @@ fn connector(url: &str, expected: Expected<Option<bunsin_api::ConnectorConnectio
     ConnectorUpdate {
         url: url.into(),
         token: TokenChange::Keep,
+        token_header: None,
         expected,
     }
 }

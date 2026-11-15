@@ -79,6 +79,7 @@ fn connector(url: &str, token: TokenChange) -> ConnectorUpdate {
     ConnectorUpdate {
         url: url.into(),
         token,
+        token_header: None,
         expected: bunsin_api::Expected::Unchecked,
     }
 }
@@ -691,6 +692,7 @@ fn a_stdio_connector_is_listed_read_only(cx: &mut TestAppContext) {
     let section = ConnectorSection {
         mcp: stdio.clone(),
         token_secret: None,
+        token_header: None,
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config
@@ -858,6 +860,7 @@ fn a_second_new_connector_with_the_same_name_warns_and_load_shows_the_first(cx: 
     });
     // Another client adds a new connector with the same name first.
     let first = ConnectorUpdate {
+        token_header: None,
         expected: Expected::Value(None),
         ..connector("https://mcp.example/wiki/first", TokenChange::Keep)
     };
@@ -992,4 +995,73 @@ fn another_format_empties_the_claude_defaults_and_keeps_typed_text(cx: &mut Test
         (saved.wire, saved.base_url.as_str(), saved.model.as_str()),
         (Wire::OpenAiResponses, "https://gateway.example/v1", "my-model")
     );
+}
+
+#[gpui_kit::test]
+fn the_header_of_a_token_is_saved_shown_and_kept_by_an_edit(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "wiki");
+        fill(window, cx, "connector-address", "https://mcp.example/wiki");
+        fill(window, cx, "connector-token", SLACK_TOKEN);
+        fill(window, cx, "connector-token-header", "X-API-Key");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let wiki = || rt.block_on(rig.engine.connections("kim")).unwrap().connectors["wiki"].clone();
+    assert_eq!(wiki().token_header.as_deref(), Some("X-API-Key"));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            row(window, "wiki", "token-header").as_deref(),
+            Some("sent in the header X-API-Key")
+        );
+        // A successful save empties the header field too.
+        assert_eq!(value(window, "connector-token-header"), "");
+        click_row(window, cx, "wiki", "edit");
+    });
+    // Edit shows the header. A save that changes only the address keeps it.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(value(window, "connector-token-header"), "X-API-Key");
+        fill(window, cx, "connector-address", "https://mcp.example/wiki/v2");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    assert_eq!(wiki().token_header.as_deref(), Some("X-API-Key"));
+    assert_eq!(
+        wiki().mcp,
+        McpConfig::Http {
+            url: "https://mcp.example/wiki/v2".into()
+        }
+    );
+
+    // An emptied header field goes back to `Authorization: Bearer`.
+    on_screen(cx, window, |window, cx| click_row(window, cx, "wiki", "edit"));
+    on_screen(cx, window, |window, cx| {
+        // Typing nothing does not remove the selected text. Backspace does.
+        window.click("connector-token-header", cx);
+        window.press("cmd-a", cx);
+        window.press("backspace", cx);
+        assert_eq!(value(window, "connector-token-header"), "");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 3);
+    assert_eq!(wiki().token_header, None);
+    on_screen(cx, window, |window, _| {
+        assert!(row(window, "wiki", "token-header").is_none())
+    });
+
+    // A header that the connection sets itself is refused with the server's reason.
+    on_screen(cx, window, |window, cx| click_row(window, cx, "wiki", "edit"));
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-token-header", "Host");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 4);
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "connector-result").contains("cannot carry a token"));
+        assert_eq!(value(window, "connector-token-header"), "Host");
+    });
+    assert_eq!(wiki().token_header, None);
 }
