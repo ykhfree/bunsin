@@ -684,7 +684,7 @@ fn a_page_of_the_agent_shows_its_sources_and_a_waiting_change(cx: &mut TestAppCo
         assert_eq!(body(window), "The team deploys on Fridays.");
         assert_eq!(
             label(window, "note-agent-page"),
-            "If you save a change, the page counts as written by you, and its list of sources is removed."
+            "If you save a change, the page counts as written by you. Its sources stay."
         );
     });
 
@@ -713,10 +713,12 @@ fn a_page_of_the_agent_shows_its_sources_and_a_waiting_change(cx: &mut TestAppCo
     let page = rt.block_on(rig.engine.wiki_page("kim", "deploy-schedule")).unwrap();
     assert_eq!(
         (page.revision, page.author, page.sources.len()),
-        (2, WikiAuthor::Owner, 0)
+        (2, WikiAuthor::Owner, 2)
     );
     on_screen(cx, window, |window, _| {
-        assert!(window.try_find("note-agent-page").is_none())
+        assert!(window.try_find("note-agent-page").is_none());
+        // The window still shows where the facts of the page came from.
+        assert!(label(window, "note-sources").contains("- slack/search:"));
     });
     let waiting = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
     let waiting = waiting

@@ -578,3 +578,44 @@ async fn a_page_change_can_be_approved_while_the_kill_switch_is_on() {
         1
     );
 }
+
+#[tokio::test]
+async fn an_edit_by_the_owner_keeps_the_sources_of_the_page() {
+    let rig = rig().await;
+    let item = learn(&rig, "e1", "deploy-schedule", "The team deploys on Fridays.").await;
+    rig.engine.approve("kim", item, None).await.unwrap();
+    let by_agent = rig.engine.wiki_page("kim", "deploy-schedule").await.unwrap();
+    assert!(!by_agent.sources.is_empty());
+
+    let edited = rig
+        .engine
+        .set_wiki_page(
+            "kim",
+            "deploy-schedule",
+            owner_text("The team deploys on Fridays at 3 pm."),
+        )
+        .await
+        .unwrap();
+    assert_eq!((edited.revision, edited.author), (2, WikiAuthor::Owner));
+    assert_eq!(edited.sources, by_agent.sources);
+    // A second edit keeps them too.
+    let again = rig
+        .engine
+        .set_wiki_page(
+            "kim",
+            "deploy-schedule",
+            owner_text("The team deploys on Fridays at 4 pm."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.sources, by_agent.sources);
+
+    // A page that was deleted and written again is a new page of the owner. It has no sources.
+    rig.engine.delete_wiki_page("kim", "deploy-schedule").await.unwrap();
+    let rewritten = rig
+        .engine
+        .set_wiki_page("kim", "deploy-schedule", owner_text("New text."))
+        .await
+        .unwrap();
+    assert!(rewritten.sources.is_empty());
+}

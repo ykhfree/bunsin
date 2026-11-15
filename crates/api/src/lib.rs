@@ -346,7 +346,7 @@ pub trait EngineApi: Send + Sync {
     /// The agent's notes: one line per page.
     fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>>;
-    /// Stores the owner's text for a page. The owner's text replaces the agent's.
+    /// Stores the owner's text for a page. The owner's text replaces the agent's. The sources of the page stay.
     fn set_wiki_page<'a>(
         &'a self,
         profile: &'a str,

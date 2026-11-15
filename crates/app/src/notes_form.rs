@@ -20,7 +20,7 @@ const GONE: &str = "The server has no such page any more. Save anyway stores it 
 const PENDING: &str = "A change by the agent for this page waits in the inbox. \
     If you save here, that change can no longer be approved.";
 const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
-const AGENT_PAGE: &str = "If you save a change, the page counts as written by you, and its list of sources is removed.";
+const AGENT_PAGE: &str = "If you save a change, the page counts as written by you. Its sources stay.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
 
 /// What the fields hold.

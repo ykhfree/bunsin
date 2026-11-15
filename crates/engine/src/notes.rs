@@ -163,14 +163,13 @@ impl Engine {
         }
         update.text.check().map_err(ApiError::Invalid)?;
         let store = self.store(profile)?;
-        let current = store
-            .wiki_page(slug)
-            .map_err(store_error)?
-            .map_or(0, |page| page.revision);
-        let base = update.expected_revision.unwrap_or(current);
-        // The owner's sources are the owner. The earlier sources described the agent's text.
+        let current = store.wiki_page(slug).map_err(store_error)?;
+        let (revision, sources) = current.map_or((0, vec![]), |page| (page.revision, page.sources));
+        let base = update.expected_revision.unwrap_or(revision);
+        // The sources of the page stay: an edit by the owner does not make its facts come from nowhere.
+        // The write is refused if the page is not at `base`, so these are the sources of the replaced text.
         let written = store
-            .write_wiki_page(slug, &update.text, &[], WikiAuthor::Owner, base, None, self.now())
+            .write_wiki_page(slug, &update.text, &sources, WikiAuthor::Owner, base, None, self.now())
             .map_err(store_error)?;
         match written {
             WikiWrite::Stored(page) => {
