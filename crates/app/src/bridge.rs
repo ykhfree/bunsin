@@ -4,8 +4,8 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome, PrivacyUpdate,
-    ProfileSnapshot, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
+    PrivacyUpdate, ProfileSnapshot, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
@@ -36,6 +36,12 @@ pub enum UiCommand {
         profile: String,
         name: String,
         update: ConnectorUpdate,
+    },
+    /// Saves one connector that the server starts as a command.
+    SaveCommandConnector {
+        profile: String,
+        name: String,
+        update: CommandConnectorUpdate,
     },
     RemoveConnector {
         profile: String,
@@ -132,6 +138,8 @@ pub enum ConnectionResult {
 }
 
 /// What the window shows. Every field comes from the engine. No token is ever in it.
+/// The arguments and the environment variables of a command connector are in it: the server
+/// stores them as plain settings, and they can hold a secret.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiState {
     pub profiles: Vec<ProfileInfo>,
@@ -223,6 +231,11 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         }
         (UiCommand::SaveConnector { profile, name, update }, _) => {
             let result = save_for(selected, &profile, api.set_connector(&profile, &name, update)).await;
+            state.connection_result = Some(ConnectionResult::ConnectorSaved { name, result });
+            Ok(())
+        }
+        (UiCommand::SaveCommandConnector { profile, name, update }, _) => {
+            let result = save_for(selected, &profile, api.set_command_connector(&profile, &name, update)).await;
             state.connection_result = Some(ConnectionResult::ConnectorSaved { name, result });
             Ok(())
         }

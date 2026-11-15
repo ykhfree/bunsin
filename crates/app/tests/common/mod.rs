@@ -68,12 +68,18 @@ pub async fn rig() -> Rig {
 /// Like `rig`, with a clock that always shows `now` (seconds since 1970).
 #[allow(dead_code)]
 pub async fn rig_at(now: i64) -> Rig {
+    rig_with(now, true).await
+}
+
+/// Like `rig`, on a server whose operator allows connectors that run a command, or does not.
+#[allow(dead_code)]
+pub async fn rig_with(now: i64, allow_stdio: bool) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let llm = Arc::new(FakeLlm::new());
     let tools = vec![tool("post", "Post a message")];
     let slack = Arc::new(FakeConnector::new("slack", tools.clone()));
-    // The real address rules, with stdio connectors allowed and no token in the environment.
-    let real = RealBackends::new(Arc::new(|_| None), true, UpstreamPolicy::default());
+    // The real address rules, with no token in the environment.
+    let real = RealBackends::new(Arc::new(|_| None), allow_stdio, UpstreamPolicy::default());
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
         slack: slack.clone(),

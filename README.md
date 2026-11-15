@@ -234,9 +234,22 @@ bunsind connector-remove kim jira                # removes the connector and its
 - A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
   for example `slack/post_message`.
 - One connector that cannot connect does not stop the others.
-- A connector that runs as a command on the server (`"transport": "stdio"`) is set in the
-  settings file by someone the operator allows, with `command` (an absolute path), `args`
-  and `env`.
+- A connector can also be a program that the server starts (the MCP stdio transport), for
+  an MCP server that is given as a command such as `npx ...` or `uvx ...`. In the window,
+  choose **Command on the server** in the connector form. Enter the absolute path of the
+  program only, its arguments one in each line without quotes, and its environment
+  variables as `NAME=value`, one in each line. The settings file takes the same as
+  `"transport": "stdio"` with `command`, `args` and `env`.
+  - The server stores such a connector only if its operator started it with
+    `--allow-stdio-connectors`. Without the flag the save is refused. The server must be
+    started again with the flag.
+  - The program runs on the server computer with the rights of the server. Use this only
+    on a server whose profile owners you trust.
+  - The arguments and the environment variables are stored as plain text in the settings,
+    not encrypted like a token. `config-show` and the form after **Edit** show them. The
+    connector list shows only the program and how many of each there are.
+  - A name keeps its kind. To turn an address into a command or back, remove the
+    connector first.
 
 ### Principles
 

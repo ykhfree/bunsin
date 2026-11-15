@@ -5,7 +5,9 @@
 
 mod common;
 
-use bunsin_api::{ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, WikiPageUpdate};
+use bunsin_api::{
+    CommandConnectorUpdate, ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, WikiPageUpdate,
+};
 use bunsin_app::bridge::{NoteResult, SaveError, UiCommand, UiState, apply};
 use bunsin_app::connect::{AppView, Source};
 use bunsin_app::connection::MemoryTokenStore;
@@ -315,6 +317,46 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     })
     .unwrap();
     shot(&mut cx, window, dir, &name("settings-keychain"));
+
+    // The connector form for a command that the server starts, under a command in the list.
+    let command = CommandConnectorUpdate {
+        command: "/usr/local/bin/npx".into(),
+        args: vec!["-y".into(), "example-mcp-server".into()],
+        env: [("EXAMPLE_API_TOKEN".to_owned(), "fixture-value".to_owned())].into(),
+        expected: Expected::Unchecked,
+    };
+    rt.block_on(rig.engine.set_command_connector("kim", "files", command))
+        .unwrap();
+    states.send(on(UiCommand::Refresh)).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("llm-token-state", ScrollDelta::Pixels(point(px(0.), px(-760.))), cx);
+        window.render_frame(cx);
+        window.within("connector-kind").click(1usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // The command form is taller than the address form, so the page scrolls again.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("connector-name", ScrollDelta::Pixels(point(px(0.), px(-400.))), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("connector-name", cx);
+        window.input("search", cx);
+        window.click("connector-command", cx);
+        window.input("/usr/local/bin/uvx", cx);
+        window.within("connector-args").click("input-state", cx);
+        window.input("example-search-mcp\n--stdio", cx);
+        window.within("connector-env").click("input-state", cx);
+        window.input("EXAMPLE_REGION=eu", cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("settings-command"));
 }
 
 fn main() {

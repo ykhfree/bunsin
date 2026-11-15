@@ -43,14 +43,16 @@ pub fn open(cx: &mut TestAppContext, rt: &tokio::runtime::Runtime, rig: &Rig) ->
     open_sized(cx, rt, rig, LAPTOP)
 }
 
-/// Opens the main window and switches to the settings forms. The window is tall,
-/// because a headless test cannot click a control that is scrolled out of view.
+/// Opens the main window and switches to the settings forms. The settings page scrolls.
+/// The window is tall enough for the whole page, with the longest connector form under a
+/// connector in the list, because a headless test cannot click a control that is scrolled
+/// out of view.
 pub fn open_settings(
     cx: &mut TestAppContext,
     rt: &tokio::runtime::Runtime,
     rig: &Rig,
 ) -> (AnyWindowHandle, Entity<Shell>) {
-    let (window, shell) = open_sized(cx, rt, rig, (1280., 1400.));
+    let (window, shell) = open_sized(cx, rt, rig, (1280., 1800.));
     on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
     (window, shell)
 }

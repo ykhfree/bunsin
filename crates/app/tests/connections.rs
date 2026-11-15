@@ -680,49 +680,325 @@ fn another_profile_discards_the_drafts_and_saves_only_to_itself(cx: &mut TestApp
     assert!(kim.llm.is_none() && kim.connectors.is_empty(), "{kim:?}");
 }
 
-#[gpui_kit::test]
-fn a_stdio_connector_is_listed_read_only(cx: &mut TestAppContext) {
-    let rt = runtime();
-    let rig = rt.block_on(common::rig());
-    let stdio = McpConfig::Stdio {
-        command: "/usr/local/bin/local-mcp".into(),
-        args: vec!["--secret-arg".into()],
-        env: Default::default(),
-    };
+/// Stores a command connector through the settings, as `config-set` does.
+fn store_command(rt: &tokio::runtime::Runtime, rig: &common::Rig, name: &str, mcp: McpConfig) {
     let section = ConnectorSection {
-        mcp: stdio.clone(),
+        mcp,
         token_secret: None,
         token_header: None,
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config
         .connectors
-        .insert("local".into(), serde_json::to_value(&section).unwrap());
+        .insert(name.into(), serde_json::to_value(&section).unwrap());
     rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+}
+
+/// The text of the area inside element `id`.
+fn area(window: &mut Window, id: &'static str) -> String {
+    let area = window.within(id).find("input-state");
+    area.value().unwrap_or_default().to_owned()
+}
+
+/// Replaces the text of the area inside element `id`.
+fn fill_area(window: &mut Window, cx: &mut App, id: &'static str, text: &str) {
+    window.within(id).click("input-state", cx);
+    window.press("cmd-a", cx);
+    window.press("backspace", cx);
+    window.input(text, cx);
+}
+
+/// Chooses the kind "Command on the server" in the connector form.
+fn choose_command(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle) {
+    on_screen(cx, window, |window, cx| {
+        window.within("connector-kind").click(1usize, cx)
+    });
+}
+
+const ENV_SECRET: &str = "env-secret-9d04";
+
+#[gpui_kit::test]
+fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let stdio = McpConfig::Stdio {
+        command: "/usr/local/bin/local-mcp".into(),
+        args: vec!["--secret-arg".into()],
+        env: [("API_TOKEN".to_owned(), ENV_SECRET.to_owned())].into(),
+    };
+    store_command(&rt, &rig, "local", stdio.clone());
     let (window, shell) = open_settings(cx, &rt, &rig);
     on_screen(cx, window, |window, cx| {
         assert_eq!(
             row(window, "local", "address").as_deref(),
-            Some("runs as a command on the server; set by the server operator")
+            Some("runs the command /usr/local/bin/local-mcp")
         );
-        assert_eq!(row(window, "local", "edit"), None);
-        assert_eq!(row(window, "local", "remove"), None);
-        assert_not_on_screen(window, "--secret-arg", "set by the server operator");
-        // The form cannot turn it into an HTTP connector.
+        assert_eq!(
+            row(window, "local", "command-counts").as_deref(),
+            Some("1 argument, 1 environment variable")
+        );
+        // The list shows no argument and no value. They can hold a secret.
+        assert_not_on_screen(window, "--secret-arg", "runs the command");
+        assert_not_on_screen(window, ENV_SECRET, "runs the command");
+        // An address cannot take the name of a command. The window says so and sends nothing.
         fill(window, cx, "connector-name", "local");
         fill(window, cx, "connector-address", "https://mcp.example/local");
         window.click("save-connector", cx);
+    });
+    on_screen(cx, window, |window, _| {
         assert_eq!(
             label(window, "connector-message"),
-            "This connector runs as a command on the server. Only the server operator can change it."
+            "A connector with this name is of the other kind. Remove it first, or use another name."
         );
         assert_eq!(value(window, "connector-address"), "https://mcp.example/local");
+        assert!(window.try_find("connector-save-anyway").is_none());
     });
     std::thread::sleep(REFRESH * 2);
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
     let connectors = rt.block_on(rig.engine.connections("kim")).unwrap().connectors;
     assert_eq!(connectors["local"].mcp, stdio);
+}
+
+#[gpui_kit::test]
+fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    let local = || {
+        rt.block_on(rig.engine.connections("kim"))
+            .unwrap()
+            .connectors
+            .get("local")
+            .map(|c| c.mcp.clone())
+    };
+    choose_command(cx, window);
+    on_screen(cx, window, |window, cx| {
+        // Only the fields of the chosen kind are shown.
+        assert!(window.try_find("connector-address").is_none());
+        assert!(label(window, "command-help").contains("--allow-stdio-connectors"));
+        fill(window, cx, "connector-name", "local");
+        fill(window, cx, "connector-command", "/opt/mcp/does-not-exist");
+        // A line is one argument, with the spaces in it. The first `=` ends a name.
+        fill_area(window, cx, "connector-args", "-y\n\nsome server --flag");
+        fill_area(
+            window,
+            cx,
+            "connector-env",
+            &format!("API_TOKEN={ENV_SECRET}=x\nEMPTY="),
+        );
+    });
+    // A refresh does not change the draft.
+    std::thread::sleep(REFRESH * 4);
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "connector-counts"),
+            "2 arguments, 2 environment variables"
+        );
+        assert_eq!(area(window, "connector-args"), "-y\n\nsome server --flag");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let stored = McpConfig::Stdio {
+        command: "/opt/mcp/does-not-exist".into(),
+        args: vec!["-y".into(), "some server --flag".into()],
+        env: [
+            ("API_TOKEN".to_owned(), format!("{ENV_SECRET}=x")),
+            ("EMPTY".to_owned(), String::new()),
+        ]
+        .into(),
+    };
+    assert_eq!(local(), Some(stored));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-result"), "Saved: local");
+        // A successful save empties the form. The kind stays for the next connector.
+        assert_eq!(value(window, "connector-name"), "");
+        assert_eq!(value(window, "connector-command"), "");
+        assert_eq!(area(window, "connector-env"), "");
+        assert_eq!(
+            row(window, "local", "address").as_deref(),
+            Some("runs the command /opt/mcp/does-not-exist")
+        );
+        assert_eq!(
+            row(window, "local", "command-counts").as_deref(),
+            Some("2 arguments, 2 environment variables")
+        );
+        assert_not_on_screen(window, ENV_SECRET, "runs the command");
+        click_row(window, cx, "local", "edit");
+    });
+    // Edit shows the stored command. A changed argument is saved, and the rest stays.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(value(window, "connector-name"), "local");
+        assert_eq!(value(window, "connector-command"), "/opt/mcp/does-not-exist");
+        assert_eq!(area(window, "connector-args"), "-y\nsome server --flag");
+        assert_eq!(
+            area(window, "connector-env"),
+            format!("API_TOKEN={ENV_SECRET}=x\nEMPTY=")
+        );
+        fill_area(window, cx, "connector-args", "--stdio");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    match local() {
+        Some(McpConfig::Stdio { args, env, .. }) => {
+            assert_eq!(args, vec!["--stdio".to_owned()]);
+            assert_eq!(env.len(), 2);
+        }
+        other => panic!("expected a command, got {other:?}"),
+    }
+    on_screen(cx, window, |window, cx| click_row(window, cx, "local", "remove"));
+    wait_for_commands(cx, &shell, 3);
+    assert_eq!(local(), None);
+    on_screen(cx, window, |window, _| {
+        // The list is empty again.
+        assert_eq!(label(window, "connector-count"), "Connectors: 0");
+        assert_eq!(label(window, "connector-result"), "Removed: local");
+    });
+}
+
+#[gpui_kit::test]
+fn a_bad_environment_line_is_not_sent_and_a_server_refusal_keeps_the_draft(cx: &mut TestAppContext) {
+    let rt = runtime();
+    // The operator of this server does not allow connectors that run a command.
+    let rig = rt.block_on(common::rig_with(1_000, false));
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    choose_command(cx, window);
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "local");
+        fill(window, cx, "connector-command", "/opt/mcp/does-not-exist");
+        fill_area(window, cx, "connector-env", "API_TOKEN");
+        window.click("save-connector", cx);
+    });
+    let no_equals = "Write each environment variable as NAME=value, one in a line.";
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-message"), no_equals);
+        assert_eq!(label(window, "connector-counts"), no_equals);
+        fill_area(window, cx, "connector-env", "=value");
+        window.click("save-connector", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-message"), no_equals);
+        fill_area(window, cx, "connector-env", "A=1\nA=2");
+        window.click("save-connector", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "connector-message"),
+            "An environment variable is in the list twice."
+        );
+        fill_area(window, cx, "connector-env", &format!("API_TOKEN={ENV_SECRET}"));
+    });
+    std::thread::sleep(REFRESH * 2);
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
+
+    // The server refuses the save. The reason names the flag, and the draft stays.
+    on_screen(cx, window, |window, cx| window.click("save-connector", cx));
+    wait_for_commands(cx, &shell, 1);
+    on_screen(cx, window, |window, _| {
+        let result = label(window, "connector-result");
+        assert!(result.contains("--allow-stdio-connectors"), "{result}");
+        assert!(!result.contains(ENV_SECRET), "{result}");
+        assert_eq!(value(window, "connector-command"), "/opt/mcp/does-not-exist");
+        assert_eq!(area(window, "connector-env"), format!("API_TOKEN={ENV_SECRET}"));
+    });
+    assert!(
+        rt.block_on(rig.engine.connections("kim"))
+            .unwrap()
+            .connectors
+            .is_empty()
+    );
+}
+
+#[gpui_kit::test]
+fn a_command_the_form_cannot_show_is_not_loaded_for_editing(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let unusual = McpConfig::Stdio {
+        command: "/opt/mcp/does-not-exist".into(),
+        // A line-based form would drop the empty argument and split the second one.
+        args: vec!["".into(), "two\nlines".into()],
+        env: Default::default(),
+    };
+    store_command(&rt, &rig, "local", unusual.clone());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "draft");
+        click_row(window, cx, "local", "edit");
+    });
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "connector-message"),
+            "This connector has an empty argument or a line break in a value. \
+             This form cannot show it. Change it in the settings file."
+        );
+        // The draft is as it was. Nothing of the connector was loaded.
+        assert_eq!(value(window, "connector-name"), "draft");
+    });
+    std::thread::sleep(REFRESH * 2);
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
+    assert_eq!(
+        rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"].mcp,
+        unusual
+    );
+}
+
+#[gpui_kit::test]
+fn a_command_draft_follows_the_draft_rules_of_the_form(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let command = |arg: &str| McpConfig::Stdio {
+        command: "/opt/mcp/does-not-exist".into(),
+        args: vec![arg.into()],
+        env: Default::default(),
+    };
+    store_command(&rt, &rig, "local", command("--first"));
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    let server_arg = |cx: &mut TestAppContext, shell: &Entity<Shell>, arg: &'static str| {
+        wait_until(cx, shell, "the outside change", move |s| {
+            s.state.connections.as_ref().is_some_and(
+                |c| matches!(&c.connectors["local"].mcp, McpConfig::Stdio { args, .. } if args == &[arg.to_owned()]),
+            )
+        });
+    };
+    on_screen(cx, window, |window, cx| click_row(window, cx, "local", "edit"));
+    // An unchanged draft follows the server.
+    store_command(&rt, &rig, "local", command("--second"));
+    server_arg(cx, &shell, "--second");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(area(window, "connector-args"), "--second");
+        // A changed draft stays, and its save is refused after another change on the server.
+        fill_area(window, cx, "connector-args", "--mine");
+    });
+    store_command(&rt, &rig, "local", command("--third"));
+    server_arg(cx, &shell, "--third");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(area(window, "connector-args"), "--mine");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-conflict"), CONFLICT);
+        window.click("connector-load", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(area(window, "connector-args"), "--third");
+        assert_no_conflict(window, "connector");
+        // Another profile gets an empty form.
+        fill_area(window, cx, "connector-args", "--typed");
+        window.click("profile-lee", cx);
+    });
+    wait_until(cx, &shell, "the other profile", |s| {
+        s.state.selected.as_deref() == Some("lee") && s.state.connections.is_some()
+    });
+    on_screen(cx, window, |window, _| {
+        assert_eq!(value(window, "connector-name"), "");
+        // The kind stays, so the command fields are on screen and empty.
+        assert_eq!(value(window, "connector-command"), "");
+        assert_eq!(area(window, "connector-args"), "");
+    });
 }
 
 #[gpui_kit::test]

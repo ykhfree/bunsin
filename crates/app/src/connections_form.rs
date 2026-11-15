@@ -6,18 +6,20 @@ use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
 use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
 use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{
-    ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange, TokenSource, ToolsReport,
+    CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange,
+    TokenSource, ToolsReport,
 };
 use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, McpConfig, Wire, default_timeout_secs};
 use bunsin_core::tool::pin;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, FontWeight, IntoElement, ParentElement, SharedString, Stateful, Styled,
-    Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, Div, Entity, FontWeight, IntoElement, ParentElement, SharedString, Stateful,
+    Styled, Window, div, prelude::*, px,
 };
+use std::collections::BTreeMap;
 
 /// The API formats, in the order of the choices on screen.
 const WIRES: [(Wire, &str); 3] = [
@@ -28,8 +30,74 @@ const WIRES: [(Wire, &str); 3] = [
 
 const HELP: &str = "Leave a token field empty to keep the stored token. \
     The server never sends a token back.";
-const STDIO: &str = "runs as a command on the server; set by the server operator";
-const STDIO_REFUSED: &str = "This connector runs as a command on the server. Only the server operator can change it.";
+const COMMAND_HELP: &str = "The server starts this program and talks to it. \
+    The operator of the server must allow that: the server starts with --allow-stdio-connectors.";
+const KIND_TAKEN: &str = "A connector with this name is of the other kind. Remove it first, or use another name.";
+const ENV_LINE: &str = "Write each environment variable as NAME=value, one in a line.";
+const ENV_TWICE: &str = "An environment variable is in the list twice.";
+const NOT_EDITABLE: &str = "This connector has an empty argument or a line break in a value. \
+    This form cannot show it. Change it in the settings file.";
+
+/// What the connector form saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// An MCP server at an address.
+    Address,
+    /// A program that the server starts.
+    Command,
+}
+
+/// The kinds, in the order of the choices on screen.
+const KINDS: [(Kind, &str); 2] = [(Kind::Address, "Address"), (Kind::Command, "Command on the server")];
+
+/// The arguments in the text of the form: one in each line. Empty lines are no arguments.
+/// A line is used as it is, so an argument can hold spaces. Quotes are not removed.
+fn parse_args(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The environment variables in the text of the form: `NAME=value` in each line.
+/// The name ends at the first `=`. The value is used as it is.
+fn parse_env(text: &str) -> Result<BTreeMap<String, String>, &'static str> {
+    let mut env = BTreeMap::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let (name, value) = line.split_once('=').ok_or(ENV_LINE)?;
+        if name.is_empty() {
+            return Err(ENV_LINE);
+        }
+        if env.insert(name.to_owned(), value.to_owned()).is_some() {
+            return Err(ENV_TWICE);
+        }
+    }
+    Ok(env)
+}
+
+/// The text of the form for a stored command, or None if a save from the form would change it:
+/// the form cannot hold an empty argument or a line break inside an argument or a value.
+fn command_texts(args: &[String], env: &BTreeMap<String, String>) -> Option<(String, String)> {
+    let shown = |text: &str| !text.contains(['\n', '\r']);
+    let args_fit = args.iter().all(|arg| !arg.is_empty() && shown(arg));
+    let env_fits = env
+        .iter()
+        .all(|(name, value)| !name.is_empty() && !name.contains('=') && shown(name) && shown(value));
+    (args_fit && env_fits).then(|| {
+        let env: Vec<String> = env.iter().map(|(name, value)| format!("{name}={value}")).collect();
+        (args.join("\n"), env.join("\n"))
+    })
+}
+
+/// How many arguments and variables a command has, for the list and the form.
+fn counts_text(args: usize, env: usize) -> String {
+    let plural = |count: usize, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
+    format!(
+        "{}, {}",
+        plural(args, "argument", "arguments"),
+        plural(env, "environment variable", "environment variables")
+    )
+}
 const KEYCHAIN_HELP: &str = "Or copy the token from an item of the login Keychain of this Mac. \
     Keychain Access shows the service of an item as Where. The token is copied once: \
     a later change in the Keychain does not reach the server.";
@@ -62,6 +130,14 @@ pub struct ConnectionsForm {
     keychain_open: bool,
     /// The header that carries the connector's token. Empty: `Authorization: Bearer`.
     token_header: Entity<InputState>,
+    /// Whether the connector draft is an address or a command.
+    kind: Kind,
+    /// The absolute path of the program of a command connector.
+    command: Entity<InputState>,
+    /// The arguments of the command, one in each line.
+    args: Entity<TextareaState>,
+    /// The environment variables of the command, `NAME=value` in each line.
+    env: Entity<TextareaState>,
     /// The window's own message about the last LLM save that it did not send.
     llm_message: Option<&'static str>,
     /// The window's own message about the last connector save that it did not send.
@@ -88,14 +164,6 @@ fn llm_fields(llm: Option<&LlmConnection>) -> (Wire, &str, &str) {
     match llm {
         Some(llm) => (llm.wire, &llm.base_url, &llm.model),
         None => (Wire::AnthropicMessages, ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL),
-    }
-}
-
-/// The address of a connector that the form can edit.
-fn http_url(connector: &ConnectorConnection) -> Option<&str> {
-    match &connector.mcp {
-        McpConfig::Http { url } => Some(url),
-        McpConfig::Stdio { .. } => None,
     }
 }
 
@@ -168,6 +236,10 @@ impl ConnectionsForm {
             keychain_message: None,
             keychain_open: false,
             token_header: input("Authorization: Bearer", window, cx),
+            kind: Kind::Address,
+            command: input("/usr/local/bin/npx", window, cx),
+            args: cx.new(|cx| TextareaState::new(window, cx).placeholder("-y\nsome-mcp-server")),
+            env: cx.new(|cx| TextareaState::new(window, cx).placeholder("API_TOKEN=value")),
             llm_message: None,
             connector_message: None,
             llm_base: None,
@@ -281,17 +353,51 @@ impl ConnectionsForm {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let url = connector.and_then(http_url);
-        set(&self.name, if url.is_some() { name } else { "" }, window, cx);
-        set(&self.address, url.unwrap_or_default(), window, cx);
+        let (mut address, mut header, mut command) = ("", "", String::new());
+        let (mut args, mut env) = (String::new(), String::new());
+        match connector.map(|connector| (&connector.mcp, connector)) {
+            Some((McpConfig::Http { url }, connector)) => {
+                self.kind = Kind::Address;
+                address = url;
+                header = connector.token_header.as_deref().unwrap_or_default();
+            }
+            Some((
+                McpConfig::Stdio {
+                    command: path,
+                    args: stored_args,
+                    env: stored_env,
+                },
+                _,
+            )) => match command_texts(stored_args, stored_env) {
+                Some(texts) => {
+                    self.kind = Kind::Command;
+                    command = path.display().to_string();
+                    (args, env) = texts;
+                }
+                // A save from this form would change the connector. The draft stays as it is.
+                None => {
+                    self.connector_message = Some(NOT_EDITABLE);
+                    return;
+                }
+            },
+            // An empty form keeps the kind that the owner chose.
+            None => {}
+        }
+        set(&self.name, if connector.is_some() { name } else { "" }, window, cx);
+        set(&self.address, address, window, cx);
         set(&self.token, "", window, cx);
-        let header = connector.and_then(|c| c.token_header.as_deref()).unwrap_or_default();
         set(&self.token_header, header, window, cx);
-        self.connector_base = connector
-            .filter(|_| url.is_some())
-            .map(|c| (name.to_owned(), c.clone()));
+        set(&self.command, &command, window, cx);
+        self.args.update(cx, |area, cx| area.set_value(args, window, cx));
+        self.env.update(cx, |area, cx| area.set_value(env, window, cx));
+        self.connector_base = connector.map(|c| (name.to_owned(), c.clone()));
         self.connector_message = None;
         self.connector_conflict = None;
+    }
+
+    /// The text of an area as it is. A space at the start of a line is part of an argument.
+    fn raw(area: &Entity<TextareaState>, cx: &App) -> String {
+        area.read(cx).value().to_string()
     }
 
     /// Empties the Keychain fields and their message.
@@ -319,9 +425,20 @@ impl ConnectionsForm {
     fn connector_untouched(&self, cx: &App) -> bool {
         self.connector_base.as_ref().is_some_and(|(name, base)| {
             text(&self.name, cx) == *name
-                && http_url(base) == Some(text(&self.address, cx).as_str())
-                && text(&self.token, cx).is_empty()
-                && base.token_header.as_deref().unwrap_or_default() == text(&self.token_header, cx).trim()
+                && match &base.mcp {
+                    McpConfig::Http { url } => {
+                        self.kind == Kind::Address
+                            && *url == text(&self.address, cx)
+                            && text(&self.token, cx).is_empty()
+                            && base.token_header.as_deref().unwrap_or_default() == text(&self.token_header, cx)
+                    }
+                    McpConfig::Stdio { command, args, env } => {
+                        self.kind == Kind::Command
+                            && command.display().to_string() == text(&self.command, cx)
+                            && *args == parse_args(&Self::raw(&self.args, cx))
+                            && parse_env(&Self::raw(&self.env, cx)).as_ref() == Ok(env)
+                    }
+                }
         })
     }
 }
@@ -377,15 +494,42 @@ impl Shell {
             return;
         };
         let name = text(&form.name, cx);
-        // The server would replace a stdio connector with this HTTP one.
-        let stdio = self
+        // A name keeps its kind. The server refuses the change too. This message comes first,
+        // because the conflict warning would offer a "Save anyway" that cannot work.
+        let other_kind = self
             .state
             .connections
             .as_ref()
             .and_then(|c| c.connectors.get(&name))
-            .is_some_and(|c| matches!(c.mcp, McpConfig::Stdio { .. }));
-        if stdio {
-            form.connector_message = Some(STDIO_REFUSED);
+            .is_some_and(|c| matches!(c.mcp, McpConfig::Stdio { .. }) != (form.kind == Kind::Command));
+        if other_kind {
+            form.connector_message = Some(KIND_TAKEN);
+            return;
+        }
+        // The base belongs to one name. Under another name the draft is a new connector.
+        let base = form.connector_base.as_ref().filter(|(base, _)| *base == name);
+        let expected = if anyway {
+            Expected::Unchecked
+        } else {
+            Expected::Value(base.map(|(_, connector)| connector.clone()))
+        };
+        if form.kind == Kind::Command {
+            let env = match parse_env(&ConnectionsForm::raw(&form.env, cx)) {
+                Ok(env) => env,
+                Err(message) => {
+                    form.connector_message = Some(message);
+                    return;
+                }
+            };
+            let update = CommandConnectorUpdate {
+                command: text(&form.command, cx).into(),
+                args: parse_args(&ConnectionsForm::raw(&form.args, cx)),
+                env,
+                expected,
+            };
+            form.connector_message = None;
+            form.connector_conflict = None;
+            self.send(UiCommand::SaveCommandConnector { profile, name, update });
             return;
         }
         let Some(token) = token_change(&form.token, remove_token, cx) else {
@@ -395,13 +539,6 @@ impl Shell {
         form.connector_message = None;
         form.connector_conflict = None;
         form.connector_remove_token = remove_token;
-        let expected = if anyway {
-            Expected::Unchecked
-        } else {
-            // The base belongs to one name. Under another name the draft is a new connector.
-            let base = form.connector_base.as_ref().filter(|(base, _)| *base == name);
-            Expected::Value(base.map(|(_, connector)| connector.clone()))
-        };
         let update = ConnectorUpdate {
             url: text(&form.address, cx),
             token,
@@ -511,28 +648,36 @@ impl Shell {
                         let text = format!("sent in the header {header}");
                         labelled_as("token-header", text.clone(), quiet(text, cx))
                     }));
-                let (edit_name, edited) = (name.to_owned(), connector.clone());
-                let remove = UiCommand::RemoveConnector {
-                    profile: profile.to_owned(),
-                    name: name.to_owned(),
-                };
-                buttons = buttons
-                    .child(Button::new("edit").small().ghost().label("Edit").on_click(cx.listener(
-                        move |this, _, window, cx| {
-                            this.connections.load_connector(&edit_name, Some(&edited), window, cx);
-                            cx.notify();
-                        },
-                    )))
-                    .child(
-                        Button::new("remove")
-                            .small()
-                            .ghost()
-                            .label("Remove")
-                            .on_click(send(remove)),
-                    );
             }
-            McpConfig::Stdio { .. } => row = row.child(labelled_as("address", STDIO, quiet(STDIO, cx))),
+            // The row shows the program and how much it gets. The arguments and the variables can
+            // hold a secret, so they are shown only in the form, after Edit.
+            McpConfig::Stdio { command, args, env } => {
+                let runs = format!("runs the command {}", command.display());
+                let counts = counts_text(args.len(), env.len());
+                row = row
+                    .child(labelled_as("address", runs.clone(), quiet(runs, cx)))
+                    .child(labelled_as("command-counts", counts.clone(), quiet(counts, cx)));
+            }
         }
+        let (edit_name, edited) = (name.to_owned(), connector.clone());
+        let remove = UiCommand::RemoveConnector {
+            profile: profile.to_owned(),
+            name: name.to_owned(),
+        };
+        buttons = buttons
+            .child(Button::new("edit").small().ghost().label("Edit").on_click(cx.listener(
+                move |this, _, window, cx| {
+                    this.connections.load_connector(&edit_name, Some(&edited), window, cx);
+                    cx.notify();
+                },
+            )))
+            .child(
+                Button::new("remove")
+                    .small()
+                    .ghost()
+                    .label("Remove")
+                    .on_click(send(remove)),
+            );
         row = row.child(buttons);
         match &self.state.connection_result {
             Some(ConnectionResult::Checked { name: checked, result }) if checked == name => match result {
@@ -790,37 +935,90 @@ impl Shell {
             | Some(ConnectionResult::ConnectorRemoved { result: Err(error), .. }) => error.clone(),
             _ => String::new(),
         };
+        let selected_kind = KINDS.iter().position(|(kind, _)| *kind == form.kind);
+        // Only the fields of the chosen kind are shown.
+        let kind_fields: Vec<AnyElement> = match form.kind {
+            Kind::Address => vec![
+                field(
+                    "Address of the MCP server",
+                    Input::new(&form.address)
+                        .id("connector-address")
+                        .aria_label("Connector address"),
+                    cx,
+                )
+                .into_any_element(),
+                field(
+                    "Token. Leave it empty if the server needs none.",
+                    Input::new(&form.token)
+                        .id("connector-token")
+                        .aria_label("Connector token"),
+                    cx,
+                )
+                .into_any_element(),
+                field(
+                    "Header that carries the token. Leave it empty for Authorization: Bearer.",
+                    Input::new(&form.token_header)
+                        .id("connector-token-header")
+                        .aria_label("Header for the token"),
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            Kind::Command => {
+                let args = parse_args(&ConnectionsForm::raw(&form.args, cx)).len();
+                let counts = match parse_env(&ConnectionsForm::raw(&form.env, cx)) {
+                    Ok(env) => counts_text(args, env.len()),
+                    Err(message) => message.to_owned(),
+                };
+                vec![
+                    labelled_as("command-help", COMMAND_HELP, quiet(COMMAND_HELP, cx)).into_any_element(),
+                    field(
+                        "Command: the absolute path of the program only",
+                        Input::new(&form.command).id("connector-command").aria_label("Command"),
+                        cx,
+                    )
+                    .into_any_element(),
+                    // The text areas have no ID of their own. Tests find them inside these elements.
+                    field(
+                        "Arguments: one in each line, without quotes",
+                        div()
+                            .id("connector-args")
+                            .child(Textarea::new(&form.args).aria_label("Arguments").h(px(76.))),
+                        cx,
+                    )
+                    .into_any_element(),
+                    field(
+                        "Environment variables: NAME=value, one in each line. The server stores them as plain text.",
+                        div()
+                            .id("connector-env")
+                            .child(Textarea::new(&form.env).aria_label("Environment variables").h(px(76.))),
+                        cx,
+                    )
+                    .into_any_element(),
+                    labelled_as("connector-counts", counts.clone(), quiet(counts, cx)).into_any_element(),
+                ]
+            }
+        };
         let mut connector_form = div()
             .flex()
             .flex_col()
             .gap_3()
             .child(quiet("Add a connector. To change one, use its name or Edit.", cx))
+            .child(
+                RadioGroup::horizontal("connector-kind")
+                    .selected_index(selected_kind)
+                    .children(KINDS.map(|(_, label)| label))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.connections.kind = KINDS[*ix].0;
+                        cx.notify();
+                    })),
+            )
             .child(field(
                 "Name",
                 Input::new(&form.name).id("connector-name").aria_label("Connector name"),
                 cx,
             ))
-            .child(field(
-                "Address of the MCP server",
-                Input::new(&form.address)
-                    .id("connector-address")
-                    .aria_label("Connector address"),
-                cx,
-            ))
-            .child(field(
-                "Token. Leave it empty if the server needs none.",
-                Input::new(&form.token)
-                    .id("connector-token")
-                    .aria_label("Connector token"),
-                cx,
-            ))
-            .child(field(
-                "Header that carries the token. Leave it empty for Authorization: Bearer.",
-                Input::new(&form.token_header)
-                    .id("connector-token-header")
-                    .aria_label("Header for the token"),
-                cx,
-            ))
+            .children(kind_fields)
             .child(
                 Button::new("save-connector")
                     .self_start()
@@ -905,6 +1103,44 @@ mod tests {
             })
             .collect();
         ToolsReport { tools, diff }
+    }
+
+    #[test]
+    fn arguments_are_lines_and_variables_split_at_the_first_equals_sign() {
+        assert_eq!(
+            parse_args("-y\n\n some server \r\n--flag=a b"),
+            ["-y", " some server ", "--flag=a b"]
+        );
+        assert!(parse_args("").is_empty());
+        let env = parse_env("TOKEN=a=b\nEMPTY=\n\nSPACED= x ").unwrap();
+        let expected = [("EMPTY", ""), ("SPACED", " x "), ("TOKEN", "a=b")];
+        assert_eq!(
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(parse_env("TOKEN"), Err(ENV_LINE));
+        assert_eq!(parse_env("=value"), Err(ENV_LINE));
+        assert_eq!(parse_env("A=1\nA=2"), Err(ENV_TWICE));
+    }
+
+    #[test]
+    fn a_stored_command_is_shown_only_if_the_form_gives_it_back_unchanged() {
+        let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        };
+        let args = vec!["-y".to_owned(), "some server".to_owned()];
+        let stored = env(&[("TOKEN", "a=b"), ("EMPTY", "")]);
+        let (args_text, env_text) = command_texts(&args, &stored).unwrap();
+        // What the form shows is parsed back to what was stored.
+        assert_eq!(parse_args(&args_text), args);
+        assert_eq!(parse_env(&env_text).unwrap(), stored);
+        // The form cannot hold these, so it does not show the connector.
+        assert_eq!(command_texts(&[String::new()], &env(&[])), None);
+        assert_eq!(command_texts(&["two\nlines".to_owned()], &env(&[])), None);
+        assert_eq!(command_texts(&[], &env(&[("TOKEN", "line\nbreak")])), None);
+        assert_eq!(command_texts(&[], &env(&[("A=B", "v")])), None);
+        assert_eq!(counts_text(1, 0), "1 argument, 0 environment variables");
+        assert_eq!(counts_text(0, 1), "0 arguments, 1 environment variable");
     }
 
     #[test]
