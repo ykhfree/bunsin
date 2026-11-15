@@ -20,9 +20,10 @@ use gpui_kit::{
 };
 
 /// The API formats, in the order of the choices on screen.
-const WIRES: [(Wire, &str); 2] = [
+const WIRES: [(Wire, &str); 3] = [
     (Wire::AnthropicMessages, "Anthropic Messages"),
     (Wire::OpenAiChat, "OpenAI Chat Completions"),
+    (Wire::OpenAiResponses, "OpenAI Responses"),
 ];
 
 const HELP: &str = "Leave a token field empty to keep the stored token. \
@@ -201,6 +202,22 @@ impl ConnectionsForm {
                 self.load_connector(&name, server, window, cx);
             }
         }
+    }
+
+    /// Changes the API format. The prefilled Claude address and model do not fit another format,
+    /// so they are emptied. Fields that are empty get them back with the Claude format.
+    /// Text that the user typed stays.
+    fn choose_wire(&mut self, wire: Wire, window: &mut Window, cx: &mut App) {
+        let (address, model) = (text(&self.llm_address, cx), text(&self.llm_model, cx));
+        let claude = wire == Wire::AnthropicMessages;
+        if !claude && address == ANTHROPIC_BASE_URL && model == ANTHROPIC_DEFAULT_MODEL {
+            set(&self.llm_address, "", window, cx);
+            set(&self.llm_model, "", window, cx);
+        } else if claude && address.is_empty() && model.is_empty() {
+            set(&self.llm_address, ANTHROPIC_BASE_URL, window, cx);
+            set(&self.llm_model, ANTHROPIC_DEFAULT_MODEL, window, cx);
+        }
+        self.wire = wire;
     }
 
     /// Shows the server's LLM endpoint, or the defaults if there is none, and makes it the base.
@@ -490,11 +507,11 @@ impl Shell {
             .child(div().font_weight(FontWeight::SEMIBOLD).child("LLM endpoint"))
             .child(labelled_as("connections-help", HELP, quiet(HELP, cx)))
             .child(
-                RadioGroup::horizontal("llm-wire")
+                RadioGroup::vertical("llm-wire")
                     .selected_index(selected_wire)
                     .children(WIRES.map(|(_, label)| label))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.connections.wire = WIRES[*ix].0;
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.connections.choose_wire(WIRES[*ix].0, window, cx);
                         cx.notify();
                     })),
             )

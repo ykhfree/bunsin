@@ -223,7 +223,7 @@ enum Command {
         #[command(flatten)]
         remote: Remote,
         profile: String,
-        #[arg(long, value_parser = ["anthropic-messages", "openai-chat"], default_value = "anthropic-messages")]
+        #[arg(long, value_parser = ["anthropic-messages", "openai-chat", "openai-responses"], default_value = "anthropic-messages")]
         wire: String,
         /// The default is the Claude API.
         #[arg(long, default_value = bunsin_core::settings::ANTHROPIC_BASE_URL)]

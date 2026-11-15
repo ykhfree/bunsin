@@ -3,6 +3,7 @@
 
 mod anthropic;
 mod openai;
+mod openai_responses;
 
 use bunsin_core::llm::{CompletionRequest, CompletionResponse, LlmError};
 use bunsin_core::ports::{BoxFuture, LlmClient};
@@ -22,7 +23,8 @@ pub use bunsin_core::settings::Wire;
 pub struct LlmConfig {
     pub wire: Wire,
     /// The URL before the wire path. Follow each vendor's SDK convention:
-    /// `https://api.openai.com/v1` for `OpenAiChat`, `https://api.anthropic.com` for `AnthropicMessages`.
+    /// `https://api.openai.com/v1` for `OpenAiChat` and `OpenAiResponses`,
+    /// `https://api.anthropic.com` for `AnthropicMessages`.
     pub base_url: String,
     pub model: String,
     /// The limit for one whole request, from connect to the last body byte.
@@ -62,7 +64,7 @@ impl HttpLlmClient {
     /// Fails with `Transport` if the token is not a valid header value or the HTTP client cannot start.
     pub fn new(config: LlmConfig, token: ApiToken) -> Result<Self, LlmError> {
         let raw = match config.wire {
-            Wire::OpenAiChat => format!("Bearer {}", token.0),
+            Wire::OpenAiChat | Wire::OpenAiResponses => format!("Bearer {}", token.0),
             Wire::AnthropicMessages => token.0.clone(),
         };
         let mut auth = HeaderValue::from_str(&raw)
@@ -92,6 +94,11 @@ impl HttpLlmClient {
                 .post(format!("{base}{}", openai::PATH))
                 .header(AUTHORIZATION, self.auth.clone())
                 .body(openai::request_body(model, request).to_string()),
+            Wire::OpenAiResponses => self
+                .http
+                .post(format!("{base}{}", openai_responses::PATH))
+                .header(AUTHORIZATION, self.auth.clone())
+                .body(openai_responses::request_body(model, request).to_string()),
             Wire::AnthropicMessages => self
                 .http
                 .post(format!("{base}{}", anthropic::PATH))
@@ -124,6 +131,7 @@ impl HttpLlmClient {
         }
         match self.config.wire {
             Wire::OpenAiChat => openai::parse_reply(&body),
+            Wire::OpenAiResponses => openai_responses::parse_reply(&body),
             Wire::AnthropicMessages => anthropic::parse_reply(&body),
         }
     }
@@ -184,12 +192,13 @@ mod tests {
     fn wire_uses_kebab_case_names() {
         for (wire, name) in [
             (Wire::OpenAiChat, "\"openai-chat\""),
+            (Wire::OpenAiResponses, "\"openai-responses\""),
             (Wire::AnthropicMessages, "\"anthropic-messages\""),
         ] {
             assert_eq!(serde_json::to_string(&wire).unwrap(), name);
             assert_eq!(serde_json::from_str::<Wire>(name).unwrap(), wire);
         }
-        assert!(serde_json::from_str::<Wire>("\"openai-responses\"").is_err());
+        assert!(serde_json::from_str::<Wire>("\"openai-realtime\"").is_err());
     }
 
     #[test]

@@ -10,6 +10,9 @@ pub enum Wire {
     /// OpenAI Chat Completions: `POST {base_url}/chat/completions`.
     #[serde(rename = "openai-chat")]
     OpenAiChat,
+    /// OpenAI Responses: `POST {base_url}/responses`.
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
     /// Anthropic Messages: `POST {base_url}/v1/messages`.
     #[serde(rename = "anthropic-messages")]
     AnthropicMessages,

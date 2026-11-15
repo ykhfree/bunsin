@@ -957,3 +957,39 @@ fn a_saved_endpoint_is_shown_not_the_defaults(cx: &mut TestAppContext) {
         assert_eq!(label(window, "llm-token-state"), "no token");
     });
 }
+
+#[gpui_kit::test]
+fn another_format_empties_the_claude_defaults_and_keeps_typed_text(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    // The third choice is the Responses format. The Claude address and model do not fit it.
+    on_screen(cx, window, |window, cx| window.within("llm-wire").click(2usize, cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(window.within("llm-wire").find(2usize).checked(), Some(true));
+        assert_eq!(value(window, "llm-address"), "");
+        assert_eq!(value(window, "llm-model"), "");
+        // Empty fields get the Claude values back with the Claude format.
+        window.within("llm-wire").click(0usize, cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(value(window, "llm-address"), ANTHROPIC_BASE_URL);
+        assert_eq!(value(window, "llm-model"), ANTHROPIC_DEFAULT_MODEL);
+        // Text that the user typed stays when the format changes.
+        fill(window, cx, "llm-address", "https://gateway.example/v1");
+        fill(window, cx, "llm-model", "my-model");
+        window.within("llm-wire").click(2usize, cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(value(window, "llm-address"), "https://gateway.example/v1");
+        assert_eq!(value(window, "llm-model"), "my-model");
+        fill(window, cx, "llm-token", TOKEN);
+        window.click("save-llm", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let saved = rt.block_on(rig.engine.connections("kim")).unwrap().llm.unwrap();
+    assert_eq!(
+        (saved.wire, saved.base_url.as_str(), saved.model.as_str()),
+        (Wire::OpenAiResponses, "https://gateway.example/v1", "my-model")
+    );
+}

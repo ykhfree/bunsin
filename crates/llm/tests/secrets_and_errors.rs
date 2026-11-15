@@ -9,7 +9,7 @@ use common::*;
 use serde_json::json;
 use std::time::Duration;
 
-const WIRES: [Wire; 2] = [Wire::OpenAiChat, Wire::AnthropicMessages];
+const WIRES: [Wire; 3] = [Wire::OpenAiChat, Wire::OpenAiResponses, Wire::AnthropicMessages];
 
 #[test]
 fn debug_output_hides_the_token() {
@@ -49,6 +49,12 @@ async fn redacts_a_token_quoted_in_a_malformed_reply() {
     // serde_json quotes the offending string value in its error text.
     let replies = [
         (Wire::OpenAiChat, json!({"choices": [], "usage": TOKEN})),
+        (
+            Wire::OpenAiResponses,
+            json!({"status": "completed", "output": [], "usage": TOKEN}),
+        ),
+        // The unknown status is quoted by this crate's own message.
+        (Wire::OpenAiResponses, json!({"status": TOKEN, "output": []})),
         (
             Wire::AnthropicMessages,
             json!({"content": [], "stop_reason": "end_turn", "usage": TOKEN}),
