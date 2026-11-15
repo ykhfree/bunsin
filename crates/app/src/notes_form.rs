@@ -2,16 +2,19 @@
 //! The typed text lives in the input fields. Only Save sends it to the server.
 
 use crate::bridge::{NoteResult, SaveError, UiCommand, UiState};
-use crate::shell::{Shell, labelled};
+use crate::shell::{Shell, labelled, labelled_as};
+use crate::theme::{card, code_block, field, icon, notice, palette, quiet};
 use bunsin_api::WikiPageUpdate;
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::InboxBody;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiText};
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::{
-    App, AppContext, Context, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+    App, AppContext, Context, Entity, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 
 const PAGE_CONFLICT: &str = "The page changed on the server since this form loaded it. Nothing was saved.";
@@ -21,6 +24,7 @@ const PENDING: &str = "A change by the agent for this page waits in the inbox. \
     If you save here, that change can no longer be approved.";
 const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 const AGENT_PAGE: &str = "If you save a change, the page counts as written by you. Its sources stay.";
+const EMPTY: &str = "Select a page, or make a new one.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
 
 /// What the fields hold.
@@ -288,99 +292,154 @@ impl Shell {
     }
 
     /// The list of pages. A click opens the page.
-    fn notes_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn notes_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let pages = self.state.notes.as_deref().unwrap_or_default();
         let open = match &self.notes.draft {
             Some(Draft::Page { base, .. }) => Some(base.slug.as_str()),
             _ => None,
         };
+        let theme = cx.theme();
+        let (selected_bg, radius, mono) = (theme.muted, theme.radius, theme.mono_font_family.clone());
         let rows = pages.iter().map(|page| {
             let slug = page.slug.clone();
-            let mark = if open == Some(slug.as_str()) { "● " } else { "" };
-            let text = SharedString::from(format!("{mark}{} ({slug}) · {}", page.title, page.summary));
+            let selected = open == Some(slug.as_str());
+            let mark = if selected { "● " } else { "" };
+            let label = format!("{mark}{} ({slug}) · {}", page.title, page.summary);
             div()
                 .id(SharedString::from(format!("note-row-{slug}")))
                 .test_support()
-                .aria_label(text.clone())
+                .aria_label(label)
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .px_3()
+                .py_2()
+                .rounded(radius)
                 .cursor_pointer()
-                .child(text)
+                .when(selected, |row| row.bg(selected_bg))
+                .when(!selected, |row| row.hover(|row| row.bg(selected_bg)))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(SharedString::from(page.title.clone())),
+                        )
+                        .child(quiet(slug.clone(), cx).flex_none().font_family(mono.clone()).text_xs()),
+                )
+                .child(quiet(page.summary.clone(), cx))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.note_go(Nav::Open(slug.clone()), false, window, cx);
                     cx.notify();
                 }))
         });
         div()
-            .id("notes-list")
-            .w(px(340.))
+            .w(px(300.))
             .flex_none()
             .flex()
             .flex_col()
             .gap_2()
-            .overflow_y_scroll()
-            .child(labelled("notes-count", format!("Pages: {}", pages.len())))
             .child(
-                Button::new("note-new")
-                    .label("New page")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.note_go(Nav::New, false, window, cx);
-                        cx.notify();
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(labelled_as(
+                        "notes-count",
+                        format!("Pages: {}", pages.len()),
+                        quiet(
+                            match pages.len() {
+                                0 => "No page yet".to_owned(),
+                                1 => "1 page".to_owned(),
+                                count => format!("{count} pages"),
+                            },
+                            cx,
+                        ),
+                    ))
+                    .child(
+                        Button::new("note-new")
+                            .small()
+                            .icon(icon("plus"))
+                            .label("New page")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.note_go(Nav::New, false, window, cx);
+                                cx.notify();
+                            })),
+                    ),
             )
-            .children(rows)
+            .child(
+                div()
+                    .id("notes-list")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
     }
 
     /// The notes view: the list, and the open page if there is one.
     pub(crate) fn notes_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let form = &self.notes;
         let changed = form.changed(cx);
+        let cx = &*cx;
+        let colors = palette(cx);
         let view = div()
             .id("notes")
             .flex_1()
+            .min_h(px(0.))
             .min_w(px(0.))
             .flex()
-            .gap_4()
+            .gap_5()
             .child(self.notes_list(cx));
-        let editor = div()
-            .id("note-editor")
-            .flex_1()
-            .min_w(px(0.))
-            .flex()
-            .flex_col()
-            .gap_2()
-            .overflow_y_scroll();
-        let message = labelled("note-message", form.message.clone().unwrap_or_default());
+        let editor = card(cx).id("note-editor").flex_1().min_w(px(0.)).overflow_y_scroll();
+        // The window's own message. It is not drawn while there is none.
+        let message = div()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(labelled("note-message", form.message.clone().unwrap_or_default()));
         let Some(draft) = &form.draft else {
             return view.child(
                 editor
-                    .child(labelled("note-heading", "Select a page, or make a new one."))
+                    .child(labelled_as("note-heading", EMPTY, quiet(EMPTY, cx)))
                     .child(message),
             );
         };
 
-        let heading = match draft {
-            Draft::New => "New page".to_owned(),
-            Draft::Page { base, .. } => format!(
-                "Page `{}` · revision {} · written by {}",
-                base.slug,
-                base.revision,
-                match base.author {
+        let page = match draft {
+            Draft::Page { base, gone } => Some((base, *gone)),
+            Draft::New => None,
+        };
+        let (heading, name, about) = match page {
+            None => ("New page".to_owned(), "New page".to_owned(), String::new()),
+            Some((base, _)) => {
+                let author = match base.author {
                     WikiAuthor::Agent => "the agent, approved by you",
                     WikiAuthor::Owner => "you",
-                }
-            ),
+                };
+                (
+                    format!(
+                        "Page `{}` · revision {} · written by {author}",
+                        base.slug, base.revision
+                    ),
+                    base.slug.clone(),
+                    format!("revision {}, written by {author}", base.revision),
+                )
+            }
         };
         let result = match &self.state.note_result {
             Some(NoteResult::Saved {
                 result: Err(SaveError::Failed(error)),
                 ..
             })
-            | Some(NoteResult::Deleted { result: Err(error), .. }) => error.clone(),
-            Some(NoteResult::Saved { result: Ok(()), .. }) if !changed => "Saved".to_owned(),
-            _ => String::new(),
-        };
-        let page = match draft {
-            Draft::Page { base, gone } => Some((base, *gone)),
-            Draft::New => None,
+            | Some(NoteResult::Deleted { result: Err(error), .. }) => Err(error.clone()),
+            Some(NoteResult::Saved { result: Ok(()), .. }) if !changed => Ok("Saved"),
+            _ => Ok(""),
         };
         // A pending change of the agent was written for the revision that a save here replaces.
         let pending = page.is_some_and(|(base, _)| {
@@ -395,88 +454,172 @@ impl Shell {
             let lines: Vec<String> = base
                 .sources
                 .iter()
-                .map(|source| format!("- {}: {}", source.origin, source.detail))
+                .map(|source| format!("{}: {}", source.origin, source.detail))
                 .collect();
+            let label = format!("Sources:\n- {}", lines.join("\n- "));
             div()
-                .id("note-sources-box")
-                .max_h(px(120.))
-                .overflow_y_scroll()
-                .child(labelled("note-sources", format!("Sources:\n{}", lines.join("\n"))))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(quiet("Where the agent read this", cx))
+                .child(
+                    div()
+                        .id("note-sources-box")
+                        .max_h(px(96.))
+                        .overflow_y_scroll()
+                        .child(labelled_as(
+                            "note-sources",
+                            label,
+                            code_block(cx)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(lines.into_iter().map(|line| div().child(SharedString::from(line)))),
+                        )),
+                )
         });
 
-        let mut buttons = div()
-            .flex()
-            .gap_2()
-            .child(
-                Button::new("note-save")
-                    .label("Save")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_note(false, cx);
-                        cx.notify();
-                    })),
-            );
+        let mut buttons =
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new("note-save")
+                        .primary()
+                        .label("Save")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.save_note(false, cx);
+                            cx.notify();
+                        })),
+                );
         if page.is_some() {
-            buttons = buttons.child(
-                Button::new("note-delete")
-                    .label(if form.confirm_delete {
-                        "Yes, delete the page"
-                    } else {
-                        "Delete"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.delete_note();
-                        cx.notify();
-                    })),
-            );
+            let delete = Button::new("note-delete")
+                .label(if form.confirm_delete {
+                    "Yes, delete the page"
+                } else {
+                    "Delete"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.delete_note();
+                    cx.notify();
+                }));
+            buttons = buttons.child(if form.confirm_delete {
+                delete.danger()
+            } else {
+                delete.ghost()
+            });
         }
-
-        let editor = editor
-            .child(labelled("note-heading", heading))
-            .children(
-                page.is_none()
-                    .then(|| Input::new(&form.slug).id("note-slug").aria_label("Page name")),
-            )
-            .child(Input::new(&form.title).id("note-title").aria_label("Title"))
-            .child(Input::new(&form.summary).id("note-summary").aria_label("Summary"))
-            // The text area has no ID of its own. Tests find it inside this element.
-            .child(
-                div()
-                    .id("note-body")
-                    .child(Textarea::new(&form.body).aria_label("Text").h(px(300.))),
-            )
-            .child(buttons)
-            .child(labelled("note-changes", if changed { "Not saved" } else { "" }))
-            .child(labelled(
-                "note-confirm",
-                if form.confirm_delete { CONFIRM_DELETE } else { "" },
+        let confirm = if form.confirm_delete { CONFIRM_DELETE } else { "" };
+        let unsaved = if changed { "Not saved" } else { "" };
+        let (result_text, result_color) = match &result {
+            Ok(text) => ((*text).to_owned(), colors.done),
+            Err(error) => (error.clone(), colors.stopped),
+        };
+        let buttons = buttons
+            .child(labelled_as(
+                "note-changes",
+                unsaved,
+                div().text_sm().text_color(colors.waiting).child(unsaved),
             ))
-            .child(message)
-            .child(labelled("note-result", result))
-            .children(page.is_some_and(|(_, gone)| gone).then(|| labelled("note-gone", GONE)))
-            .children(pending.then(|| labelled("note-pending", PENDING)))
-            .children(
-                page.is_some_and(|(base, _)| base.author == WikiAuthor::Agent)
-                    .then(|| labelled("note-agent-page", AGENT_PAGE)),
-            )
+            .child(labelled_as(
+                "note-result",
+                result_text.clone(),
+                div()
+                    .text_sm()
+                    .text_color(result_color)
+                    .child(SharedString::from(result_text)),
+            ))
+            .child(labelled_as(
+                "note-confirm",
+                confirm,
+                div().text_sm().text_color(colors.stopped).child(confirm),
+            ));
+
+        // What the owner must know before typing or saving. It is above the fields, so it is never below the fold.
+        let notices = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(form.blocked.clone().map(|nav| {
+                notice(colors.waiting, cx)
+                    .child(labelled("note-blocked", UNSAVED))
+                    .child(
+                        Button::new("note-discard")
+                            .small()
+                            .label("Discard the changes")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.note_go(nav.clone(), true, window, cx);
+                                cx.notify();
+                            })),
+                    )
+            }))
             .children(form.conflict.then(|| {
-                Self::conflict_warning(
+                notice(colors.stopped, cx).child(Self::conflict_warning(
                     "note",
                     PAGE_CONFLICT,
                     Self::load_note,
                     |this, cx| this.save_note(true, cx),
                     cx,
+                ))
+            }))
+            .children(
+                page.is_some_and(|(_, gone)| gone)
+                    .then(|| notice(colors.stopped, cx).child(labelled("note-gone", GONE))),
+            )
+            .children(pending.then(|| notice(colors.waiting, cx).child(labelled("note-pending", PENDING))))
+            .children(
+                page.is_some_and(|(base, _)| base.author == WikiAuthor::Agent)
+                    .then(|| labelled_as("note-agent-page", AGENT_PAGE, quiet(AGENT_PAGE, cx))),
+            );
+
+        let editor = editor
+            .child(labelled_as(
+                "note-heading",
+                heading,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(page.is_some(), |name| {
+                                name.font_family(cx.theme().mono_font_family.clone())
+                            })
+                            .child(SharedString::from(name)),
+                    )
+                    .child(quiet(about, cx)),
+            ))
+            .child(notices)
+            .children(page.is_none().then(|| {
+                field(
+                    "Name, in a-z, 0-9 and -",
+                    Input::new(&form.slug).id("note-slug").aria_label("Page name"),
+                    cx,
                 )
             }))
-            .children(form.blocked.clone().map(|nav| {
-                div().flex().gap_2().child(labelled("note-blocked", UNSAVED)).child(
-                    Button::new("note-discard")
-                        .label("Discard the changes")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.note_go(nav.clone(), true, window, cx);
-                            cx.notify();
-                        })),
-                )
-            }))
+            .child(field(
+                "Title",
+                Input::new(&form.title).id("note-title").aria_label("Title"),
+                cx,
+            ))
+            .child(field(
+                "Summary, one line for the list",
+                Input::new(&form.summary).id("note-summary").aria_label("Summary"),
+                cx,
+            ))
+            // The text area has no ID of its own. Tests find it inside this element.
+            .child(field(
+                "Text",
+                div()
+                    .id("note-body")
+                    .child(Textarea::new(&form.body).aria_label("Text").h(px(240.))),
+                cx,
+            ))
+            .child(buttons)
+            .child(message)
             .children(sources);
         view.child(editor)
     }

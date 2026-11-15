@@ -2,13 +2,14 @@
 
 use crate::bridge::{REFRESH_EVERY, spawn_bridge};
 use crate::connection::{Connection, TokenStore, client, load_connection, save_connection};
-use crate::shell::{Shell, labelled};
+use crate::shell::{Shell, labelled, labelled_as};
+use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{ApiError, ApiResult, EngineApi};
 use bunsin_client::RemoteEngine;
-use gpui_kit::component::Disableable;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::{AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable};
+use gpui_kit::{AppContext, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled, Window, div, px};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -190,61 +191,90 @@ fn save(dir: &Path, tokens: &dyn TokenStore, connection: &Connection, token: &st
 
 impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         if let Some(shell) = &self.shell {
+            // Disconnect sits at the foot of the shell's left column, under the state of the connection.
             return div()
                 .size_full()
-                .flex()
-                .flex_col()
+                .relative()
+                .child(shell.clone())
                 .child(
-                    div().flex().justify_end().p_2().child(
+                    div().absolute().bottom_3().left_3().child(
                         Button::new("disconnect")
+                            .small()
+                            .ghost()
                             .label("Disconnect")
                             .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
                     ),
                 )
-                .child(div().flex_1().child(shell.clone()))
                 .into_any_element();
         }
 
-        let field = |label: &'static str, input: Input| div().flex().flex_col().gap_1().child(label).child(input);
+        let error = self.error.clone().unwrap_or_default();
+        let connecting = if self.connecting { "Connecting…" } else { "" };
         div()
             .size_full()
             .flex()
+            .items_center()
             .justify_center()
-            .p_4()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .text_size(theme.font_size)
             .child(
-                div()
-                    .w(px(420.))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child("Connect to a Bunsin server")
+                card(cx)
+                    .w(px(440.))
+                    .p_6()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Bunsin"))
+                            .child(labelled_as(
+                                "connect-title",
+                                "Connect to a Bunsin server",
+                                quiet("Connect to the server that runs your agent.", cx),
+                            )),
+                    )
                     .child(field(
                         "Server address",
                         Input::new(&self.server).id("server").aria_label("Server address"),
+                        cx,
                     ))
                     .child(field(
-                        "Access token",
+                        "Access token, from the operator of the server",
                         // Masked, with no toggle that would show the token.
                         Input::new(&self.token).id("token").aria_label("Access token"),
+                        cx,
                     ))
                     .child(field(
-                        "CA certificate file (optional)",
+                        "CA certificate file, only for a private CA",
                         Input::new(&self.ca_cert)
                             .id("ca-cert")
                             .aria_label("CA certificate file"),
+                        cx,
                     ))
                     .child(
-                        Button::new("connect")
-                            .label("Connect")
-                            .disabled(self.connecting)
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                Button::new("connect")
+                                    .primary()
+                                    .label("Connect")
+                                    .disabled(self.connecting)
+                                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                            )
+                            .child(labelled_as("connect-status", connecting, quiet(connecting, cx))),
                     )
-                    .child(labelled(
-                        "connect-status",
-                        if self.connecting { "Connecting…" } else { "" },
-                    ))
-                    .child(labelled("connect-error", self.error.clone().unwrap_or_default())),
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette(cx).stopped)
+                            .child(labelled("connect-error", error)),
+                    ),
             )
             .into_any_element()
     }

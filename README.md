@@ -408,11 +408,18 @@ private CA, the CA certificate file. It checks them against the server, then kee
 address in `~/Library/Application Support/Bunsin/connection.json` and the token in the
 macOS Keychain.
 
+![The inbox of the window](docs/screens/inbox-light.png)
+
 The window has three views. **Inbox** shows the approval inbox with every argument of each
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Settings** has the connections (LLM endpoint,
 connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds. An edit before
 approval is available on the command line only.
+
+The window uses the light or the dark colors of the system. More pictures are in
+[`docs/screens`](docs/screens): the inbox in the dark mode, the notes and the settings.
+The pictures are drawn without a window from test data:
+`cargo test -p bunsin-app --test screens -- <output folder>`.
 
 For development, `BUNSIN_SERVER` and `BUNSIN_TOKEN` in the environment take the place of
 the saved connection.

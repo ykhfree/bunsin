@@ -4,11 +4,16 @@ use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
 use crate::notes_form::NotesForm;
 use crate::privacy::PrivacyForm;
+use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::button::Button;
-use gpui_kit::{Context, Div, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, prelude::*, px};
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::{
+    AnyElement, App, Context, Div, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+    div, prelude::*, px,
+};
 use tokio::sync::mpsc;
 
 const AUDIT_ROWS: usize = 50;
@@ -186,12 +191,406 @@ impl Shell {
 /// Text that tests can read through its accessibility label. Never pass a secret.
 pub(crate) fn labelled(id: impl Into<SharedString>, text: impl Into<SharedString>) -> impl IntoElement {
     let text = text.into();
-    div().id(id.into()).test_support().aria_label(text.clone()).child(text)
+    // An empty text still has the height of a line, so it is not drawn.
+    let drawn = (!text.is_empty()).then(|| text.clone());
+    div().id(id.into()).test_support().aria_label(text).children(drawn)
+}
+
+/// An element that tests read through `label`, drawn as `content`.
+/// Build both from the same value, so that the picture and the label cannot differ.
+pub(crate) fn labelled_as(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    content: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .test_support()
+        .aria_label(label.into())
+        .child(content)
+}
+
+/// The word and the color that show a state of an inbox item.
+fn state_view(state: ApprovalState, cx: &App) -> (&'static str, Hsla) {
+    let palette = palette(cx);
+    let quiet = cx.theme().muted_foreground;
+    match state {
+        ApprovalState::Draft => ("Draft, cannot run", quiet),
+        ApprovalState::Pending => ("Waiting for you", palette.waiting),
+        ApprovalState::Approved => ("Approved", palette.done),
+        ApprovalState::Executing => ("Running", palette.waiting),
+        ApprovalState::Executed => ("Done", palette.done),
+        ApprovalState::Rejected => ("Dismissed", quiet),
+        ApprovalState::Failed => ("Failed", palette.stopped),
+    }
+}
+
+/// One argument value as the owner reads it: a text as it is, anything else as JSON.
+fn argument_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+impl Shell {
+    /// What an item is, as its first line.
+    fn item_head(item: &InboxItem, cx: &App) -> impl IntoElement {
+        let (word, color) = state_view(item.state, cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let what = match &item.body {
+            InboxBody::ToolCall { tool, .. } => div().font_family(mono).child(SharedString::from(tool.clone())),
+            InboxBody::Escalation { .. } => div().child("Needs your decision"),
+            InboxBody::WikiChange { slug, previous, .. } => div()
+                .flex()
+                .gap_2()
+                .child(SharedString::from(format!("Note {slug}")))
+                .child(
+                    quiet(
+                        if previous.is_some() {
+                            "changes the page"
+                        } else {
+                            "new page"
+                        },
+                        cx,
+                    )
+                    .font_weight(FontWeight::NORMAL),
+                ),
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(what.font_weight(FontWeight::SEMIBOLD))
+            .child(state_mark(word, color))
+    }
+
+    /// What the owner must read before deciding. Nothing in it is cut or hidden.
+    fn item_detail(item: &InboxItem, cx: &App) -> AnyElement {
+        match &item.body {
+            // Every argument has its own row, so the owner approves exactly what will run.
+            InboxBody::ToolCall { args, .. } => code_block(cx)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(args.iter().map(|(name, value)| {
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(96.))
+                                .flex_none()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(name.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(SharedString::from(argument_text(value))),
+                        )
+                }))
+                .into_any_element(),
+            InboxBody::Escalation { summary } => div().child(SharedString::from(summary.clone())).into_any_element(),
+            InboxBody::WikiChange {
+                text,
+                sources,
+                previous,
+                ..
+            } => {
+                let sources = sources
+                    .iter()
+                    .map(|source| div().child(SharedString::from(format!("{}: {}", source.origin, source.detail))));
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(SharedString::from(text.title.clone())),
+                    )
+                    .child(quiet(text.summary.clone(), cx))
+                    .child(div().child(SharedString::from(text.body.clone())))
+                    .child(quiet("Where the agent read this", cx))
+                    .child(code_block(cx).flex().flex_col().gap_1().children(sources))
+                    .children(previous.as_ref().map(|previous| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(quiet("The page now, which this replaces", cx))
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(format!(
+                                        "{}\n{}\n\n{}",
+                                        previous.title, previous.summary, previous.body
+                                    ))),
+                            )
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// One inbox item as a card.
+    fn item_card(&self, item: &InboxItem, cx: &Context<Self>) -> impl IntoElement {
+        let id = item.id;
+        let detail = labelled_as(format!("detail-{id}"), inbox_detail(item), Self::item_detail(item, cx));
+        let mut row = card(cx)
+            .flex_none()
+            .child(labelled_as(
+                format!("inbox-{id}"),
+                inbox_title(item),
+                Self::item_head(item, cx),
+            ))
+            .child(match item.body {
+                // A long page scrolls in its own box, so its buttons stay close.
+                InboxBody::WikiChange { .. } => div()
+                    .id(SharedString::from(format!("detail-box-{id}")))
+                    .test_support()
+                    .max_h(px(220.))
+                    .overflow_y_scroll()
+                    // The frame shows that this box is a window onto a longer text.
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(detail)
+                    .into_any_element(),
+                // An action shows every argument at full height. None is hidden in a box.
+                _ => detail.into_any_element(),
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(quiet("Why", cx).flex_none())
+                    .child(div().text_sm().child(SharedString::from(item.rationale.clone()))),
+            )
+            .children(inbox_basis(item).map(|basis| {
+                let lines = item.basis.iter().map(|read| {
+                    let args = serde_json::to_string(&read.args).expect("a JSON map always serializes");
+                    div().child(SharedString::from(format!("{} {args}", read.tool)))
+                });
+                labelled_as(
+                    format!("basis-{id}"),
+                    basis,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(quiet("Read before this proposal", cx))
+                        .child(
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(cx.theme().mono_font_size)
+                                .text_color(cx.theme().muted_foreground)
+                                .children(lines),
+                        ),
+                )
+            }));
+        let mut buttons = div().flex().gap_2().pt_1();
+        if item.state == ApprovalState::Pending {
+            buttons = buttons.child(
+                Button::new(SharedString::from(format!("approve-{id}")))
+                    .primary()
+                    // A note is stored. Nothing runs on another system.
+                    .label(match item.body {
+                        InboxBody::WikiChange { .. } => "Approve and keep",
+                        _ => "Approve and run",
+                    })
+                    .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
+            );
+        }
+        if matches!(item.state, ApprovalState::Pending | ApprovalState::Draft) {
+            buttons = buttons.child(
+                Button::new(SharedString::from(format!("reject-{id}")))
+                    .ghost()
+                    .label("Dismiss")
+                    .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Reject(id)))),
+            );
+            row = row.child(buttons);
+        }
+        row
+    }
+
+    /// The left column: the views, the profiles and the state of the connection.
+    fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (accent_bg, quiet_ink, primary, on_primary) = (
+            theme.sidebar_accent,
+            theme.muted_foreground,
+            theme.primary,
+            theme.primary_foreground,
+        );
+        let radius = theme.radius;
+        let waiting = self.state.snapshot.as_ref().map_or(0, |snapshot| {
+            snapshot
+                .inbox
+                .iter()
+                .filter(|item| item.state == ApprovalState::Pending)
+                .count()
+        });
+        let views = [
+            ("tab-inbox", "Inbox", "inbox", View::Inbox, waiting),
+            ("tab-notes", "Notes", "book-open", View::Notes, 0),
+            ("tab-settings", "Settings", "settings", View::Settings, 0),
+        ]
+        .map(|(id, text, picture, view, count)| {
+            let open = self.view == view;
+            div()
+                .id(id)
+                .test_support()
+                .aria_label(text)
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded(radius)
+                .cursor_pointer()
+                .when(open, |row| row.bg(accent_bg).font_weight(FontWeight::MEDIUM))
+                .when(!open, |row| row.text_color(quiet_ink).hover(|row| row.bg(accent_bg)))
+                .child(icon(picture).size_4())
+                .child(div().flex_1().child(text))
+                // The number of items that wait for the owner.
+                .children((count > 0).then(|| {
+                    div()
+                        .px_1p5()
+                        .rounded_full()
+                        .bg(primary)
+                        .text_color(on_primary)
+                        .text_xs()
+                        .child(SharedString::from(count.to_string()))
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.view = view;
+                    cx.notify();
+                }))
+        });
+
+        let profiles = self.state.profiles.iter().map(|profile| {
+            let id = profile.id.clone();
+            let selected = self.state.selected.as_deref() == Some(id.as_str());
+            let label = format!(
+                "{}{} ({})",
+                if selected { "● " } else { "" },
+                profile.display_name,
+                profile.id
+            );
+            let initial: String = profile.display_name.chars().take(1).collect();
+            div()
+                .id(SharedString::from(format!("profile-{id}")))
+                .test_support()
+                .aria_label(label)
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded(radius)
+                .cursor_pointer()
+                .when(selected, |row| row.bg(accent_bg))
+                .when(!selected, |row| row.hover(|row| row.bg(accent_bg)))
+                .child(
+                    div()
+                        .size(px(22.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .text_xs()
+                        .when(selected, |mark| mark.bg(primary).text_color(on_primary))
+                        .when(!selected, |mark| mark.bg(accent_bg).text_color(quiet_ink))
+                        .child(SharedString::from(initial)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(SharedString::from(profile.display_name.clone())),
+                )
+                .child(quiet(profile.id.clone(), cx))
+                .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SelectProfile(id.clone()))))
+        });
+
+        let palette = palette(cx);
+        let connection = if self.state.connected {
+            state_mark("Connected to the server", palette.done)
+        } else {
+            state_mark("Not connected", palette.stopped)
+        };
+        div()
+            .w(px(232.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .p_3()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
+            .child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Bunsin"),
+            )
+            .child(div().flex().flex_col().gap_0p5().children(views))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(quiet("Profiles", cx).px_2().pb_1())
+                    .children(profiles),
+            )
+            .child(div().flex_1())
+            // The connect screen puts its Disconnect button into the room below.
+            .child(div().px_2().pb_10().child(connection))
+    }
+
+    /// The line above every view: its name, the state of the agent and the kill switch.
+    fn header(&self, cx: &Context<Self>) -> impl IntoElement {
+        let snapshot = self.state.snapshot.as_ref();
+        let stopped = snapshot.is_some_and(|s| s.kill_switch);
+        let palette = palette(cx);
+        let (status, color) = match snapshot {
+            None if !self.state.connected => ("Not connected to the server", palette.stopped),
+            None => ("No profile", cx.theme().muted_foreground),
+            Some(_) if stopped => ("Stopped: the agent makes no changes", palette.stopped),
+            Some(_) => ("Running", palette.done),
+        };
+        let title = match self.view {
+            View::Inbox => "Inbox",
+            View::Notes => "Notes",
+            View::Settings => "Settings",
+        };
+        let switch = Button::new("kill-switch")
+            .label(if stopped { "Resume changes" } else { "Stop all changes" })
+            .icon(icon(if stopped { "play" } else { "pause" }))
+            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped))));
+        div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(div().flex_1().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(labelled_as("status", status, state_mark(status, color)))
+            .child(if stopped { switch.primary() } else { switch.outline() })
+    }
 }
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The forms are built first. The lists below borrow `cx` until they are drawn.
+        // The forms are built first. They need `cx` for writing.
         let notes = (self.view == View::Notes).then(|| self.notes_section(cx).into_any_element());
         let forms = (self.view == View::Settings).then(|| {
             (
@@ -199,89 +598,13 @@ impl Render for Shell {
                 self.privacy_section(cx).into_any_element(),
             )
         });
+        let cx = &*cx;
+        let theme = cx.theme();
         let snapshot = self.state.snapshot.as_ref();
-        let stopped = snapshot.is_some_and(|s| s.kill_switch);
-        let status = match snapshot {
-            None if !self.state.connected => "Not connected to the server",
-            None => "No profile",
-            Some(_) if stopped => "Stopped: the agent makes no changes",
-            Some(_) => "Running",
-        };
-
-        let profiles = self.state.profiles.iter().map(|profile| {
-            let id = profile.id.clone();
-            let mark = if self.state.selected.as_deref() == Some(id.as_str()) {
-                "● "
-            } else {
-                ""
-            };
-            let text = SharedString::from(format!("{mark}{} ({})", profile.display_name, profile.id));
-            div()
-                .id(SharedString::from(format!("profile-{id}")))
-                .test_support()
-                .aria_label(text.clone())
-                .cursor_pointer()
-                .child(text)
-                .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SelectProfile(id.clone()))))
-        });
-
-        let inbox = snapshot
-            .map(|s| s.inbox.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .map(|item| {
-                let id = item.id;
-                let mut row = div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_2()
-                    .border_1()
-                    .child(labelled(format!("inbox-{id}"), inbox_title(item)))
-                    .child(match item.body {
-                        // A long page scrolls in its own box, so its buttons stay close.
-                        InboxBody::WikiChange { .. } => div()
-                            .id(SharedString::from(format!("detail-box-{id}")))
-                            .test_support()
-                            .max_h(px(220.))
-                            .overflow_y_scroll()
-                            .child(labelled(format!("detail-{id}"), inbox_detail(item)))
-                            .into_any_element(),
-                        // An action shows every argument at full height. None is hidden in a box.
-                        _ => labelled(format!("detail-{id}"), inbox_detail(item)).into_any_element(),
-                    })
-                    .child(div().child(SharedString::from(format!("Why: {}", item.rationale))))
-                    .children(inbox_basis(item).map(|basis| labelled(format!("basis-{id}"), basis)));
-                let mut buttons = div().flex().gap_2();
-                if item.state == ApprovalState::Pending {
-                    buttons = buttons.child(
-                        Button::new(SharedString::from(format!("approve-{id}")))
-                            // A note is stored. Nothing runs on another system.
-                            .label(match item.body {
-                                InboxBody::WikiChange { .. } => "Approve and keep",
-                                _ => "Approve and run",
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
-                    );
-                }
-                if matches!(item.state, ApprovalState::Pending | ApprovalState::Draft) {
-                    buttons = buttons.child(
-                        Button::new(SharedString::from(format!("reject-{id}")))
-                            .label("Dismiss")
-                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Reject(id)))),
-                    );
-                    row = row.child(buttons);
-                }
-                row
-            });
-
+        let items = snapshot.map(|s| s.inbox.as_slice()).unwrap_or_default();
+        let waiting = items.iter().filter(|item| item.state == ApprovalState::Pending).count();
         let audit = snapshot.map(|s| s.audit.as_slice()).unwrap_or_default();
-        let audit_rows = audit.iter().take(AUDIT_ROWS).map(|entry| {
-            div().child(SharedString::from(format!(
-                "{}  {}  {}",
-                entry.at, entry.kind, entry.detail
-            )))
-        });
+        let error = self.state.error.clone().unwrap_or_default();
 
         let page = if let Some(notes) = notes {
             notes
@@ -289,53 +612,109 @@ impl Render for Shell {
             div()
                 .id("settings")
                 .flex_1()
+                .min_h(px(0.))
                 .min_w(px(0.))
                 .flex()
                 .flex_wrap()
-                .gap_4()
+                .items_start()
+                .gap_5()
                 .overflow_y_scroll()
                 .child(connections)
                 .child(privacy)
                 .into_any_element()
         } else {
+            let activity = audit.iter().take(AUDIT_ROWS).map(|entry| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap_2()
+                            .child(div().text_sm().child(SharedString::from(entry.kind.replace('_', " "))))
+                            .child(quiet(utc_minute(entry.at), cx).flex_none()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(entry.detail.to_string())),
+                    )
+            });
             div()
                 .flex_1()
-                // Long lines must not push the settings columns out of the window.
+                .min_h(px(0.))
+                // Long lines must not push the columns out of the window.
                 .min_w(px(0.))
                 .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div().flex().gap_3().child(labelled("status", status)).child(
-                        Button::new("kill-switch")
-                            .label(if stopped { "Resume changes" } else { "Stop all changes" })
-                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped)))),
-                    ),
-                )
-                .child(labelled("error", self.state.error.clone().unwrap_or_default()))
-                .child(labelled("inbox-count", format!("Approval inbox: {}", inbox.len())))
+                .gap_5()
                 .child(
                     div()
-                        .id("inbox")
-                        // The inbox gets the height that the audit log does not need.
                         .flex_1()
-                        .min_h(px(0.))
+                        .min_w(px(0.))
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .overflow_y_scroll()
-                        .children(inbox),
+                        .gap_3()
+                        .child(labelled_as(
+                            "inbox-count",
+                            format!("Approval inbox: {}", items.len()),
+                            quiet(
+                                match (items.len(), waiting) {
+                                    (0, _) => {
+                                        "Nothing is here yet. What the agent proposes appears in this list.".to_owned()
+                                    }
+                                    (all, 0) => format!("{all} in the list, none waits for you"),
+                                    (all, waiting) => format!("{all} in the list, {waiting} wait for you"),
+                                },
+                                cx,
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .id("inbox")
+                                // The list has the whole height. The activity log is beside it, not below.
+                                .flex_1()
+                                .min_h(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .overflow_y_scroll()
+                                .children(items.iter().map(|item| self.item_card(item, cx))),
+                        ),
                 )
-                .child(labelled("audit-count", format!("Audit log: {} entries", audit.len())))
                 .child(
                     div()
-                        .id("audit")
-                        // A short log at the bottom. The approval items are what the owner acts on.
-                        .max_h(px(160.))
+                        .w(px(330.))
+                        .flex_none()
                         .flex()
                         .flex_col()
-                        .overflow_y_scroll()
-                        .children(audit_rows),
+                        .gap_1()
+                        .child(labelled_as(
+                            "audit-count",
+                            format!("Audit log: {} entries", audit.len()),
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
+                                .child(quiet(format!("{} entries, times in UTC", audit.len()), cx)),
+                        ))
+                        .child(
+                            div()
+                                .id("audit")
+                                .flex_1()
+                                .min_h(px(0.))
+                                .flex()
+                                .flex_col()
+                                .overflow_y_scroll()
+                                .children(activity),
+                        ),
                 )
                 .into_any_element()
         };
@@ -343,33 +722,35 @@ impl Render for Shell {
         div()
             .size_full()
             .flex()
-            .gap_4()
-            .p_4()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .text_size(theme.font_size)
+            .child(self.sidebar(cx))
             .child(
                 div()
-                    .w(px(220.))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_4()
+                    .p_6()
                     .child(
-                        div().flex().gap_2().children(
-                            [
-                                ("tab-inbox", "Inbox", View::Inbox),
-                                ("tab-notes", "Notes", View::Notes),
-                                ("tab-settings", "Settings", View::Settings),
-                            ]
-                            .map(|(id, text, view)| {
-                                Button::new(id).label(text).on_click(cx.listener(move |this, _, _, cx| {
-                                    this.view = view;
-                                    cx.notify();
-                                }))
-                            }),
-                        ),
+                        // The failure of a command sits under the header. It takes no room while there is none.
+                        div().flex().flex_col().child(self.header(cx)).child(labelled_as(
+                            "error",
+                            error.clone(),
+                            // An empty text still has the height of a line, so it is not drawn.
+                            div().children((!error.is_empty()).then(|| {
+                                div()
+                                    .pt_2()
+                                    .text_color(palette(cx).stopped)
+                                    .child(SharedString::from(error))
+                            })),
+                        )),
                     )
-                    .child("Profiles")
-                    .children(profiles),
+                    .child(page),
             )
-            .child(page)
     }
 }
 

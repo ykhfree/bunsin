@@ -7,3 +7,4 @@ pub mod connections_form;
 pub mod notes_form;
 pub mod privacy;
 pub mod shell;
+pub mod theme;

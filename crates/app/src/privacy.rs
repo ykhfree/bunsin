@@ -2,14 +2,17 @@
 //! profile's settings. Only Save sends the draft to the server.
 
 use crate::bridge::{SaveError, UiCommand, UiState};
-use crate::shell::{CONFLICT, Shell, labelled};
+use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
+use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{Expected, PrivacyUpdate};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::{
-    App, AppContext, Context, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+    App, AppContext, Context, Entity, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 
 const HELP: &str = "Matching text is removed before the agent sees it. \
@@ -151,16 +154,13 @@ impl Shell {
 
     /// The privacy section. It shows the form only while the server's settings are known.
     pub(crate) fn privacy_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let section = div()
+        let cx = &*cx;
+        let section = card(cx)
             .id("privacy")
-            .w(px(360.))
+            .w(px(420.))
             .flex_none()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .overflow_y_scroll()
-            .child("Privacy")
-            .child(labelled("privacy-help", HELP));
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Privacy filter"))
+            .child(labelled_as("privacy-help", HELP, quiet(HELP, cx)));
         let form = &self.privacy;
         let (Some(server), Some(Draft { value: draft, .. })) = (&self.state.privacy, &form.draft) else {
             return section;
@@ -181,11 +181,21 @@ impl Shell {
         let rows = draft.custom.iter().enumerate().map(|(i, custom)| {
             div()
                 .flex()
-                .gap_2()
+                .items_center()
+                .gap_3()
                 .child(labelled(format!("pattern-label-{i}"), custom.label.clone()))
-                .child(labelled(format!("pattern-regex-{i}"), custom.pattern.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(cx.theme().mono_font_size)
+                        .child(labelled(format!("pattern-regex-{i}"), custom.pattern.clone())),
+                )
                 .child(
                     Button::new(SharedString::from(format!("remove-pattern-{i}")))
+                        .small()
+                        .ghost()
                         .label("Remove")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(draft) = &mut this.privacy.draft {
@@ -224,31 +234,60 @@ impl Shell {
                 draft.card_number,
                 |c, on| c.card_number = on,
             ))
-            .child(labelled(
+            .child(labelled_as(
                 "pattern-count",
                 format!("Custom patterns: {}", draft.custom.len()),
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(match draft.custom.len() {
+                        0 => "Your own patterns: none".to_owned(),
+                        count => format!("Your own patterns: {count}"),
+                    }),
             ))
             .children(rows)
-            .child(Input::new(&form.label).id("new-label").aria_label("Label"))
-            .child(Input::new(&form.pattern).id("new-pattern").aria_label("Pattern"))
+            .child(field(
+                "Name of the pattern",
+                Input::new(&form.label).id("new-label").aria_label("Label"),
+                cx,
+            ))
+            .child(field(
+                "Pattern",
+                Input::new(&form.pattern).id("new-pattern").aria_label("Pattern"),
+                cx,
+            ))
             .child(
                 Button::new("add-pattern")
-                    .label("Add")
+                    .self_start()
+                    .outline()
+                    .label("Add the pattern")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.privacy.add(window, cx);
                         cx.notify();
                     })),
             )
-            .child(labelled("privacy-message", form.message.unwrap_or_default()))
+            .child(
+                div()
+                    .text_color(palette(cx).stopped)
+                    .text_sm()
+                    .child(labelled("privacy-message", form.message.unwrap_or_default())),
+            )
             .child(
                 Button::new("save-privacy")
+                    .self_start()
+                    .primary()
                     .label("Save")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_privacy(false, cx);
                         cx.notify();
                     })),
             )
-            .child(labelled("privacy-changes", if changed { "Not saved" } else { "" }))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette(cx).waiting)
+                    .child(labelled("privacy-changes", if changed { "Not saved" } else { "" })),
+            )
             .child(labelled("privacy-result", result))
             .children(form.conflict.then(|| {
                 Self::conflict_warning(

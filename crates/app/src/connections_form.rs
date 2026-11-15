@@ -3,18 +3,20 @@
 //! A typed token goes from its masked field into the command, and nowhere else.
 
 use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
-use crate::shell::{CONFLICT, Shell, labelled};
+use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
+use crate::theme::{card, field, quiet};
 use bunsin_api::{
     ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange, TokenSource, ToolsReport,
 };
 use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, McpConfig, Wire, default_timeout_secs};
 use bunsin_core::tool::pin;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::radio::RadioGroup;
+use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, IntoElement, ParentElement, SharedString, Stateful, Styled, Window, div,
-    prelude::*, px,
+    App, AppContext, Context, Div, Entity, FontWeight, IntoElement, ParentElement, SharedString, Stateful, Styled,
+    Window, div, prelude::*, px,
 };
 
 /// The API formats, in the order of the choices on screen.
@@ -357,40 +359,59 @@ impl Shell {
             profile: profile.to_owned(),
             name: name.to_owned(),
         };
-        let mut buttons = div()
-            .flex()
-            .gap_2()
-            .child(Button::new("check").label("Check").on_click(send(check)));
+        let mut buttons = div().flex().gap_2().child(
+            Button::new("check")
+                .small()
+                .outline()
+                .label("Check")
+                .on_click(send(check)),
+        );
         let mut row = div()
             .id(SharedString::from(name.to_owned()))
             .flex()
             .flex_col()
             .gap_1()
-            .p_2()
+            .p_3()
+            .rounded(cx.theme().radius)
             .border_1()
-            .child(labelled("name", name.to_owned()));
+            .border_color(cx.theme().border)
+            .child(labelled_as(
+                "name",
+                name.to_owned(),
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(SharedString::from(name.to_owned())),
+            ));
         match &connector.mcp {
             McpConfig::Http { url } => {
                 row = row
-                    .child(labelled("address", url.clone()))
-                    .child(labelled("token", token_text(connector.token)));
+                    .child(labelled_as("address", url.clone(), quiet(url.clone(), cx)))
+                    .child(labelled_as(
+                        "token",
+                        token_text(connector.token),
+                        quiet(token_text(connector.token), cx),
+                    ));
                 let (edit_name, edited) = (name.to_owned(), connector.clone());
                 let remove = UiCommand::RemoveConnector {
                     profile: profile.to_owned(),
                     name: name.to_owned(),
                 };
                 buttons = buttons
+                    .child(Button::new("edit").small().ghost().label("Edit").on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.connections.load_connector(&edit_name, Some(&edited), window, cx);
+                            cx.notify();
+                        },
+                    )))
                     .child(
-                        Button::new("edit")
-                            .label("Edit")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.connections.load_connector(&edit_name, Some(&edited), window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(Button::new("remove").label("Remove").on_click(send(remove)));
+                        Button::new("remove")
+                            .small()
+                            .ghost()
+                            .label("Remove")
+                            .on_click(send(remove)),
+                    );
             }
-            McpConfig::Stdio { .. } => row = row.child(labelled("address", STDIO)),
+            McpConfig::Stdio { .. } => row = row.child(labelled_as("address", STDIO, quiet(STDIO, cx))),
         }
         row = row.child(buttons);
         match &self.state.connection_result {
@@ -407,6 +428,8 @@ impl Shell {
                         row = row
                             .child(
                                 Button::new("approve-tools")
+                                    .small()
+                                    .primary()
                                     .label("Approve these tools")
                                     .on_click(send(approve)),
                             )
@@ -431,16 +454,14 @@ impl Shell {
 
     /// The connections section. It shows the forms only while the server's connections are known.
     pub(crate) fn connections_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cx = &*cx;
         let section = div()
             .id("connections")
-            .w(px(380.))
+            .w(px(520.))
             .flex_none()
             .flex()
             .flex_col()
-            .gap_2()
-            .overflow_y_scroll()
-            .child("Connections")
-            .child(labelled("connections-help", HELP));
+            .gap_4();
         let form = &self.connections;
         let (Some(server), Some(profile)) = (&self.state.connections, &form.profile) else {
             return section;
@@ -465,11 +486,9 @@ impl Shell {
             _ => String::new(),
         };
         let selected_wire = WIRES.iter().position(|(wire, _)| *wire == form.wire);
-        let mut llm_section = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child("LLM endpoint")
+        let mut llm_section = card(cx)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("LLM endpoint"))
+            .child(labelled_as("connections-help", HELP, quiet(HELP, cx)))
             .child(
                 RadioGroup::horizontal("llm-wire")
                     .selected_index(selected_wire)
@@ -479,16 +498,32 @@ impl Shell {
                         cx.notify();
                     })),
             )
-            .child(
+            .child(field(
+                "Address",
                 Input::new(&form.llm_address)
                     .id("llm-address")
                     .aria_label("LLM address"),
-            )
-            .child(Input::new(&form.llm_model).id("llm-model").aria_label("Model name"))
-            .child(Input::new(&form.llm_token).id("llm-token").aria_label("LLM token"))
-            .child(labelled("llm-token-state", token_text(llm_token)))
+                cx,
+            ))
+            .child(field(
+                "Model",
+                Input::new(&form.llm_model).id("llm-model").aria_label("Model name"),
+                cx,
+            ))
+            .child(field(
+                "Token",
+                Input::new(&form.llm_token).id("llm-token").aria_label("LLM token"),
+                cx,
+            ))
+            .child(labelled_as(
+                "llm-token-state",
+                token_text(llm_token),
+                quiet(format!("Now: {}", token_text(llm_token)), cx),
+            ))
             .child(
                 Button::new("save-llm")
+                    .self_start()
+                    .primary()
                     .label("Save")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_llm(false, false, cx);
@@ -496,12 +531,16 @@ impl Shell {
                     })),
             );
         if llm_token == TokenSource::Stored {
-            llm_section = llm_section.child(Button::new("remove-llm-token").label("Remove stored token").on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.save_llm(true, false, cx);
-                    cx.notify();
-                }),
-            ));
+            llm_section = llm_section.child(
+                Button::new("remove-llm-token")
+                    .self_start()
+                    .ghost()
+                    .label("Remove stored token")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.save_llm(true, false, cx);
+                        cx.notify();
+                    })),
+            );
         }
         let llm_section = llm_section
             .child(labelled("llm-message", form.llm_message.unwrap_or_default()))
@@ -538,20 +577,31 @@ impl Shell {
         let mut connector_form = div()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(Input::new(&form.name).id("connector-name").aria_label("Connector name"))
-            .child(
+            .gap_3()
+            .child(quiet("Add a connector. To change one, use its name or Edit.", cx))
+            .child(field(
+                "Name",
+                Input::new(&form.name).id("connector-name").aria_label("Connector name"),
+                cx,
+            ))
+            .child(field(
+                "Address of the MCP server",
                 Input::new(&form.address)
                     .id("connector-address")
                     .aria_label("Connector address"),
-            )
-            .child(
+                cx,
+            ))
+            .child(field(
+                "Token",
                 Input::new(&form.token)
                     .id("connector-token")
                     .aria_label("Connector token"),
-            )
+                cx,
+            ))
             .child(
                 Button::new("save-connector")
+                    .self_start()
+                    .primary()
                     .label("Save connector")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_connector(false, false, cx);
@@ -561,6 +611,8 @@ impl Shell {
         if editing.is_some_and(|c| c.token == TokenSource::Stored && matches!(c.mcp, McpConfig::Http { .. })) {
             connector_form = connector_form.child(
                 Button::new("remove-connector-token")
+                    .self_start()
+                    .ghost()
                     .label("Remove stored token")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_connector(true, false, cx);
@@ -587,15 +639,31 @@ impl Shell {
                 }),
             );
 
-        section
-            .child(llm_section)
-            .child("Connectors")
-            .child(labelled(
-                "connector-count",
-                format!("Connectors: {}", server.connectors.len()),
-            ))
-            .child(div().id("connector-list").flex().flex_col().gap_2().children(rows))
-            .child(connector_form)
+        let count = server.connectors.len();
+        section.child(llm_section).child(
+            card(cx)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Connectors"))
+                        .child(labelled_as(
+                            "connector-count",
+                            format!("Connectors: {count}"),
+                            quiet(
+                                if count == 0 {
+                                    "None yet".to_owned()
+                                } else {
+                                    format!("{count} saved")
+                                },
+                                cx,
+                            ),
+                        )),
+                )
+                .child(div().id("connector-list").flex().flex_col().gap_2().children(rows))
+                .child(connector_form),
+        )
     }
 }
 

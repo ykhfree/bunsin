@@ -24,3 +24,11 @@ bunsin-engine.workspace = true
 bunsin-testkit.workspace = true
 gpui-kit = { version = "=0.9.1", features = ["test-support"] }
 tempfile.workspace = true
+
+# Draws the window offscreen into PNG files. Run it on request:
+# cargo test -p bunsin-app --test screens -- <output folder>
+[[test]]
+name = "screens"
+path = "tests/screens.rs"
+test = false
+harness = false

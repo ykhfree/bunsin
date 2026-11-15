@@ -36,13 +36,24 @@ fn main() {
         .build()
         .expect("tokio runtime starts");
 
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        let handle = runtime.handle().clone();
-        cx.set_global(Tokio(runtime));
-        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-            cx.new(|cx| AppView::new(handle, source, window, cx))
-        })
-        .expect("the window opens");
-    });
+    // The icons of the components (check marks, the icons of the views) come from these assets.
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            let handle = runtime.handle().clone();
+            cx.set_global(Tokio(runtime));
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                // The window has the colors of the system's light or dark mode, and follows a change.
+                bunsin_app::theme::apply(bunsin_app::theme::system_mode(window), Some(window), cx);
+                window
+                    .observe_window_appearance(|window, cx| {
+                        bunsin_app::theme::apply(bunsin_app::theme::system_mode(window), Some(window), cx);
+                        window.refresh();
+                    })
+                    .detach();
+                cx.new(|cx| AppView::new(handle, source, window, cx))
+            })
+            .expect("the window opens");
+        });
 }
