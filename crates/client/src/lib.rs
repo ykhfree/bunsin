@@ -2,8 +2,8 @@
 
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, PollPreview, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate, Outcome, PollPreview,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
@@ -258,6 +258,13 @@ impl EngineApi for RemoteEngine {
                 NO_BODY,
             )
             .await
+        })
+    }
+
+    fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "llm/test"), NO_BODY)
+                .await
         })
     }
 

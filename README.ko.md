@@ -174,6 +174,10 @@ bunsind llm-set kim --wire openai-chat --base-url https://llm.example.com/v1 \
     --model your-model-id --token-stdin          # 다른 endpoint
 bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin
 bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
+bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # token이 필요 없는 MCP 서버
+bunsind connector-set kim crm --url https://mcp.example.com/crm \
+    --token-header X-API-Key --token-stdin       # token을 `X-API-Key: <token>`으로 보냅니다
+bunsind llm-test kim                             # 저장된 LLM endpoint로 테스트 요청 1건
 bunsind connections kim                          # 주소와 각 token의 출처
 bunsind tools kim slack                          # 접속해서 도구 목록을 봅니다. 동작 확인 방법입니다
 bunsind connector-remove kim jira                # 커넥터와 그 token을 지웁니다
@@ -181,7 +185,13 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 
 - 옵션이 없으면 `llm-set`은 Claude API를 씁니다: `--wire anthropic-messages`,
   `--base-url https://api.anthropic.com`, `--model claude-opus-5-5`. 창도 같은 값을 미리 채웁니다.
-  `--wire`는 `anthropic-messages` 또는 `openai-chat`입니다.
+  `--wire`는 `anthropic-messages`, `openai-chat`(Chat Completions), `openai-responses`(Responses) 중 하나입니다.
+  LLM token의 헤더는 형식이 정합니다: Claude는 `x-api-key`, OpenAI 두 형식은 `Authorization: Bearer`입니다.
+- `llm-test`와 창의 **Test**는 저장된 endpoint로 짧은 요청 1건을 보냅니다. 이 요청은 실제 요청과 같은 응답 형식과
+  출력 한도를 쓰고, 프로필의 데이터는 담지 않습니다. endpoint에서 token 비용이 발생합니다.
+  응답이 agent에게 필요한 형식이면 테스트가 통과합니다.
+- 커넥터에는 token이 없어도 됩니다. token을 빼고 저장하면 됩니다. token은 `Authorization: Bearer <token>`으로 갑니다.
+  MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
 - 한 workspace에 묶이지 않은 Claude API key는 workspace ID도 필요합니다. 설정 파일의 `llm` 항목에 `"workspace_id"`를 넣으십시오.
 - 서버는 token을 암호화해 저장하고, 다시 돌려주지 않습니다. `connections`는 "서버에 저장됨",
   "서버 환경 변수", "없음" 중 하나만 보여 줍니다.

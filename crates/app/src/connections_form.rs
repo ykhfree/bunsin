@@ -4,7 +4,7 @@
 
 use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
 use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
-use crate::theme::{card, field, quiet};
+use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{
     ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, TokenChange, TokenSource, ToolsReport,
 };
@@ -30,6 +30,8 @@ const HELP: &str = "Leave a token field empty to keep the stored token. \
     The server never sends a token back.";
 const STDIO: &str = "runs as a command on the server; set by the server operator";
 const STDIO_REFUSED: &str = "This connector runs as a command on the server. Only the server operator can change it.";
+const SAVE_FIRST: &str = "Save the endpoint first. The test uses the saved settings.";
+const TESTING: &str = "Testing… One short request goes to the endpoint. It waits for the answer up to the timeout.";
 const TYPED_TOKEN: &str = "Empty the token field first, or save the token.";
 const APPROVE_NOTE: &str = "Approving tools does not create permission rules.";
 
@@ -57,6 +59,8 @@ pub struct ConnectionsForm {
     llm_conflict: bool,
     /// True if the last LLM save removed the stored token. "Save anyway" does the same.
     llm_remove_token: bool,
+    /// True from a click on Test until the result of a command arrives.
+    llm_testing: bool,
     /// The connector the connector draft was made from, with its name. Edit sets it.
     connector_base: Option<(String, ConnectorConnection)>,
     /// The connector whose save the server refused because it changed since the form loaded it.
@@ -152,6 +156,7 @@ impl ConnectionsForm {
             llm_base: None,
             llm_conflict: false,
             llm_remove_token: false,
+            llm_testing: false,
             connector_base: None,
             connector_conflict: None,
             connector_remove_token: false,
@@ -165,7 +170,12 @@ impl ConnectionsForm {
         let new = state.connection_commands != self.commands_seen;
         self.commands_seen = state.connection_commands;
         let result = state.connection_result.as_ref().filter(|_| new);
+        if new {
+            // The bridge runs one command at a time, so the test has ended.
+            self.llm_testing = false;
+        }
         if self.profile != state.selected {
+            self.llm_testing = false;
             // Every draft and base goes, typed tokens too.
             self.profile = None;
             self.llm_message = None;
@@ -265,6 +275,19 @@ impl ConnectionsForm {
         self.connector_conflict = None;
     }
 
+    /// True if the LLM fields are not the endpoint `llm` of the server, or the server has none.
+    fn llm_differs(&self, llm: Option<&LlmConnection>, cx: &App) -> bool {
+        match llm {
+            Some(llm) => {
+                self.wire != llm.wire
+                    || text(&self.llm_address, cx) != llm.base_url
+                    || text(&self.llm_model, cx) != llm.model
+                    || !text(&self.llm_token, cx).is_empty()
+            }
+            None => true,
+        }
+    }
+
     /// True if the connector fields show the base and the token field is empty.
     fn connector_untouched(&self, cx: &App) -> bool {
         self.connector_base.as_ref().is_some_and(|(name, base)| {
@@ -359,6 +382,21 @@ impl Shell {
             expected,
         };
         self.send(UiCommand::SaveConnector { profile, name, update });
+    }
+
+    /// Tests the saved endpoint. A draft is not tested, so the form must equal the server's settings.
+    fn test_llm(&mut self, cx: &mut Context<Self>) {
+        let form = &mut self.connections;
+        let (Some(profile), Some(connections)) = (form.profile.clone(), &self.state.connections) else {
+            return;
+        };
+        if form.llm_differs(connections.llm.as_ref(), cx) {
+            form.llm_message = Some(SAVE_FIRST);
+            return;
+        }
+        form.llm_message = None;
+        form.llm_testing = true;
+        self.send(UiCommand::TestLlm { profile });
     }
 
     /// Drops the connector draft and shows the server's connector of the same name.
@@ -498,14 +536,21 @@ impl Shell {
         // The LLM endpoint.
         let llm = server.llm.as_ref();
         let llm_token = llm.map_or(TokenSource::None, |llm| llm.token);
-        let llm_changed = match llm {
-            Some(llm) => {
-                form.wire != llm.wire
-                    || text(&form.llm_address, cx) != llm.base_url
-                    || text(&form.llm_model, cx) != llm.model
-                    || !text(&form.llm_token, cx).is_empty()
+        let llm_changed = form.llm_differs(llm, cx);
+        // The result of the last test, or that a test runs now.
+        let (test_text, test_works) = match &self.state.connection_result {
+            _ if form.llm_testing => (TESTING.to_owned(), None),
+            Some(ConnectionResult::LlmTested(Ok(test))) if test.works => {
+                (format!("Works: {}", test.detail), Some(true))
             }
-            None => true,
+            Some(ConnectionResult::LlmTested(Ok(test))) => (format!("Does not work: {}", test.detail), Some(false)),
+            Some(ConnectionResult::LlmTested(Err(error))) => (error.clone(), Some(false)),
+            _ => (String::new(), None),
+        };
+        let test_color = match test_works {
+            Some(true) => palette(cx).done,
+            Some(false) => palette(cx).stopped,
+            None => cx.theme().muted_foreground,
         };
         let llm_result = match &self.state.connection_result {
             Some(ConnectionResult::LlmSaved(Err(SaveError::Failed(error)))) => error.clone(),
@@ -514,50 +559,68 @@ impl Shell {
             _ => String::new(),
         };
         let selected_wire = WIRES.iter().position(|(wire, _)| *wire == form.wire);
-        let mut llm_section = card(cx)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("LLM endpoint"))
-            .child(labelled_as("connections-help", HELP, quiet(HELP, cx)))
-            .child(
-                RadioGroup::vertical("llm-wire")
-                    .selected_index(selected_wire)
-                    .children(WIRES.map(|(_, label)| label))
-                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                        this.connections.choose_wire(WIRES[*ix].0, window, cx);
-                        cx.notify();
+        let mut llm_section =
+            card(cx)
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("LLM endpoint"))
+                .child(labelled_as("connections-help", HELP, quiet(HELP, cx)))
+                .child(
+                    RadioGroup::vertical("llm-wire")
+                        .selected_index(selected_wire)
+                        .children(WIRES.map(|(_, label)| label))
+                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                            this.connections.choose_wire(WIRES[*ix].0, window, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(field(
+                    "Address",
+                    Input::new(&form.llm_address)
+                        .id("llm-address")
+                        .aria_label("LLM address"),
+                    cx,
+                ))
+                .child(field(
+                    "Model",
+                    Input::new(&form.llm_model).id("llm-model").aria_label("Model name"),
+                    cx,
+                ))
+                .child(field(
+                    "Token",
+                    Input::new(&form.llm_token).id("llm-token").aria_label("LLM token"),
+                    cx,
+                ))
+                .child(labelled_as(
+                    "llm-token-state",
+                    token_text(llm_token),
+                    quiet(format!("Now: {}", token_text(llm_token)), cx),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("save-llm").primary().label("Save").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.save_llm(false, false, cx);
+                                cx.notify();
+                            },
+                        )))
+                        .child(Button::new("test-llm").outline().label("Test").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.test_llm(cx);
+                                cx.notify();
+                            },
+                        ))),
+                )
+                .child(labelled_as(
+                    "llm-test",
+                    test_text.clone(),
+                    div().children((!test_text.is_empty()).then(|| {
+                        div()
+                            .text_sm()
+                            .text_color(test_color)
+                            .child(SharedString::from(test_text))
                     })),
-            )
-            .child(field(
-                "Address",
-                Input::new(&form.llm_address)
-                    .id("llm-address")
-                    .aria_label("LLM address"),
-                cx,
-            ))
-            .child(field(
-                "Model",
-                Input::new(&form.llm_model).id("llm-model").aria_label("Model name"),
-                cx,
-            ))
-            .child(field(
-                "Token",
-                Input::new(&form.llm_token).id("llm-token").aria_label("LLM token"),
-                cx,
-            ))
-            .child(labelled_as(
-                "llm-token-state",
-                token_text(llm_token),
-                quiet(format!("Now: {}", token_text(llm_token)), cx),
-            ))
-            .child(
-                Button::new("save-llm")
-                    .self_start()
-                    .primary()
-                    .label("Save")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_llm(false, false, cx);
-                        cx.notify();
-                    })),
-            );
+                ));
         if llm_token == TokenSource::Stored {
             llm_section = llm_section.child(
                 Button::new("remove-llm-token")

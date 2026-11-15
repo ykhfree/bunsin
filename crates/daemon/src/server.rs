@@ -12,8 +12,8 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
-    ApiError, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PollPreview, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome, PollPreview, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::PrivacyConfig;
@@ -199,6 +199,15 @@ async fn put_privacy(
     Ok(Json(engine.set_privacy(&profile, update).await?))
 }
 
+async fn test_llm(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<LlmTest> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.test_llm(&profile).await?))
+}
+
 async fn test_poll(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -307,6 +316,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("connectors/{connector}/tools/approve"), post(approve_tools))
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("polls/{index}/test"), post(test_poll))
+        .route(&profile("llm/test"), post(test_llm))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

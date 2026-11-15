@@ -248,6 +248,15 @@ pub struct ConnectorUpdate {
     pub expected: Expected<Option<ConnectorConnection>>,
 }
 
+/// What one test request to the LLM endpoint did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmTest {
+    /// True if the endpoint answered with a reply the agent can use.
+    pub works: bool,
+    /// What the endpoint answered, or why the request failed. It never holds the token.
+    pub detail: String,
+}
+
 /// The owner's new text for a page of the agent's notes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiPageUpdate {
@@ -366,4 +375,7 @@ pub trait EngineApi: Send + Sync {
     fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
+    /// Sends one request to the saved LLM endpoint and says whether the reply has the form the agent needs.
+    /// The request holds no data of the profile. It costs tokens at the endpoint.
+    fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>>;
 }

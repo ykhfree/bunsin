@@ -19,6 +19,7 @@
 //! | GET | `/v1/profiles/{p}/privacy` | | `PrivacyConfig` |
 //! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyUpdate` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
+//! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |

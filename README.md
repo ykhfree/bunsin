@@ -190,6 +190,10 @@ bunsind llm-set kim --wire openai-chat --base-url https://llm.example.com/v1 \
     --model your-model-id --token-stdin          # another endpoint
 bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin
 bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
+bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # an MCP server that needs no token
+bunsind connector-set kim crm --url https://mcp.example.com/crm \
+    --token-header X-API-Key --token-stdin       # the token goes as `X-API-Key: <token>`
+bunsind llm-test kim                             # one test request to the saved LLM endpoint
 bunsind connections kim                          # addresses and where each token comes from
 bunsind tools kim slack                          # connects and lists the tools: the check that it works
 bunsind connector-remove kim jira                # removes the connector and its token
@@ -197,7 +201,16 @@ bunsind connector-remove kim jira                # removes the connector and its
 
 - Without options, `llm-set` uses the Claude API: `--wire anthropic-messages`,
   `--base-url https://api.anthropic.com` and `--model claude-opus-5-5`. The window
-  prefills the same values. `--wire` is `anthropic-messages` or `openai-chat`.
+  prefills the same values. `--wire` is `anthropic-messages`, `openai-chat`
+  (Chat Completions) or `openai-responses` (Responses). The format fixes the header of the
+  LLM token: `x-api-key` for Claude, `Authorization: Bearer` for the two OpenAI formats.
+- `llm-test`, and **Test** in the window, send one short request to the saved endpoint. The
+  request has the reply form and the output limit of a real request, and no data of your
+  profile. It costs tokens at the endpoint. The test passes if the reply has the form the
+  agent needs.
+- A connector needs no token: leave the token out. A token goes as `Authorization: Bearer
+  <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
+  window. That header then carries the token as it is.
 - A Claude API key that is not scoped to one workspace also needs a workspace ID. Set
   `"workspace_id"` in the `llm` section of the settings file.
 - The server stores each token encrypted and never sends it back. `connections` shows

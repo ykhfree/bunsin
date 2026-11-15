@@ -104,7 +104,16 @@
 
 - `bunsin-core`가 `CompletionRequest`와 `CompletionResponse`를 정의한다. 하네스는 wire 형식을 모른다.
 - `bunsin-llm`의 `LlmClient` trait이 프로필마다 `Arc<dyn LlmClient>`로 쓰인다.
-- wire 형식은 프로필 설정값이다: `openai-chat`, `anthropic-messages`. `openai-responses`는 아직 없다.
+- wire 형식은 프로필 설정값이다: `openai-chat`, `openai-responses`, `anthropic-messages`.
+  - `openai-responses`는 `POST {base_url}/responses`에 `instructions`, `input`, `max_output_tokens`, `text.format`을 보낸다.
+    필드 이름은 API의 OpenAPI 명세(openai/openai-openapi)에서 가져왔다(2026-11-15에 읽음).
+    `store: false`를 보내 endpoint가 응답을 보관하지 않게 한다. HTTP 200으로 오는 `status: failed`는 오류로 처리한다.
+  - 세 형식 모두 실제 endpoint로 실행해 보지 않았다. 테스트는 요청을 기록하는 로컬 서버를 쓴다.
+- **연결 테스트**(`test_llm`, `llm-test`, 창의 Test): 저장된 endpoint로 요청 1건을 보낸다.
+  실제 요청과 같은 응답 schema와 출력 한도를 쓴다. 단순한 요청은 통과하고 실제 요청은 실패하는 endpoint가 있기 때문이다.
+  요청에는 프로필의 데이터가 없다. 정지 스위치가 켜져 있어도 실행된다(외부에 아무것도 쓰지 않는다).
+  감사 로그에 `llm_tested`를 남긴다. 기다리는 시간은 LLM 설정의 timeout까지이고, 그동안 창의 다른 명령은 대기한다.
+  창은 저장되지 않은 입력을 테스트하지 않는다.
 - `llm-set` 명령과 창의 LLM 화면은 Claude API를 기본값으로 채운다: `https://api.anthropic.com`, `claude-opus-5-5`.
   출처는 Claude 문서의 API overview와 models overview이다(2026-11-15에 읽음). 기본값은 프로필에 미리 저장하지 않는다.
   운영자가 허용 목록을 쓰는 서버에서는 저장된 기본 주소가 다른 설정의 저장까지 막기 때문이다.
@@ -215,7 +224,10 @@
 - rmcp의 도구 목록 cache를 끈다. cache된 목록은 서버의 변경을 숨겨 pin 검사를 무력하게 만들기 때문이다.
 - 연결은 30초 안에 끝나야 한다. 시간이 지나면 `RealBackends`가 오류를 돌려준다.
 - 커넥터는 권한을 판단하지 않는다. 엔진이 호출 전에 정책과 pin을 검사한다.
-- OAuth는 아직 없다. HTTP transport는 bearer token만 보낸다.
+- OAuth는 아직 없다. HTTP transport는 token을 `Authorization: Bearer <token>`으로 보낸다.
+  커넥터 설정의 `token_header`가 있으면 그 헤더가 token을 그대로 담는다(예: `X-API-Key`).
+  연결이 스스로 정하는 헤더(`Host`, `Content-Type`, `Mcp-Session-Id` 등)는 거부한다. token이 없는 커넥터는 두 헤더 모두 보내지 않는다.
+  LLM token의 헤더는 wire 형식이 정하고, 바꿀 수 없다.
 - HTTP transport는 redirect를 따르지 않는다.
 - 실제 Slack, Jira, Confluence MCP 서버로는 아직 연결해 보지 않았다. 테스트는 로컬 rmcp 서버를 쓴다.
 

@@ -218,6 +218,12 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Send one test request to the saved LLM endpoint. It costs tokens at the endpoint.
+    LlmTest {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
     /// Save the LLM endpoint. With --token-stdin, read its token from standard input.
     LlmSet {
         #[command(flatten)]
@@ -612,6 +618,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                 };
                 println!("{name}\t{address}\t{}{header}", source(connector.token));
             }
+        }
+        Command::LlmTest { remote, profile } => {
+            let test = connect(&remote)?.test_llm(&profile).await.map_err(text)?;
+            if !test.works {
+                return Err(format!("the endpoint does not work: {}", test.detail));
+            }
+            println!("works: {}", test.detail);
         }
         Command::LlmSet {
             remote,

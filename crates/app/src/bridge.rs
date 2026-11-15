@@ -4,8 +4,8 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, EngineApi, LlmUpdate, Outcome, PrivacyUpdate, ProfileSnapshot,
-    ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome, PrivacyUpdate,
+    ProfileSnapshot, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
@@ -40,6 +40,10 @@ pub enum UiCommand {
     RemoveConnector {
         profile: String,
         name: String,
+    },
+    /// Sends one test request to the saved LLM endpoint.
+    TestLlm {
+        profile: String,
     },
     /// Connects the connector and lists its tools.
     CheckConnector {
@@ -107,6 +111,8 @@ pub enum SaveError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionResult {
     LlmSaved(Result<(), SaveError>),
+    /// The outer error is a failure to reach the Bunsin server. The test result is inside.
+    LlmTested(Result<LlmTest, String>),
     ConnectorSaved {
         name: String,
         result: Result<(), SaveError>,
@@ -223,6 +229,11 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         (UiCommand::RemoveConnector { profile, name }, _) => {
             let result = for_profile(selected, &profile, api.remove_connector(&profile, &name)).await;
             state.connection_result = Some(ConnectionResult::ConnectorRemoved { name, result });
+            Ok(())
+        }
+        (UiCommand::TestLlm { profile }, _) => {
+            let result = for_profile(selected, &profile, api.test_llm(&profile)).await;
+            state.connection_result = Some(ConnectionResult::LlmTested(result));
             Ok(())
         }
         (UiCommand::CheckConnector { profile, name }, _) => {

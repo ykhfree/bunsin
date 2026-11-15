@@ -10,8 +10,8 @@ mod secrets;
 pub use secrets::{ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmUpdate, Outcome, PollPreview,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest, LlmUpdate, Outcome,
+    PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -21,7 +21,7 @@ use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
-use bunsin_core::proposal::{Proposal, parse_reply, split_tool_id};
+use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
 use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
 use bunsin_core::wiki::{WIKI_READ_TOOL, WikiPage, WikiSummary, WikiUpdate, index_text, page_text};
@@ -968,6 +968,50 @@ impl Engine {
         })
     }
 
+    /// Sends one request to the saved LLM endpoint. The request has the reply schema and the output
+    /// limit of a real request, because an endpoint can accept a plain request and refuse those.
+    /// It holds no data of the profile. It runs with the kill switch on: it changes nothing.
+    async fn test_llm_endpoint(&self, profile: &str) -> ApiResult<LlmTest> {
+        let ctx = self.ctx(profile).await?;
+        let request = CompletionRequest {
+            system: "This is a connection test. Reply with the kind `ignore` and the rationale `connection test`."
+                .into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: "Connection test.".into(),
+            }],
+            response_schema: Some(proposal_schema()),
+            max_output_tokens: ctx.config.max_output_tokens,
+        };
+        let outcome = match &ctx.runtime.llm {
+            Err(error) => Err(format!("the LLM cannot be used: {error}")),
+            // The client of the endpoint ends the request at the timeout of the profile's settings.
+            Ok(llm) => match llm.complete(request).await {
+                Err(error) => Err(format!("the request failed: {error}")),
+                Ok(response) => match (response.stop, parse_reply(&response.content)) {
+                    (StopReason::End, Ok(_)) => Ok(format!(
+                        "the endpoint answered in the form the agent needs ({} input tokens, {} output tokens)",
+                        response.usage.input_tokens, response.usage.output_tokens
+                    )),
+                    (StopReason::End, Err(error)) => Err(format!(
+                        "the endpoint answered, but not in the form the agent needs: {error}"
+                    )),
+                    (StopReason::MaxTokens, _) => Err(format!(
+                        "the endpoint answered, but the reply was cut off at the output limit of {} tokens",
+                        ctx.config.max_output_tokens
+                    )),
+                    (StopReason::Refusal, _) => Err("the endpoint answered, but it refused the request".to_owned()),
+                },
+            },
+        };
+        let (works, detail) = match outcome {
+            Ok(detail) => (true, detail),
+            Err(detail) => (false, detail),
+        };
+        self.audit(&ctx.store, "llm_tested", None, json!({"works": works}))?;
+        Ok(LlmTest { works, detail })
+    }
+
     async fn tools_report(&self, profile: &str, connector: &str) -> ApiResult<ToolsReport> {
         let ctx = self.ctx(profile).await?;
         if !ctx.config.connectors.contains_key(connector) && !ctx.runtime.connectors.contains_key(connector) {
@@ -1116,6 +1160,10 @@ impl EngineApi for Engine {
 
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {
         Box::pin(self.preview_poll(profile, index))
+    }
+
+    fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>> {
+        Box::pin(self.test_llm_endpoint(profile))
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {

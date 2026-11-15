@@ -287,3 +287,20 @@ fn a_connector_takes_a_header_for_its_token_and_needs_no_token() {
     let error = stderr_of_failure(server.run(&kim, &reserved), "a reserved header");
     assert!(error.contains("cannot carry a token"), "{error}");
 }
+
+#[test]
+fn llm_test_reports_why_the_endpoint_does_not_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    add_profile(dir.path(), "lee", "Lee");
+    let server = Server::start(dir.path());
+    // The profile has no endpoint yet. The command fails with the reason.
+    let error = stderr_of_failure(server.run(&kim, &["llm-test", "kim"]), "llm-test without settings");
+    assert!(
+        error.contains("the endpoint does not work: the LLM cannot be used: the profile has no `llm` settings"),
+        "{error}"
+    );
+    // A token tests only its own profile.
+    let error = stderr_of_failure(server.run(&kim, &["llm-test", "lee"]), "llm-test for another profile");
+    assert!(error.contains("not authorized"), "{error}");
+}

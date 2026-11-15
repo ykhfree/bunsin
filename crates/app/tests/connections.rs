@@ -1065,3 +1065,69 @@ fn the_header_of_a_token_is_saved_shown_and_kept_by_an_edit(cx: &mut TestAppCont
     });
     assert_eq!(wiki().token_header, None);
 }
+
+#[gpui_kit::test]
+fn test_sends_one_request_to_the_saved_endpoint_and_shows_the_result(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    // The rig made requests for its own event. Only the ones after this count.
+    let before = rig.llm.requests().len();
+    // Nothing is saved yet. The test would not use the fields, so it is refused.
+    on_screen(cx, window, |window, cx| window.click("test-llm", cx));
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "llm-message"),
+            "Save the endpoint first. The test uses the saved settings."
+        );
+        assert_eq!(label(window, "llm-test"), "");
+    });
+    assert_eq!(rig.llm.requests().len(), before);
+
+    let saved = llm(
+        Wire::OpenAiResponses,
+        "https://llm.example/v1",
+        "m",
+        TokenChange::Set(TOKEN.into()),
+    );
+    rt.block_on(rig.engine.set_llm("kim", saved)).unwrap();
+    wait_until(cx, &shell, "the saved endpoint", |s| {
+        s.state.connections.as_ref().is_some_and(|c| c.llm.is_some())
+    });
+    let ignore = r#"{"kind":"ignore","rationale":"connection test","summary":null,"tool":null,"args_json":null}"#;
+    rig.llm.reply(ignore, 12);
+    on_screen(cx, window, |window, cx| window.click("test-llm", cx));
+    wait_for_commands(cx, &shell, 1);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "llm-test"),
+            "Works: the endpoint answered in the form the agent needs (12 input tokens, 0 output tokens)"
+        );
+        assert_eq!(label(window, "llm-message"), "");
+        // A changed field is a draft again. The test is refused until it is saved.
+        fill(window, cx, "llm-model", "another-model");
+        window.click("test-llm", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "llm-message"),
+            "Save the endpoint first. The test uses the saved settings."
+        );
+        fill(window, cx, "llm-model", "m");
+    });
+    assert_eq!(rig.llm.requests().len(), before + 1);
+
+    // An answer in another form is a failed test, with the reason.
+    rig.llm.reply("Hello! How can I help?", 12);
+    on_screen(cx, window, |window, cx| window.click("test-llm", cx));
+    wait_for_commands(cx, &shell, 2);
+    on_screen(cx, window, |window, _| {
+        let shown = label(window, "llm-test");
+        assert!(
+            shown.starts_with("Does not work: the endpoint answered, but not in the form the agent needs"),
+            "{shown}"
+        );
+        assert_not_on_screen(window, TOKEN, "https://llm.example/v1");
+    });
+    assert_eq!(rig.llm.requests().len(), before + 2);
+}
