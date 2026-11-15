@@ -62,6 +62,12 @@ pub struct Rig {
 
 /// An engine with profiles `kim` and `lee`. `kim` has one pending post with ID 1.
 pub async fn rig() -> Rig {
+    rig_at(1_000).await
+}
+
+/// Like `rig`, with a clock that always shows `now` (seconds since 1970).
+#[allow(dead_code)]
+pub async fn rig_at(now: i64) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let llm = Arc::new(FakeLlm::new());
     let tools = vec![tool("post", "Post a message")];
@@ -73,7 +79,7 @@ pub async fn rig() -> Rig {
         slack: slack.clone(),
         real,
     });
-    let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1_000)).unwrap());
+    let engine = Arc::new(Engine::open(dir.path(), backends, Arc::new(move || now)).unwrap());
 
     for owner in ["Kim", "Lee"] {
         let mut config = ProfileConfig::new(owner);

@@ -90,6 +90,15 @@ impl Test {
     }
 
     fn open(&self, cx: &mut TestAppContext, source: Source) -> (AnyWindowHandle, Entity<AppView>) {
+        self.open_sized(cx, source, (900., 700.))
+    }
+
+    fn open_sized(
+        &self,
+        cx: &mut TestAppContext,
+        source: Source,
+        (width, height): (f32, f32),
+    ) -> (AnyWindowHandle, Entity<AppView>) {
         // The server wakes the view from tokio threads. Tell the test scheduler.
         cx.executor().allow_parking();
         cx.update(gpui_kit::init);
@@ -97,7 +106,7 @@ impl Test {
         cx.update(|cx| {
             let bounds = Bounds {
                 origin: Point::default(),
-                size: size(px(900.), px(700.)),
+                size: size(px(width), px(height)),
             };
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -436,4 +445,40 @@ fn an_empty_token_field_uses_the_stored_token(cx: &mut TestAppContext) {
     assert_eq!(load_connection(t.dir.path()).unwrap().server, url);
     assert_eq!(t.tokens.get().unwrap(), Some(t.server.token.clone()));
     assert_not_on_screen(cx, window, &t.server.token, "Kim (kim)");
+}
+
+#[gpui_kit::test]
+fn the_connected_window_fills_a_laptop_screen_and_its_controls_do_not_overlap(cx: &mut TestAppContext) {
+    let t = Test::new();
+    t.save_good_connection();
+    let (window, view) = t.open_sized(cx, t.saved(), (1280., 800.));
+    wait_until(cx, &view, "the shell with a snapshot", shell_loaded);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // The main window starts at the top and reaches the bottom of the window.
+        let top = window.find("tab-inbox").bounds();
+        assert!(top.origin.y < px(120.), "{top:?}");
+        let mark = window.find("connection").bounds();
+        let disconnect = window.find("disconnect").bounds();
+        assert!(
+            disconnect.bottom() <= px(800.) && disconnect.bottom() > px(760.),
+            "{disconnect:?}"
+        );
+        // Disconnect is below the state of the connection. It does not cover it.
+        assert!(mark.bottom() <= disconnect.top(), "{mark:?} {disconnect:?}");
+        assert_eq!(window.find("connection").label(), Some("connected"));
+        // The item is in reach without a scroll.
+        window.click("approve-1", cx);
+    })
+    .unwrap();
+    wait_until(cx, &view, "the executed item", |view, cx| {
+        view.shell().is_some_and(|shell| {
+            let state = &shell.read(cx).state;
+            state
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.inbox[0].state.as_str() == "executed")
+        })
+    });
+    assert_eq!(t.server.rig.slack.calls().len(), 1);
 }

@@ -48,7 +48,8 @@ async fn handle(rig: &common::Rig, event_id: &str, text: &str, reply: serde_json
 
 /// A profile with items in every state the inbox shows, three pages and a connector.
 async fn fixture() -> (common::Rig, UiState) {
-    let rig = common::rig().await;
+    // 2026-11-16 09:30 UTC.
+    let rig = common::rig_at(1_794_821_400).await;
     let body = "The team deploys on Fridays at 3 pm.\nA release needs two approvals.";
     common::ingest_note(&rig, "n1", false, body).await;
     // Item 1 was run, item 2 (the note) is kept, item 3 waits.
@@ -56,7 +57,11 @@ async fn fixture() -> (common::Rig, UiState) {
     rig.engine.approve("kim", 2, None).await.unwrap();
     // A call with a long value without spaces and with Korean text: nothing of it may be cut.
     let long = format!("https://wiki.example.com/pages/{}", "release-notes-2026-".repeat(20));
-    let args = json!({"channel": "C-ALL-COMPANY", "text": format!("배포는 금요일 오후 3시입니다. 자세한 내용: {long}"), "broadcast": true});
+    // A value without any place to break a line, a long argument name and a nested value.
+    let digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".repeat(5);
+    let args = json!({"channel": "C-ALL-COMPANY", "text": format!("배포는 금요일 오후 3시입니다. 자세한 내용: {long}"),
+        "broadcast": true, "attachment_sha256_digest_of_the_file": digest,
+        "options": {"unfurl_links": false, "mentions": ["@here", "@lee"]}});
     let call = json!({"kind": "tool_call", "rationale": "Lee asked where the release notes are", "summary": null,
         "tool": "slack/post", "args_json": args.to_string()});
     handle(&rig, "s2", "where are the release notes?", call).await;

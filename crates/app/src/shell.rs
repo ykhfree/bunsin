@@ -236,7 +236,11 @@ fn argument_text(value: &serde_json::Value) -> String {
 impl Shell {
     /// What an item is, as its first line.
     fn item_head(item: &InboxItem, cx: &App) -> impl IntoElement {
-        let (word, color) = state_view(item.state, cx);
+        let (word, color) = match (&item.body, item.state) {
+            // An escalation is a draft that only the owner can answer, outside this window.
+            (InboxBody::Escalation { .. }, ApprovalState::Draft) => ("Needs your own answer", palette(cx).waiting),
+            (_, state) => state_view(state, cx),
+        };
         let mono = cx.theme().mono_font_family.clone();
         let what = match &item.body {
             InboxBody::ToolCall { tool, .. } => div().font_family(mono).child(SharedString::from(tool.clone())),
@@ -277,10 +281,11 @@ impl Shell {
                 .children(args.iter().map(|(name, value)| {
                     div()
                         .flex()
-                        .gap_3()
+                        .flex_wrap()
+                        .gap_x_3()
                         .child(
                             div()
-                                .w(px(96.))
+                                .min_w(px(96.))
                                 .flex_none()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(SharedString::from(name.clone())),
@@ -288,7 +293,7 @@ impl Shell {
                         .child(
                             div()
                                 .flex_1()
-                                .min_w(px(0.))
+                                .min_w(px(280.))
                                 .child(SharedString::from(argument_text(value))),
                         )
                 }))
@@ -555,7 +560,15 @@ impl Shell {
             )
             .child(div().flex_1())
             // The connect screen puts its Disconnect button into the room below.
-            .child(div().px_2().pb_10().child(connection))
+            .child(div().px_2().pb_10().child(labelled_as(
+                "connection",
+                if self.state.connected {
+                    "connected"
+                } else {
+                    "not connected"
+                },
+                connection,
+            )))
     }
 
     /// The line above every view: its name, the state of the agent and the kill switch.
@@ -665,12 +678,15 @@ impl Render for Shell {
                             "inbox-count",
                             format!("Approval inbox: {}", items.len()),
                             quiet(
-                                match (items.len(), waiting) {
-                                    (0, _) => {
+                                match (snapshot.is_some(), items.len(), waiting) {
+                                    // Without an answer of the server, the list says nothing about the inbox.
+                                    (false, ..) => String::new(),
+                                    (true, 0, _) => {
                                         "Nothing is here yet. What the agent proposes appears in this list.".to_owned()
                                     }
-                                    (all, 0) => format!("{all} in the list, none waits for you"),
-                                    (all, waiting) => format!("{all} in the list, {waiting} wait for you"),
+                                    (true, all, 0) => format!("{all} in the list, none waits for you"),
+                                    (true, all, 1) => format!("{all} in the list, 1 waits for you"),
+                                    (true, all, waiting) => format!("{all} in the list, {waiting} wait for you"),
                                 },
                                 cx,
                             ),
@@ -703,7 +719,13 @@ impl Render for Shell {
                                 .items_center()
                                 .justify_between()
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
-                                .child(quiet(format!("{} entries, times in UTC", audit.len()), cx)),
+                                .child(quiet(
+                                    match audit.len() {
+                                        1 => "1 entry, time in UTC".to_owned(),
+                                        count => format!("{count} entries, times in UTC"),
+                                    },
+                                    cx,
+                                )),
                         ))
                         .child(
                             div()
