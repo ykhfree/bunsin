@@ -40,7 +40,7 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
 |---|---|---|
 | `bunsind serve` | 서버. agent를 실행하고 데이터를 저장합니다. | Linux, macOS |
 | `bunsind <명령>` | 운영자와 프로필 소유자가 쓰는 명령줄 도구 | Linux, macOS |
-| `bunsin-app` | 데스크톱 창: 승인함, 감사 로그, 정지 스위치 | macOS |
+| `bunsin-app` | 데스크톱 창: 승인함, 감사 로그, 정지 스위치, notes, 설정 | macOS |
 
 ## 빌드와 테스트
 
@@ -53,6 +53,74 @@ cargo test --workspace
 `rust-toolchain.toml`이 Rust 버전을 고정합니다. rustup이 처음 사용할 때 그 버전을 설치합니다.
 Linux에서는 창을 빼고 빌드와 테스트를 합니다: `cargo test --workspace --exclude bunsin-app`.
 창은 `gpui-kit` crate를 통해 GPUI를 씁니다.
+
+### 명령줄 도구 설치
+
+빌드하면 `bunsind`가 `target/release/`에 생깁니다. 이 폴더는 `PATH`에 없습니다.
+그래서 이 README에서 `bunsind`로 시작하는 명령은 아직 실행되지 않습니다. 다음 둘 중 하나를 하십시오.
+
+- `~/.cargo/bin`에 설치합니다. rustup이 이 폴더를 `PATH`에 넣어 둡니다.
+
+  ```sh
+  cargo install --path crates/daemon --locked
+  bunsind --help
+  ```
+
+- 또는 경로를 붙여 실행합니다: `./target/release/bunsind --help`.
+
+`bunsind --help`는 모든 명령을 보여 줍니다. `bunsind <명령> --help`는 그 명령의 옵션을 보여 줍니다.
+
+## 한 컴퓨터에서 처음 실행해 보기
+
+이 절차는 내 컴퓨터에 서버를 띄우고, 두 번째 터미널에서 그 서버를 씁니다.
+LLM과 MCP 서버가 없어도 됩니다. 아래처럼 시험용 폴더를 쓰고, 실제 데이터 폴더는 쓰지 마십시오.
+
+**터미널 1: 운영자.** 이 명령들은 데이터 폴더를 직접 읽고 씁니다.
+
+```sh
+export BUNSIN_DATA_DIR=/tmp/bunsin-data        # 운영자 명령은 모두 이 폴더가 필요합니다
+bunsind profile-add kim --owner "Kim"          # 출력: created profile kim for Kim
+bunsind token-add kim --label "Kim's laptop"   # 접속 token을 한 번만 출력합니다: bsn_...
+bunsind serve --listen 127.0.0.1:8787          # 출력: listening on http://127.0.0.1:8787
+```
+
+token을 복사해 두십시오. 서버에는 해시만 저장되므로 token을 다시 볼 수 없습니다.
+서버는 Ctrl-C를 누를 때까지 실행됩니다.
+
+**터미널 2: 프로필 소유자.** 이 명령들은 네트워크로 서버에 접속합니다.
+
+```sh
+export BUNSIN_SERVER=http://127.0.0.1:8787
+export BUNSIN_TOKEN=bsn_...                    # 터미널 1에서 받은 token
+bunsind profile-list                           # kim	Kim
+bunsind status kim                             # kill switch: off, inbox: 0 item(s)
+bunsind connections kim                        # llm	not set
+```
+
+notes는 LLM 없이도 동작합니다.
+
+```sh
+printf 'Kim leads.\n' > team.md
+bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
+bunsind wiki-list kim                          # team	Team	Who does what
+```
+
+agent 자체는 아직 동작하지 않습니다. 프로필에 LLM을 설정하기 전에는 이벤트가 거부됩니다.
+
+```sh
+bunsind ingest kim --source slack --event-id 1 --author lee --text "When do we deploy?"
+# error: the event was not handled: the LLM cannot be used: the profile has no `llm` settings
+```
+
+다음에 할 일:
+
+1. 프로필에 LLM endpoint와 커넥터를 설정합니다: [LLM endpoint와 커넥터](#llm-endpoint와-커넥터).
+2. 각 커넥터의 도구를 승인하고 agent가 할 수 있는 일을 정합니다: [권한 규칙](#권한-규칙).
+3. 원칙을 적습니다: [원칙](#원칙).
+4. 서버가 이벤트를 찾게 합니다: [이벤트 찾기](#이벤트-찾기-폴링).
+5. 같은 주소와 token으로 창을 엽니다: [데스크톱 창](#데스크톱-창-macos).
+
+다른 컴퓨터에서 접속하는 서버를 띄우려면 먼저 [서버 설정](#서버-설정-운영자)을 읽으십시오. TLS가 필요합니다.
 
 ## 서버 설정 (운영자)
 
@@ -303,7 +371,8 @@ cargo run --release -p bunsin-app
 창은 서버에 접속해 값을 확인한 뒤, 주소를 `~/Library/Application Support/Bunsin/connection.json`에,
 token을 macOS Keychain에 저장합니다.
 
-창에는 두 화면이 있습니다. **Inbox**는 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
+창에는 세 화면이 있습니다. **Inbox**는 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
+**Notes**는 notes의 페이지 목록을 보여 주고, 페이지를 읽고, 고치고, 만들고, 지울 수 있게 합니다.
 **Settings**에는 연결 설정(LLM endpoint, 커넥터, token, 커넥터의 도구 목록으로 하는 연결 확인)과 개인정보 필터가 있습니다.
 5초마다 서버에서 상태를 다시 읽습니다. 승인 전에 초안을 수정하는 기능은 명령줄에만 있습니다.
 

@@ -47,7 +47,7 @@ and [docs/PLAN.md](docs/PLAN.md) has the plan (both in Korean).
 |---|---|---|
 | `bunsind serve` | The server. It runs the agents and stores their data. | Linux or macOS |
 | `bunsind <command>` | The command line of an operator or a profile owner. | Linux or macOS |
-| `bunsin-app` | The desktop window: approval inbox, audit log, kill switch. | macOS |
+| `bunsin-app` | The desktop window: approval inbox, audit log, kill switch, notes, settings. | macOS |
 
 ## Build and test
 
@@ -60,6 +60,75 @@ cargo test --workspace
 `rust-toolchain.toml` pins the Rust version. rustup installs it on first use.
 On Linux, build and test without the window: `cargo test --workspace --exclude bunsin-app`.
 The window uses GPUI through the `gpui-kit` crate.
+
+### Install the command line
+
+The build puts `bunsind` into `target/release/`. That folder is not on your `PATH`, so the
+commands in this README, which start with `bunsind`, are not found yet. Do one of these:
+
+- Install it into `~/.cargo/bin`, which rustup puts on your `PATH`:
+
+  ```sh
+  cargo install --path crates/daemon --locked
+  bunsind --help
+  ```
+
+- Or run it with its path: `./target/release/bunsind --help`.
+
+`bunsind --help` lists every command. `bunsind <command> --help` shows the options of one.
+
+## Try it on one computer
+
+These steps start a server on your own computer and use it from a second terminal. They
+need no LLM and no MCP server. Use a test folder, as shown, not your real data.
+
+**Terminal 1: the operator.** These commands read and write the data folder directly.
+
+```sh
+export BUNSIN_DATA_DIR=/tmp/bunsin-data        # every operator command needs this folder
+bunsind profile-add kim --owner "Kim"          # prints: created profile kim for Kim
+bunsind token-add kim --label "Kim's laptop"   # prints the access token once: bsn_...
+bunsind serve --listen 127.0.0.1:8787          # prints: listening on http://127.0.0.1:8787
+```
+
+Copy the token. The server keeps only its hash, so it cannot show the token again.
+The server runs until you press Ctrl-C.
+
+**Terminal 2: the profile owner.** These commands talk to the server over the network.
+
+```sh
+export BUNSIN_SERVER=http://127.0.0.1:8787
+export BUNSIN_TOKEN=bsn_...                    # the token from terminal 1
+bunsind profile-list                           # kim	Kim
+bunsind status kim                             # kill switch: off, inbox: 0 item(s)
+bunsind connections kim                        # llm	not set
+```
+
+The notes work without an LLM:
+
+```sh
+printf 'Kim leads.\n' > team.md
+bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
+bunsind wiki-list kim                          # team	Team	Who does what
+```
+
+The agent itself does not work yet. An event is refused until the profile has an LLM:
+
+```sh
+bunsind ingest kim --source slack --event-id 1 --author lee --text "When do we deploy?"
+# error: the event was not handled: the LLM cannot be used: the profile has no `llm` settings
+```
+
+What to do next:
+
+1. Give the profile an LLM endpoint and connectors: [LLM endpoint and connectors](#llm-endpoint-and-connectors).
+2. Approve the tools of each connector and set what the agent may do: [Permission rules](#permission-rules).
+3. Write your principles: [Principles](#principles).
+4. Let the server find events: [Find events](#find-events-polling).
+5. Open the window with the same address and token: [Desktop window](#desktop-window-macos).
+
+For a server that other computers reach, read [Set up the server](#set-up-the-server-operator)
+first. It needs TLS.
 
 ## Set up the server (operator)
 
@@ -339,8 +408,9 @@ private CA, the CA certificate file. It checks them against the server, then kee
 address in `~/Library/Application Support/Bunsin/connection.json` and the token in the
 macOS Keychain.
 
-The window has two views. **Inbox** shows the approval inbox with every argument of each
-call, the audit log and the kill switch. **Settings** has the connections (LLM endpoint,
+The window has three views. **Inbox** shows the approval inbox with every argument of each
+call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
+you read, edit, make and delete a page. **Settings** has the connections (LLM endpoint,
 connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds. An edit before
 approval is available on the command line only.
 
