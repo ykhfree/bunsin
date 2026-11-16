@@ -10,7 +10,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
-use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
+use bunsin_api::http::{
+    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody, status_of,
+};
 use bunsin_api::{
     ApiError, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
     Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
@@ -257,6 +259,18 @@ async fn llm_usage(
     Ok(Json(engine.llm_usage(&profile).await?))
 }
 
+async fn resolve_unknown(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<ResolveUnknownBody>,
+) -> Reply<Option<Outcome>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(
+        engine.resolve_unknown(&profile, body.inbox_id, body.resolution).await?,
+    ))
+}
+
 async fn get_polls(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -399,6 +413,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("polls/{index}/test"), post(test_poll))
         .route(&profile("llm/test"), post(test_llm))
         .route(&profile("llm-usage"), post(llm_usage))
+        .route(&profile("resolve-unknown"), post(resolve_unknown))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

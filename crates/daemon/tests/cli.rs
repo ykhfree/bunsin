@@ -398,3 +398,48 @@ fn a_key_store_that_cannot_work_stops_the_start_before_any_key_is_read() {
     assert!(!dir.path().join("master.key").exists() && !key_file.exists());
     assert!(!dir.path().join("keychain-id").exists());
 }
+
+#[test]
+fn a_start_marks_a_cut_call_unknown_and_the_owner_resolves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    // The last server stopped while it ran this call.
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let body = bunsin_core::records::InboxBody::ToolCall {
+        tool: "slack/post".into(),
+        args: serde_json::json!({"text": "hi"}).as_object().unwrap().clone(),
+    };
+    let item = store
+        .add_inbox_item(
+            "k1",
+            &body,
+            "asked",
+            &[],
+            bunsin_core::approval::ApprovalState::Executing,
+            1,
+        )
+        .unwrap();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    let id = item.id.to_string();
+    let status = stdout_of(server.run(&kim, &["status", "kim"]), "status");
+    assert!(status.contains(&format!("#{id} [unknown] slack/post")), "{status}");
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["resolve-unknown", "kim", &id, "drop"]),
+            "resolve-unknown"
+        ),
+        format!("item {id} resolved\n")
+    );
+    let status = stdout_of(server.run(&kim, &["status", "kim"]), "status");
+    assert!(status.contains(&format!("#{id} [failed] slack/post")), "{status}");
+    let error = stderr_of_failure(
+        server.run(&kim, &["resolve-unknown", "kim", &id, "done"]),
+        "a second resolve",
+    );
+    assert!(error.contains("not unknown"), "{error}");
+}

@@ -376,6 +376,17 @@ enum Command {
         /// <connector>/<tool>
         tool: String,
     },
+    /// Resolve an item whose outcome is unknown, because the server stopped while its call ran.
+    /// Check the target system first. `done`: the call reached its tool. `drop`: give it up.
+    /// `retry`: run a copy now as a new item. If the first call reached its tool, it is sent twice.
+    ResolveUnknown {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        inbox_id: i64,
+        #[arg(value_parser = ["done", "retry", "drop"])]
+        resolution: String,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -588,7 +599,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     InboxBody::Escalation { summary } => format!("escalation: {summary}"),
                     InboxBody::WikiChange { slug, text, .. } => format!("note `{slug}`: {}", text.summary),
                 };
-                println!("  #{} [{}] {what}", item.id, item.state.as_str());
+                let retry = match item.retry_of {
+                    Some(of) => format!(" (repeats #{of})"),
+                    None => String::new(),
+                };
+                println!("  #{} [{}] {what}{retry}", item.id, item.state.as_str());
             }
         }
         Command::Stop { remote, profile, state } => {
@@ -903,6 +918,24 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::RuleRemove { remote, profile, tool } => {
             rules::save_rule(&connect(&remote)?, &profile, &tool, None).await?;
             println!("rule of {tool} in {profile} removed");
+        }
+        Command::ResolveUnknown {
+            remote,
+            profile,
+            inbox_id,
+            resolution,
+        } => {
+            let resolution: bunsin_api::Resolution =
+                serde_json::from_value(serde_json::Value::String(resolution)).map_err(|e| e.to_string())?;
+            let engine = connect(&remote)?;
+            match engine
+                .resolve_unknown(&profile, inbox_id, resolution)
+                .await
+                .map_err(text)?
+            {
+                Some(outcome) => println!("{}", json(&outcome)),
+                None => println!("item {inbox_id} resolved"),
+            }
         }
         Command::Reject {
             remote,

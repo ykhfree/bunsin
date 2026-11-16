@@ -3,9 +3,10 @@
 //! A call that was `executing` may have reached its tool. It is never run again: it becomes
 //! `unknown`, and only the owner resolves it. An `approved` call that never started runs now,
 //! but only if the policy allows it at this time. Otherwise a pending copy asks the owner again.
+//! The owner resolves an `unknown` item with `resolve_unknown`.
 
 use crate::{Engine, store_error};
-use bunsin_api::{ApiError, ApiResult};
+use bunsin_api::{ApiError, ApiResult, Outcome, Resolution};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::policy::Decision;
 use bunsin_core::records::InboxBody;
@@ -123,5 +124,54 @@ impl Engine {
             self.audit(&store, "resume_abandoned", key, detail)?;
         }
         Ok(())
+    }
+
+    /// Resolves an `unknown` item as the owner says. Only an `unknown` item can be resolved.
+    pub(crate) async fn resolve_unknown_item(
+        &self,
+        profile: &str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> ApiResult<Option<Outcome>> {
+        let store = self.store(profile)?;
+        let item = store.inbox_item(inbox_id).map_err(store_error)?;
+        if item.state != ApprovalState::Unknown {
+            return Err(ApiError::NotAllowed(format!(
+                "the item is {}, not unknown",
+                item.state.as_str()
+            )));
+        }
+        let handled = || ApiError::NotAllowed("the item was already handled".into());
+        let key = Some(item.event_key.as_str());
+        let to = match resolution {
+            Resolution::Done => ApprovalState::Executed,
+            Resolution::Drop => ApprovalState::Failed,
+            Resolution::Retry => {
+                // The move and the copy are one step, so two retries cannot make two copies.
+                let copy = store
+                    .fail_with_pending_copy(inbox_id, ApprovalState::Unknown, self.now())
+                    .map_err(store_error)?
+                    .ok_or_else(handled)?;
+                let detail = json!({"inbox_id": inbox_id, "resolution": resolution, "copy": copy.id});
+                self.audit(&store, "unknown_resolved", key, detail)?;
+                return match self.approve_item(profile, copy.id, None).await {
+                    Ok(outcome) => Ok(Some(outcome)),
+                    Err(ApiError::NotAllowed(error)) => Err(ApiError::NotAllowed(format!(
+                        "{error}; the copy waits in the inbox as item {}",
+                        copy.id
+                    ))),
+                    Err(error) => Err(error),
+                };
+            }
+        };
+        if !store
+            .move_inbox_state(inbox_id, ApprovalState::Unknown, to, self.now())
+            .map_err(store_error)?
+        {
+            return Err(handled());
+        }
+        let detail = json!({"inbox_id": inbox_id, "resolution": resolution});
+        self.audit(&store, "unknown_resolved", key, detail)?;
+        Ok(None)
     }
 }

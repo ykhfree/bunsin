@@ -549,6 +549,7 @@ bunsind status kim                 # the kill switch, the polls and the inbox
 bunsind approve kim 1              # run pending item 1
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
+bunsind resolve-unknown kim 1 drop # an item cut by a stop: done, drop or retry
 bunsind stop kim on                # the kill switch: stops all writes of this profile
 ```
 
@@ -556,7 +557,11 @@ An edit with a reason is stored as a correction. The agent sees recent correctio
 its next prompts.
 
 If the server stops while it runs an approved call, the next start does not run that call
-again: it may have reached its tool already. `status` shows it as `unknown`. A call that
+again: it may have reached its tool already. `status` shows it as `unknown`. Check the
+target system, then resolve it with `resolve-unknown` or in the window: `done` if the call
+reached its tool, `drop` if it did not, or `retry` to run a copy now as a new item.
+A retry checks the permission rules again. If the first call reached its tool, a retry
+sends it twice. A call that
 was approved but had not started runs at the next start, but only if the permission rules
 and the kill switch still allow it. Otherwise it is marked `failed`, and a pending copy
 waits for your approval.
@@ -588,6 +593,9 @@ item of a list for `blocks.*.text`. The other arguments stay as the card shows t
 The server adds the AI marker after the edit, so the field shows the text without the marker,
 and the marker is fixed text below it. An unchanged text is a plain approval. A call whose rule
 sends no text has no Edit button.
+
+**A call cut by a stop.** An `unknown` item has three buttons: "It ran: mark done", "It did not
+run: drop" and "Run again". A note under them says that a second run can send the call twice.
 
 ![The edit of a waiting call](docs/screens/inbox-edit-light.png)
 

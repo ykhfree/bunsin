@@ -477,6 +477,7 @@ bunsind status kim                 # 정지 스위치, poll 상태, 승인함
 bunsind approve kim 1              # 대기 중인 1번 항목을 실행
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
+bunsind resolve-unknown kim 1 drop # 멈춤으로 끊긴 항목: done, drop, retry 중 하나
 bunsind stop kim on                # 정지 스위치: 이 프로필의 모든 쓰기를 멈춤
 ```
 
@@ -484,6 +485,9 @@ bunsind stop kim on                # 정지 스위치: 이 프로필의 모든 �
 
 승인된 호출이 실행되는 중에 서버가 멈추면, 다음 시작은 그 호출을 다시 실행하지 않습니다.
 호출이 이미 도구에 닿았을 수 있기 때문입니다. `status`는 그 항목을 `unknown`으로 보여 줍니다.
+대상 시스템을 확인한 뒤 `resolve-unknown`이나 창에서 처리합니다.
+호출이 도구에 닿았으면 `done`, 닿지 않았으면 `drop`을 고릅니다. `retry`는 사본을 새 항목으로 지금 실행합니다.
+retry는 권한 규칙을 다시 확인합니다. 첫 호출이 도구에 닿았다면 retry는 같은 호출을 두 번 보냅니다.
 승인되었지만 시작하지 않은 호출은 다음 시작에서 실행됩니다. 단, 권한 규칙과 정지 스위치가 그때도 허용해야 합니다.
 허용하지 않으면 그 항목은 `failed`가 되고, 같은 내용의 대기 사본이 승인을 기다립니다.
 
@@ -512,6 +516,9 @@ token을 macOS Keychain에 저장합니다.
 "Approve and run with this text"는 새 글과 선택 사항인 이유를 보내고, 호출이 실행됩니다.
 AI 표시는 서버가 수정 뒤에 붙입니다. 그래서 입력란에는 표시 없는 글이 있고, 표시는 입력란 아래에 고정된 글로 보입니다.
 글을 바꾸지 않으면 그냥 승인합니다. 글을 보내지 않는 규칙의 호출에는 Edit 버튼이 없습니다.
+
+**멈춤으로 끊긴 호출.** `unknown` 항목에는 버튼이 세 개 있습니다: "It ran: mark done", "It did not run: drop", "Run again".
+버튼 아래의 안내문은 다시 실행하면 호출이 두 번 갈 수 있다고 알립니다.
 
 ![대기 호출의 수정](docs/screens/inbox-edit-light.png)
 

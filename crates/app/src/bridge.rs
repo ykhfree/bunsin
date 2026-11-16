@@ -6,7 +6,7 @@
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
     Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
-    ProfileSnapshot, ToolsReport, WikiPageUpdate,
+    ProfileSnapshot, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
@@ -29,6 +29,8 @@ pub enum UiCommand {
         edit: Edit,
     },
     Reject(i64),
+    /// Resolves an item whose call a stop cut. A retry runs a copy of the call.
+    ResolveUnknown(i64, Resolution),
     SetKillSwitch(bool),
     SavePrivacy {
         profile: String,
@@ -414,6 +416,13 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             .reject(profile, id, "dismissed in the app")
             .await
             .map_err(|e| e.to_string()),
+        (UiCommand::ResolveUnknown(id, resolution), Some(profile)) => {
+            match api.resolve_unknown(profile, id, resolution).await {
+                Ok(Some(outcome)) => approved(Ok(outcome)),
+                Ok(None) => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         (UiCommand::SetKillSwitch(on), Some(profile)) => api
             .set_kill_switch(profile, on)
             .await

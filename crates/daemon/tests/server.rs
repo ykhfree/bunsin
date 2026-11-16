@@ -287,6 +287,11 @@ async fn a_token_reaches_only_its_own_profile() {
         };
         refused(kim.set_polls(other, polls).await);
         refused(kim.llm_usage(other).await.map(|_| ()));
+        refused(
+            kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
+                .await
+                .map(|_| ()),
+        );
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
             base_url: "https://attacker.example".into(),
@@ -931,4 +936,40 @@ async fn a_start_marks_cut_calls_unknown_and_runs_waiting_approved_calls_once() 
     assert!(calls[0].1["text"].as_str().unwrap().starts_with("waiting"));
     poller.stop().await;
     running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unknown_item_is_resolved_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    rig.llm.reply(&post("Deployed."), 10);
+    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap() else {
+        panic!("expected a pending item")
+    };
+    // A stop cut the call while it ran. The next start finds it.
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    store
+        .move_inbox_state(inbox_id, ApprovalState::Pending, ApprovalState::Approved, 1)
+        .unwrap();
+    store
+        .move_inbox_state(inbox_id, ApprovalState::Approved, ApprovalState::Executing, 1)
+        .unwrap();
+    assert!(rig.engine.mark_interrupted().failures.is_empty());
+
+    let lee = rig.client(&rig.lee_token);
+    let refused = lee
+        .resolve_unknown("kim", inbox_id, bunsin_api::Resolution::Retry)
+        .await;
+    assert!(matches!(refused, Err(ApiError::Unauthorized(_))), "{refused:?}");
+    let outcome = kim
+        .resolve_unknown("kim", inbox_id, bunsin_api::Resolution::Retry)
+        .await
+        .unwrap();
+    let Some(Outcome::Executed { inbox_id: copy }) = outcome else {
+        panic!("expected an executed copy, got {outcome:?}")
+    };
+    assert_ne!(copy, inbox_id);
+    assert_eq!(rig.slack.calls().len(), 1);
+    let again = kim.resolve_unknown("kim", inbox_id, bunsin_api::Resolution::Done).await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
 }

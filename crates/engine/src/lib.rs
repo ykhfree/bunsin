@@ -17,7 +17,7 @@ pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
     LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -1317,6 +1317,15 @@ impl EngineApi for Engine {
 
     fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>> {
         Box::pin(async move { self.read_llm_usage(profile) })
+    }
+
+    fn resolve_unknown<'a>(
+        &'a self,
+        profile: &'a str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> BoxFuture<'a, ApiResult<Option<Outcome>>> {
+        Box::pin(self.resolve_unknown_item(profile, inbox_id, resolution))
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {

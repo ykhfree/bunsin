@@ -27,6 +27,7 @@
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
 //! | POST | `/v1/profiles/{p}/llm-usage` | | `[LlmUsage]` |
+//! | POST | `/v1/profiles/{p}/resolve-unknown` | `ResolveUnknownBody` | `Outcome or null` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -43,7 +44,7 @@
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 
-use crate::{ApiError, Edit};
+use crate::{ApiError, Edit, Resolution};
 use serde::{Deserialize, Serialize};
 
 pub const PROFILES: &str = "/v1/profiles";
@@ -66,6 +67,12 @@ pub struct ApproveToolsBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectBody {
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveUnknownBody {
+    pub inbox_id: i64,
+    pub resolution: Resolution,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

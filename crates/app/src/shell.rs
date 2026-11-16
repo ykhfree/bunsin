@@ -10,6 +10,7 @@ use crate::polls_form::PollsForm;
 use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
 use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
+use bunsin_api::Resolution;
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
@@ -448,6 +449,24 @@ impl Shell {
                 )
                 .children(self.edit_button(item, cx));
         }
+        if item.state == ApprovalState::Unknown {
+            return row
+                .child(labelled(
+                    format!("unknown-note-{id}"),
+                    "The server stopped while this call ran. It may have reached its tool. \
+                     Check the target system, then choose.",
+                ))
+                .child(
+                    buttons
+                        .child(Self::resolve_button(id, Resolution::Done, "It ran: mark done", cx))
+                        .child(Self::resolve_button(id, Resolution::Drop, "It did not run: drop", cx))
+                        .child(Self::resolve_button(id, Resolution::Retry, "Run again", cx)),
+                )
+                .child(labelled(
+                    format!("retry-warning-{id}"),
+                    "Run again sends the call as a new item. If the first call reached its tool, it is sent twice.",
+                ));
+        }
         if matches!(item.state, ApprovalState::Pending | ApprovalState::Draft) {
             buttons = buttons.child(
                 Button::new(SharedString::from(format!("reject-{id}")))
@@ -458,6 +477,22 @@ impl Shell {
             row = row.child(buttons);
         }
         row
+    }
+
+    /// A button that resolves an item whose call a stop cut.
+    fn resolve_button(id: i64, resolution: Resolution, text: &'static str, cx: &Context<Self>) -> Button {
+        let name = match resolution {
+            Resolution::Done => "done",
+            Resolution::Drop => "drop",
+            Resolution::Retry => "retry",
+        };
+        let button = Button::new(SharedString::from(format!("{name}-{id}"))).label(text);
+        // Only a retry can send something, maybe a second time. It looks like a risk.
+        let button = match resolution {
+            Resolution::Retry => button.danger(),
+            _ => button.outline(),
+        };
+        button.on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::ResolveUnknown(id, resolution))))
     }
 
     /// The left column: the views, the profiles and the state of the connection.

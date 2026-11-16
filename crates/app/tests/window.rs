@@ -807,3 +807,69 @@ fn a_refused_term_shows_the_server_error_and_keeps_the_form(cx: &mut TestAppCont
         PrivacyConfig::default()
     );
 }
+
+/// Makes pending item 1 of `kim` an item whose call a stop cut, as the next start finds it.
+fn cut_item_one(rig: &common::Rig) {
+    use bunsin_core::approval::ApprovalState::{Approved, Executing, Pending};
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    assert!(store.move_inbox_state(1, Pending, Approved, 1).unwrap());
+    assert!(store.move_inbox_state(1, Approved, Executing, 1).unwrap());
+    assert!(rig.engine.mark_interrupted().failures.is_empty());
+}
+
+#[gpui_kit::test]
+fn an_unknown_item_offers_done_drop_and_a_retry_that_warns(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    cut_item_one(&rig);
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbox-1"), "unknown · slack/post");
+        assert!(label(window, "unknown-note-1").contains("may have reached its tool"));
+        assert!(label(window, "retry-warning-1").contains("sent twice"));
+        assert_eq!(label(window, "done-1"), "It ran: mark done");
+        assert_eq!(label(window, "drop-1"), "It did not run: drop");
+        assert_eq!(label(window, "retry-1"), "Run again");
+        // The owner cannot approve or dismiss it like a pending item.
+        assert!(window.try_find("approve-1").is_none());
+        assert!(window.try_find("reject-1").is_none());
+        window.click("retry-1", cx);
+    });
+
+    let copy = |s: &Shell| {
+        s.state
+            .snapshot
+            .as_ref()
+            .and_then(|snap| snap.inbox.iter().find(|item| item.retry_of == Some(1)).cloned())
+    };
+    wait_until(cx, &shell, "the executed copy", |s| {
+        copy(s).is_some_and(|item| item.state.as_str() == "executed")
+    });
+    assert_eq!(rig.slack.calls().len(), 1);
+    let copy_id = shell.read_with(cx, |s, _| copy(s).unwrap().id);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "inbox-1"), "failed · slack/post");
+        assert!(window.try_find("retry-1").is_none());
+        let shown = window.find(format!("inbox-{copy_id}")).label().map(str::to_owned);
+        assert_eq!(shown.as_deref(), Some("executed · slack/post"));
+    });
+}
+
+#[gpui_kit::test]
+fn marking_an_unknown_item_done_sends_nothing(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    cut_item_one(&rig);
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| window.click("done-1", cx));
+    wait_until(cx, &shell, "the item marked done", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox[0].state.as_str() == "executed")
+    });
+    assert!(rig.slack.calls().is_empty());
+    let inbox = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    assert_eq!(inbox.len(), 1);
+    on_screen(cx, window, |window, _| assert!(window.try_find("done-1").is_none()));
+}

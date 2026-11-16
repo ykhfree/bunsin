@@ -37,6 +37,10 @@
   - inbox 열 `autonomous`는 정책이 소유자 없이 승인한 항목이다(처음부터 `approved`로 생긴 항목).
     이 열이 없던 DB의 `approved` 항목은 자율 항목으로 본다. 그래서 정책이 소유자 없이 허용할 때만 다시 실행되고, 아니면 소유자에게 다시 묻는다.
   - `execute`는 도구를 부르기 전에 감사 `execution_started`를 남긴다. 실행의 ID는 inbox ID이다.
+  - **`resolve_unknown(id, done|retry|drop)`**(`POST .../resolve-unknown`, `bunsind resolve-unknown`, 창의 버튼): `unknown` 항목만 받는다.
+    done은 `executed`, drop은 `failed`로 옮긴다. retry는 항목을 `failed`로 옮기고 `pending` 사본(`retry_of`)을 한 transaction으로 만든 뒤,
+    그 사본을 `approve_item`으로 실행한다. 그래서 새 inbox ID로 한 번 실행되고, 정책을 다시 본다.
+    정책이 거부하면 사본은 `pending`으로 남고, 오류가 사본의 번호를 알려 준다. 감사는 `unknown_resolved`이다.
   - 처음 설계는 `updated_at < started_at`으로 시작 전 항목을 골랐다. 시계가 초 단위라서 같은 초의 항목을 놓치므로, 1단계에서 ID를 적어 두는 방식으로 바꿨다.
 - 공개 리스너(ARD, 인바운드 MCP)는 아직 없다. 만들 때 제어 API와 분리한다.
 - 기각한 안: GPUI 바이너리 하나에 엔진을 넣는 구조. 창을 닫으면 agent가 멈추고, Linux 서버에 디스플레이가 필요하다.
@@ -108,7 +112,7 @@
     이 방법으로는 hover, focus 이동, 제목 표시줄, 시스템 모드 변경을 따르는 동작을 확인할 수 없다.
 - 창은 Inbox, Notes, Permissions, Agent, Settings 다섯 화면 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
   승인함 테스트는 1280x800 창에서 실행한다.
-  - Inbox: 상태, 정지 스위치, 승인함, 감사 로그.
+  - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
   - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
   - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.
@@ -547,7 +551,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
 | ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
-| 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본) | 구현, 테스트 있음. `unknown`의 처리(완료, 다시, 버림)는 없음. |
+| 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 
 ## 17. 미해결
 

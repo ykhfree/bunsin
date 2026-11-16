@@ -2,7 +2,7 @@
 
 mod common;
 
-use bunsin_api::{EngineApi, Outcome};
+use bunsin_api::{ApiError, EngineApi, Outcome, Resolution};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::policy::Tier;
 use bunsin_core::records::InboxItem;
@@ -210,4 +210,87 @@ async fn an_item_approved_after_the_check_is_left_to_its_own_request() {
     let after = item(&rig, after).await;
     assert_eq!(after.state, ApprovalState::Approved);
     assert_eq!(rig.slack.calls().len(), 1);
+}
+
+/// A rig after a restart, with one item that the stop cut while it ran.
+async fn unknown_item() -> (Rig, i64) {
+    let rig = rig().await;
+    let id = pending_post(&rig, "e1").await;
+    force_state(&rig, id, ApprovalState::Pending, ApprovalState::Approved);
+    force_state(&rig, id, ApprovalState::Approved, ApprovalState::Executing);
+    let rig = rig.restart();
+    start(&rig).await;
+    assert_eq!(item(&rig, id).await.state, ApprovalState::Unknown);
+    (rig, id)
+}
+
+#[tokio::test]
+async fn done_and_drop_close_an_unknown_item_without_a_call() {
+    for (resolution, state) in [
+        (Resolution::Done, ApprovalState::Executed),
+        (Resolution::Drop, ApprovalState::Failed),
+    ] {
+        let (rig, id) = unknown_item().await;
+        let outcome = rig.engine.resolve_unknown("kim", id, resolution).await.unwrap();
+        assert_eq!(outcome, None);
+        assert_eq!(item(&rig, id).await.state, state, "{resolution:?}");
+        assert!(rig.slack.calls().is_empty());
+        assert_eq!(rig.engine.snapshot("kim").await.unwrap().inbox.len(), 1);
+        assert!(audit_kinds(&rig).await.contains(&"unknown_resolved".to_owned()));
+        // It is resolved once.
+        let again = rig.engine.resolve_unknown("kim", id, Resolution::Retry).await;
+        assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+        assert!(rig.slack.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_retry_runs_a_copy_once_under_a_new_id() {
+    let (rig, id) = unknown_item().await;
+    let outcome = rig.engine.resolve_unknown("kim", id, Resolution::Retry).await.unwrap();
+    let Some(Outcome::Executed { inbox_id: copy }) = outcome else {
+        panic!("expected an executed copy, got {outcome:?}")
+    };
+    assert_ne!(copy, id);
+    assert_eq!(item(&rig, id).await.state, ApprovalState::Failed);
+    let copy = item(&rig, copy).await;
+    assert_eq!((copy.state, copy.retry_of), (ApprovalState::Executed, Some(id)));
+    assert_eq!(rig.slack.calls().len(), 1);
+    assert_eq!(rig.slack.calls()[0].1["text"], json!(format!("At 3 pm.\n\n{MARKER}")));
+    // A second retry of the same item finds it failed and sends nothing.
+    let again = rig.engine.resolve_unknown("kim", id, Resolution::Retry).await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+    assert_eq!(rig.slack.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_retry_that_the_policy_refuses_leaves_a_pending_copy() {
+    let (rig, id) = unknown_item().await;
+    rig.engine.set_kill_switch("kim", true).await.unwrap();
+    let refused = rig.engine.resolve_unknown("kim", id, Resolution::Retry).await;
+    let Err(ApiError::NotAllowed(error)) = refused else {
+        panic!("expected a refusal, got {refused:?}")
+    };
+    assert!(rig.slack.calls().is_empty());
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    let copy = inbox.iter().find(|i| i.retry_of == Some(id)).unwrap();
+    assert_eq!(copy.state, ApprovalState::Pending);
+    assert!(error.contains(&format!("item {}", copy.id)), "{error}");
+    assert_eq!(item(&rig, id).await.state, ApprovalState::Failed);
+}
+
+#[tokio::test]
+async fn only_an_unknown_item_can_be_resolved() {
+    let rig = rig().await;
+    let id = pending_post(&rig, "e1").await;
+    for resolution in [Resolution::Done, Resolution::Retry, Resolution::Drop] {
+        let result = rig.engine.resolve_unknown("kim", id, resolution).await;
+        assert!(
+            matches!(&result, Err(ApiError::NotAllowed(e)) if e.contains("pending")),
+            "{resolution:?}: {result:?}"
+        );
+    }
+    assert_eq!(item(&rig, id).await.state, ApprovalState::Pending);
+    assert_eq!(rig.engine.snapshot("kim").await.unwrap().inbox.len(), 1);
+    assert!(rig.slack.calls().is_empty());
 }

@@ -1,10 +1,12 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
-use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
+use bunsin_api::http::{
+    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody, profile_path,
+};
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
     Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
@@ -312,6 +314,19 @@ impl EngineApi for RemoteEngine {
     fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>> {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "llm-usage"), NO_BODY)
+                .await
+        })
+    }
+
+    fn resolve_unknown<'a>(
+        &'a self,
+        profile: &'a str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> BoxFuture<'a, ApiResult<Option<Outcome>>> {
+        Box::pin(async move {
+            let body = ResolveUnknownBody { inbox_id, resolution };
+            self.call(Method::POST, &profile_path(profile, "resolve-unknown"), Some(&body))
                 .await
         })
     }

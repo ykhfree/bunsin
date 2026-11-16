@@ -98,6 +98,19 @@ pub enum Outcome {
     },
 }
 
+/// How the owner resolves a tool call whose outcome is unknown, because a stop cut it while it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// The call reached its tool. The item becomes `executed`.
+    Done,
+    /// The item becomes `failed`, and a copy of the call runs now as a new item.
+    /// If the first call reached its tool, the tool gets the call twice.
+    Retry,
+    /// The item becomes `failed`. Nothing runs.
+    Drop,
+}
+
 /// The user's change to a pending tool call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edit {
@@ -484,4 +497,13 @@ pub trait EngineApi: Send + Sync {
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>>;
     /// The LLM calls of the last 90 days, added up by UTC day and purpose. Newest day first.
     fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>>;
+    /// Resolves an `unknown` item. A retry approves a copy of the call with a new inbox ID and
+    /// returns the outcome of that run. The approval checks the policy; if it refuses, the copy
+    /// stays pending. Done and drop return `None`.
+    fn resolve_unknown<'a>(
+        &'a self,
+        profile: &'a str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> BoxFuture<'a, ApiResult<Option<Outcome>>>;
 }
