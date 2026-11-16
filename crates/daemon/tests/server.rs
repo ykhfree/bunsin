@@ -1194,3 +1194,26 @@ async fn the_notes_are_checked_over_http() {
     let gone = kim.dismiss_finding("kim", 999).await;
     assert!(matches!(gone, Err(ApiError::NotFound(_))), "{gone:?}");
 }
+
+#[tokio::test]
+async fn an_event_the_owner_hands_in_counts_as_the_owners_own() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let tools = vec![tool("post", "Post a message"), tool("search", "Search messages")];
+    rig.slack.set_tools(tools.clone());
+    let mut config = kim.profile_config("kim").await.unwrap();
+    config.approved_tools.insert("slack".into(), tools);
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    config.notes.auto_apply = true;
+    kim.set_profile_config("kim", config).await.unwrap();
+    let search = serde_json::json!({"kind": "tool_call", "rationale": "look", "summary": null,
+        "tool": "slack/search", "args_json": "{\"query\":\"deploy\"}"});
+    let keep = serde_json::json!({"kind": "ignore", "rationale": "noted", "summary": null, "tool": null,
+        "args_json": null, "wiki_updates": [{"slug": "deploy", "title": "Deploy", "summary": "When",
+        "body": "Fridays."}]});
+    rig.llm.reply(&search.to_string(), 10).reply(&keep.to_string(), 10);
+    // The client sends the event over HTTP. The server marks it as the owner's from the access token.
+    kim.ingest("kim", event("owner-1")).await.unwrap();
+    let page = kim.wiki_page("kim", "deploy").await.unwrap();
+    assert_eq!(page.text.body, "Fridays.");
+}

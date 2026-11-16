@@ -17,6 +17,14 @@ fn auto(on: bool) -> ProfileConfig {
     config
 }
 
+/// An event the owner handed in. The server's ingest route marks it so after it checks the access token.
+fn owner(id: &str) -> InboundEvent {
+    InboundEvent {
+        channel: Channel::Owner,
+        ..event(id, "lee", "when?")
+    }
+}
+
 fn page(slug: &str, body: &str) -> Value {
     json!({"slug": slug, "title": "Deploy schedule", "summary": "When the team deploys", "body": body})
 }
@@ -50,7 +58,7 @@ async fn body(rig: &Rig, slug: &str) -> Option<String> {
 #[tokio::test]
 async fn a_new_page_and_a_page_of_the_agent_are_stored_at_once() {
     let rig = rig_with(auto(true)).await;
-    propose(&rig, event("e1", "lee", "when?"), None, "deploy", "Fridays.").await;
+    propose(&rig, owner("e1"), None, "deploy", "Fridays.").await;
     assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Executed);
     let stored = rig.engine.wiki_page("kim", "deploy").await.unwrap();
     assert_eq!(
@@ -59,14 +67,7 @@ async fn a_new_page_and_a_page_of_the_agent_are_stored_at_once() {
     );
 
     // The agent changes its own page after it read it.
-    propose(
-        &rig,
-        event("e2", "lee", "when?"),
-        Some("deploy"),
-        "deploy",
-        "Thursdays.",
-    )
-    .await;
+    propose(&rig, owner("e2"), Some("deploy"), "deploy", "Thursdays.").await;
     assert_eq!(body(&rig, "deploy").await.as_deref(), Some("Thursdays."));
     let applied: Vec<Value> = rig
         .kim_store()
@@ -101,14 +102,7 @@ async fn a_change_of_an_owner_page_waits_for_the_owner() {
         expected_revision: None,
     };
     rig.engine.set_wiki_page("kim", "deploy", text).await.unwrap();
-    propose(
-        &rig,
-        event("e1", "lee", "when?"),
-        Some("deploy"),
-        "deploy",
-        "Thursdays.",
-    )
-    .await;
+    propose(&rig, owner("e1"), Some("deploy"), "deploy", "Thursdays.").await;
     assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Pending);
     assert_eq!(body(&rig, "deploy").await.as_deref(), Some("Mine."));
 }
@@ -117,7 +111,7 @@ async fn a_change_of_an_owner_page_waits_for_the_owner() {
 async fn with_the_kill_switch_on_a_change_waits() {
     let rig = rig_with(auto(true)).await;
     rig.engine.set_kill_switch("kim", true).await.unwrap();
-    propose(&rig, event("e1", "lee", "when?"), None, "deploy", "Fridays.").await;
+    propose(&rig, owner("e1"), None, "deploy", "Fridays.").await;
     assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Pending);
     assert_eq!(body(&rig, "deploy").await, None);
 }
@@ -125,22 +119,52 @@ async fn with_the_kill_switch_on_a_change_waits() {
 #[tokio::test]
 async fn a_change_from_an_outside_event_waits() {
     let rig = rig_with(auto(true)).await;
-    let pushed = InboundEvent {
-        channel: Channel::Outside,
-        ..event("e1", "lee", "when?")
-    };
-    propose(&rig, pushed, None, "deploy", "Fridays.").await;
+    // An event that no entry point marked is outside.
+    assert_eq!(event("e1", "lee", "when?").channel, Channel::Outside);
+    propose(&rig, event("e1", "lee", "when?"), None, "deploy", "Fridays.").await;
     assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Pending);
     assert_eq!(body(&rig, "deploy").await, None);
     // The same event through the owner's channel is stored.
-    propose(&rig, event("e2", "lee", "when?"), None, "team", "Kim leads.").await;
+    propose(&rig, owner("e2"), None, "team", "Kim leads.").await;
     assert_eq!(change_state(&rig, "team").await, ApprovalState::Executed);
 }
 
 #[tokio::test]
 async fn by_default_every_change_waits() {
     let rig = rig_with(auto(false)).await;
-    propose(&rig, event("e1", "lee", "when?"), None, "deploy", "Fridays.").await;
+    propose(&rig, owner("e1"), None, "deploy", "Fridays.").await;
     assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Pending);
     assert_eq!(body(&rig, "deploy").await, None);
+}
+
+#[tokio::test]
+async fn an_owner_mark_on_the_wire_is_not_trusted() {
+    let rig = rig_with(auto(true)).await;
+    let wire = json!({"source": "slack", "external_id": "e1", "thread": null, "author": "lee",
+        "text": "when?", "channel": "owner"});
+    let claimed: InboundEvent = serde_json::from_value(wire).unwrap();
+    propose(&rig, claimed, None, "deploy", "Fridays.").await;
+    assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Pending);
+    assert_eq!(body(&rig, "deploy").await, None);
+}
+
+#[tokio::test]
+async fn a_change_from_a_poll_is_stored_at_once() {
+    let mut config = auto(true);
+    config.polls = vec![poll()];
+    let rig = rig_with(config).await;
+    rig.slack.set_result("search", json!({"messages": []}));
+    assert_eq!(rig.engine.poll_profile("kim").await.unwrap(), 0);
+    rig.advance(60);
+    rig.slack.set_result(
+        "search",
+        json!({"messages": [message("1", "lee", "when do we deploy?")]}),
+    );
+    rig.llm.reply(&call("slack/search", json!({"query": "deploy"})), 10);
+    let mut reply: Value = serde_json::from_str(&ignore()).unwrap();
+    reply["wiki_updates"] = json!([page("deploy", "Fridays.")]);
+    rig.llm.reply(&reply.to_string(), 10);
+    assert_eq!(rig.engine.poll_profile("kim").await.unwrap(), 1);
+    assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Executed);
+    assert_eq!(body(&rig, "deploy").await.as_deref(), Some("Fridays."));
 }

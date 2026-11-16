@@ -127,6 +127,11 @@ async fn ingest(
     Json(event): Json<InboundEvent>,
 ) -> Reply<Outcome> {
     authorize(&engine, &headers, &profile)?;
+    // The access token proves the owner. Only this route and the polls mark an event as the owner's.
+    let event = InboundEvent {
+        channel: bunsin_core::event::Channel::Owner,
+        ..event
+    };
     Ok(Json(engine.ingest(&profile, event).await?))
 }
 

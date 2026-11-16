@@ -661,9 +661,13 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   `approve_wiki_change`를 부른다. 그래서 출처 규칙, 읽은 뒤에만 고치기, revision 비교, 한 번만 적용이 승인과 같다.
 - 조건: 정지 스위치가 꺼져 있다. 새 페이지이거나 마지막 작성 주체가 agent이다(owner 페이지는 덮어쓰지 않는다).
   이벤트의 `channel`이 `owner`이다.
-- `InboundEvent.channel`(`serde(default)`, 기본 `owner`)은 이벤트가 온 길이다. poll과 소유자의 `ingest`는 `owner`이고,
-  webhook 해석기(`bunsin-connectors::webhook`)는 `outside`를 붙인다. 인바운드 호출자도 `outside`를 붙여야 한다.
-  다른 사람이 직접 넣는 이벤트는 agent를 조종하려고 쓸 수 있으므로, 그 변경안은 언제나 소유자를 기다린다. dedupe key에는 들지 않는다.
+- `InboundEvent.channel`은 이벤트가 온 길이다. 기본값은 `outside`이고(fail closed), `serde(skip_deserializing)`이라서
+  요청 본문이나 저장된 payload의 값은 읽지 않는다. `owner`는 서버의 진입점만 붙인다: poll의 추출(core `poll::extract`)과
+  access token을 확인한 `POST .../events` route. webhook 해석기(`bunsin-connectors::webhook`)는 `outside`를 붙인다.
+  인바운드 호출자는 아무것도 붙이지 않아도 `outside`이다. 다른 사람이 직접 넣는 이벤트는 agent를 조종하려고 쓸 수 있으므로,
+  그 변경안은 언제나 소유자를 기다린다. dedupe key에는 들지 않는다.
+- 저장된 이벤트를 다시 읽으면 `outside`이다. 다시 읽는 곳은 교정 기록의 task(`corrections.rs`)뿐이고, 자동 반영은 처리 중인 이벤트의 값만 보므로 동작이 바뀌지 않는다.
+  엔진 안에서 `EngineApi::ingest`를 직접 부르는 코드는 `owner`를 스스로 붙여야 한다.
 - 감사 `wiki_change_applied`에 `auto`가 붙는다. 저장하지 못하면(예: 그 사이 소유자의 편집) 항목은 `pending`으로 남고 감사 `wiki_change_auto_apply_failed`가 남는다.
 - 결정 기록(4절)에는 들지 않는다. 기각: owner 페이지 덮어쓰기.
 

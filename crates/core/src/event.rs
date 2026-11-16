@@ -10,20 +10,22 @@ pub struct InboundEvent {
     pub thread: Option<String>,
     pub author: String,
     pub text: String,
-    /// Who could make the event happen. Not part of the dedupe key.
-    #[serde(default)]
+    /// Who could make the event happen. Not part of the dedupe key. It is never read from the wire or
+    /// from storage: the entry point on the server sets it, and every other event is outside.
+    #[serde(default, skip_deserializing)]
     pub channel: Channel,
 }
 
-/// The way an event reached the engine.
+/// The way an event reached the engine. The default is `Outside`, so an event that no entry point
+/// marked gets no trust it was not given.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
-    /// The owner's own polls, or an event the owner handed in.
-    #[default]
+    /// The owner's own polls, or an event the owner handed in with the owner's access token.
     Owner,
-    /// A channel that other people push into directly: a webhook or an inbound caller.
-    /// Such an event may be written to steer the agent, so nothing from it is stored without the owner.
+    /// Any other way, for example a webhook or an inbound caller. Other people can write such an event
+    /// to steer the agent, so nothing from it is stored without the owner.
+    #[default]
     Outside,
 }
 
@@ -48,6 +50,29 @@ mod tests {
             text: text.into(),
             channel: Default::default(),
         }
+    }
+
+    #[test]
+    fn the_channel_is_outside_unless_an_entry_point_sets_it() {
+        let wire = r#"{"source":"slack","external_id":"1","thread":null,"author":"a","text":"t"}"#;
+        let read: InboundEvent = serde_json::from_str(wire).unwrap();
+        assert_eq!(read.channel, Channel::Outside);
+        // A value on the wire is not trusted.
+        let claimed = wire.replace("\"text\":\"t\"", "\"text\":\"t\",\"channel\":\"owner\"");
+        assert!(claimed.contains("\"channel\":\"owner\""));
+        let read: InboundEvent = serde_json::from_str(&claimed).unwrap();
+        assert_eq!(read.channel, Channel::Outside);
+        // An owner event that is stored and read back is outside again.
+        let owner = InboundEvent {
+            channel: Channel::Owner,
+            ..read
+        };
+        let stored = serde_json::to_string(&owner).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InboundEvent>(&stored).unwrap().channel,
+            Channel::Outside
+        );
+        assert_eq!(owner.dedupe_key(), event("slack", "1", "x").dedupe_key());
     }
 
     #[test]

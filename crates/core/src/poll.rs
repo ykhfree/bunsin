@@ -178,7 +178,8 @@ mod tests {
                 thread: Some("1699999999.000001".into()),
                 author: "lee".into(),
                 text: "deploy?".into(),
-                channel: Default::default(),
+                // A poll is the owner's own search.
+                channel: Channel::Owner,
             }
         );
         assert_eq!(extracted.events[1].thread, None);
