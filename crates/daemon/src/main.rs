@@ -11,7 +11,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
 use bunsin_core::settings::Wire;
 use bunsin_daemon::keystore::KeyStore;
-use bunsin_daemon::server::{Poller, ServeConfig, serve};
+use bunsin_daemon::server::{ServeConfig, start};
 use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
 use bunsin_engine::Engine;
 use bunsin_engine::{KeyFile, KeySource};
@@ -475,8 +475,7 @@ async fn run_server(
     let engine =
         Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let engine = Arc::new(engine);
-    let running = serve(engine.clone(), config).await.map_err(|e| e.to_string())?;
-    let poller = Poller::start(engine);
+    let (running, poller) = start(engine, config).await.map_err(|e| e.to_string())?;
     // The handler is installed before the address is announced, so a stop request
     // that follows the announcement is never lost.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

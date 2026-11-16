@@ -555,6 +555,12 @@ bunsind stop kim on                # the kill switch: stops all writes of this p
 An edit with a reason is stored as a correction. The agent sees recent corrections in
 its next prompts.
 
+If the server stops while it runs an approved call, the next start does not run that call
+again: it may have reached its tool already. `status` shows it as `unknown`. A call that
+was approved but had not started runs at the next start, but only if the permission rules
+and the kill switch still allow it. Otherwise it is marked `failed`, and a pending copy
+waits for your approval.
+
 ## Desktop window (macOS)
 
 ```sh

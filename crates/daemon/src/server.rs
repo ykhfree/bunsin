@@ -29,7 +29,7 @@ use std::time::Duration;
 
 /// How long running requests may finish after a stop signal. One event can need two LLM
 /// calls of up to 120 s each, so the grace covers that. A request that is cut leaves its
-/// inbox item in the `executing` state.
+/// inbox item in the `executing` state. The next `start` marks it `unknown`.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(300);
 
 struct Failure(ApiError);
@@ -503,6 +503,27 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
             ))),
         },
     }
+}
+
+/// Starts the server and the poll task, after the work that the last stop cut is sorted out:
+///
+/// 1. Each `executing` item becomes `unknown`. It is never run again.
+/// 2. The server takes requests.
+/// 3. Each `approved` tool call that waited at step 1 runs if the policy allows it now.
+///    Otherwise a pending copy asks the owner.
+/// 4. The poll task starts.
+///
+/// A profile that fails at step 1 or 3 is written to stderr and does not stop the start.
+pub async fn start(engine: Arc<Engine>, config: ServeConfig) -> Result<(Running, Poller), ServeError> {
+    let interrupted = engine.mark_interrupted();
+    for (profile, error) in &interrupted.failures {
+        eprintln!("cut calls of profile {profile} were not checked: {error}");
+    }
+    let running = serve(engine.clone(), config).await?;
+    for (profile, error) in engine.resume_approved(interrupted).await {
+        eprintln!("an approved call of profile {profile} was not resumed: {error}");
+    }
+    Ok((running, Poller::start(engine)))
 }
 
 /// How often the server looks for polls that are due.

@@ -8,8 +8,10 @@ mod notes;
 mod poll_settings;
 mod polling;
 mod principles;
+mod resume;
 mod secrets;
 
+pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
@@ -641,6 +643,7 @@ impl Engine {
     }
 
     /// Runs an approved item. Only the caller that moves it to `Executing` runs it.
+    /// The inbox ID identifies the run. If a stop cuts the call, the next start marks it `unknown`.
     async fn execute(&self, ctx: &Ctx, item: &InboxItem) -> ApiResult<Outcome> {
         let Ctx { store, runtime, .. } = ctx;
         let InboxBody::ToolCall { tool: tool_id, args } = &item.body else {
@@ -653,6 +656,12 @@ impl Engine {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
         let key = Some(item.event_key.as_str());
+        self.audit(
+            store,
+            "execution_started",
+            key,
+            json!({"inbox_id": item.id, "tool": tool_id}),
+        )?;
         let result = match split_tool_id(tool_id) {
             Some((connector, tool)) => match runtime.connector(connector) {
                 Ok(connector) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),

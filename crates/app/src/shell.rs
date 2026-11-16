@@ -252,6 +252,7 @@ fn state_view(state: ApprovalState, cx: &App) -> (&'static str, Hsla) {
         ApprovalState::Executed => ("Done", palette.done),
         ApprovalState::Rejected => ("Dismissed", quiet),
         ApprovalState::Failed => ("Failed", palette.stopped),
+        ApprovalState::Unknown => ("Outcome unknown", palette.stopped),
     }
 }
 
@@ -847,6 +848,8 @@ mod tests {
             state: ApprovalState::Pending,
             created_at: 0,
             updated_at: 0,
+            autonomous: false,
+            retry_of: None,
         }
     }
 

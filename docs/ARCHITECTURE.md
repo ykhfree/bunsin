@@ -20,8 +20,24 @@
 - 서버 운영자의 명령(`profile-add`, `token-add`, `token-list`, `token-revoke`)은 저장소 파일을 직접 다룬다.
   엔진 잠금이 필요 없으므로 서버가 도는 동안에도 실행된다. 두 프로세스가 같은 SQLite 파일을 쓰므로 busy timeout을 둔다.
 - 서버는 SIGTERM이나 Ctrl-C를 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다린 뒤에 종료한다.
-  그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다.
+  그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다. 다음 시작이 그 항목을 `unknown`으로 옮긴다(아래 "재개").
   서비스 관리자의 종료 대기 시간(systemd의 기본값은 90초)이 더 짧으면 그 시간에 끊긴다.
+- **재개**: `server::start`가 아래 순서로 시작한다. `main.rs`와 daemon 테스트가 같은 함수를 부른다.
+  1. `mark_interrupted()`: 모든 프로필의 `executing` 항목을 `unknown`으로 옮기고 감사 `outcome_unknown`을 남긴다.
+     같은 단계에서 `approved` 도구 호출의 ID를 적어 둔다.
+  2. 서버가 요청을 받기 시작한다.
+  3. `resume_approved()`: 1단계에서 적은 항목만 본다. 시작 뒤에 승인된 항목은 그 요청이 실행한다.
+     정책을 다시 묻는다(`decide`: 정지 스위치, pin, 규칙). 소유자가 승인한 항목은 `Execute`나 `NeedsApproval`일 때,
+     자율 항목은 `Execute`일 때만 실행한다(감사 `resumed`, 실행은 `Approved→Executing` CAS를 지난다).
+     그 밖이면 항목을 `failed`로 옮기고 같은 내용의 `pending` 사본(`retry_of`)을 만든다(감사 `resume_abandoned`).
+     옮기기와 사본 만들기는 한 transaction이다. 사본의 승인은 정책을 다시 본다.
+  4. 폴링을 시작한다.
+  - 프로필 하나의 실패는 stderr에 쓰고, 다른 프로필과 서버의 시작을 막지 않는다.
+  - `unknown`에서 `approved`나 `executing`으로 가는 전이는 없다. 이미 보냈을 수 있으므로 자동 재실행은 기각했다.
+  - inbox 열 `autonomous`는 정책이 소유자 없이 승인한 항목이다(처음부터 `approved`로 생긴 항목).
+    이 열이 없던 DB의 `approved` 항목은 자율 항목으로 본다. 그래서 정책이 소유자 없이 허용할 때만 다시 실행되고, 아니면 소유자에게 다시 묻는다.
+  - `execute`는 도구를 부르기 전에 감사 `execution_started`를 남긴다. 실행의 ID는 inbox ID이다.
+  - 처음 설계는 `updated_at < started_at`으로 시작 전 항목을 골랐다. 시계가 초 단위라서 같은 초의 항목을 놓치므로, 1단계에서 ID를 적어 두는 방식으로 바꿨다.
 - 공개 리스너(ARD, 인바운드 MCP)는 아직 없다. 만들 때 제어 API와 분리한다.
 - 기각한 안: GPUI 바이너리 하나에 엔진을 넣는 구조. 창을 닫으면 agent가 멈추고, Linux 서버에 디스플레이가 필요하다.
 
@@ -531,7 +547,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
 | ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
-| 승인 후 실행 전에 중단된 항목의 재개 | 없음. 항목은 `approved` 또는 `executing` 상태로 남고 다시 실행되지 않는다. |
+| 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본) | 구현, 테스트 있음. `unknown`의 처리(완료, 다시, 버림)는 없음. |
 
 ## 17. 미해결
 

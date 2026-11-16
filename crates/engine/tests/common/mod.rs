@@ -66,6 +66,40 @@ impl Rig {
         out
     }
 
+    /// Stops the engine like a crash would and opens a new one on the same data directory,
+    /// with the same fakes and clock.
+    pub fn restart(self) -> Rig {
+        let Rig {
+            dir,
+            llm,
+            slack,
+            clock,
+            engine,
+        } = self;
+        drop(engine);
+        let backends = Arc::new(Fakes {
+            llm: llm.clone(),
+            slack: slack.clone(),
+        });
+        let time = clock.clone();
+        let engine = Engine::open(dir.path(), backends, Arc::new(move || time.load(Ordering::SeqCst))).unwrap();
+        Rig {
+            dir,
+            llm,
+            slack,
+            clock,
+            engine,
+        }
+    }
+
+    /// The store of profile `kim`, opened beside the engine.
+    pub fn kim_store(&self) -> bunsin_store::ProfileStore {
+        bunsin_store::AppStore::open(self.dir.path())
+            .unwrap()
+            .open_profile("kim")
+            .unwrap()
+    }
+
     pub fn stores(&self, value: &str) -> bool {
         self.stored_bytes()
             .windows(value.len())

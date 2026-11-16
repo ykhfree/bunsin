@@ -51,6 +51,12 @@ pub struct InboxItem {
     pub state: ApprovalState,
     pub created_at: i64,
     pub updated_at: i64,
+    /// True if the policy approved the item without the owner (tier `autonomous`).
+    #[serde(default)]
+    pub autonomous: bool,
+    /// The item that this one repeats, after a stop cut it or kept it from running.
+    #[serde(default)]
+    pub retry_of: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

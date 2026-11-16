@@ -612,6 +612,7 @@ async fn the_audit_log_tells_the_story_of_an_event() {
             "proposal",
             "policy_decision",
             "approved",
+            "execution_started",
             "executed"
         ]
     );

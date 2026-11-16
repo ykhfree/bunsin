@@ -10,7 +10,7 @@ use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use bunsin_core::settings::Wire;
-use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve};
+use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve, start};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Backends, Engine, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
@@ -874,4 +874,61 @@ async fn the_llm_call_log_is_read_over_http() {
     );
     // The other profile made no call.
     assert!(rig.client(&rig.lee_token).llm_usage("lee").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_start_marks_cut_calls_unknown_and_runs_waiting_approved_calls_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = Arc::new(FakeLlm::new());
+    let slack = Arc::new(FakeConnector::new("slack", vec![tool("post", "Post a message")]));
+    let open = || {
+        let backends = Arc::new(Fakes {
+            llm: llm.clone(),
+            slack: slack.clone(),
+            real: RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default()),
+        });
+        Arc::new(Engine::open(dir.path(), backends, Arc::new(|| 1_000_000)).unwrap())
+    };
+    let engine = open();
+    engine.create_profile("kim", profile_config("Kim")).await.unwrap();
+    let mut ids = Vec::new();
+    for id in ["cut", "waiting"] {
+        llm.reply(&post(id), 10);
+        let Outcome::PendingApproval { inbox_id } = engine.ingest("kim", event(id)).await.unwrap() else {
+            panic!("expected a pending item")
+        };
+        ids.push(inbox_id);
+    }
+    // The stop cut one call while it ran, and came before the other one started.
+    let store = engine.app_store().open_profile("kim").unwrap();
+    for (id, to) in [(ids[0], ApprovalState::Executing), (ids[1], ApprovalState::Approved)] {
+        store
+            .move_inbox_state(id, ApprovalState::Pending, ApprovalState::Approved, 1)
+            .unwrap();
+        if to == ApprovalState::Executing {
+            store.move_inbox_state(id, ApprovalState::Approved, to, 1).unwrap();
+        }
+    }
+    drop(engine);
+
+    let engine = open();
+    let listen = "127.0.0.1:0".parse().unwrap();
+    let (running, poller) = start(engine.clone(), ServeConfig { listen, tls: None }).await.unwrap();
+    let states: Vec<_> = engine
+        .snapshot("kim")
+        .await
+        .unwrap()
+        .inbox
+        .into_iter()
+        .map(|item| (item.id, item.state))
+        .collect();
+    assert_eq!(
+        states,
+        [(ids[1], ApprovalState::Executed), (ids[0], ApprovalState::Unknown)]
+    );
+    let calls = slack.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].1["text"].as_str().unwrap().starts_with("waiting"));
+    poller.stop().await;
+    running.shutdown().await.unwrap();
 }

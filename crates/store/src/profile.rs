@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS inbox (
     basis TEXT NOT NULL DEFAULT '[]',
     state TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    autonomous INTEGER NOT NULL DEFAULT 0,
+    retry_of INTEGER
 );
 CREATE TABLE IF NOT EXISTS corrections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,7 +196,7 @@ pub struct ProfileStore {
     db: Mutex<Connection>,
 }
 
-type InboxRow = (i64, String, String, String, String, i64, i64, String);
+type InboxRow = (i64, String, String, String, String, i64, i64, String, bool, Option<i64>);
 
 fn inbox_from_row(row: &Row<'_>) -> rusqlite::Result<InboxRow> {
     Ok((
@@ -206,11 +208,13 @@ fn inbox_from_row(row: &Row<'_>) -> rusqlite::Result<InboxRow> {
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
     ))
 }
 
 fn inbox_item(raw: InboxRow) -> Result<InboxItem> {
-    let (id, event_key, body, rationale, state, created_at, updated_at, basis) = raw;
+    let (id, event_key, body, rationale, state, created_at, updated_at, basis, autonomous, retry_of) = raw;
     Ok(InboxItem {
         id,
         event_key,
@@ -220,10 +224,13 @@ fn inbox_item(raw: InboxRow) -> Result<InboxItem> {
         state: ApprovalState::parse(&state).ok_or(StoreError::BadState(state))?,
         created_at,
         updated_at,
+        autonomous,
+        retry_of,
     })
 }
 
-const INBOX_COLUMNS: &str = "id, event_key, body, rationale, state, created_at, updated_at, basis";
+const INBOX_COLUMNS: &str =
+    "id, event_key, body, rationale, state, created_at, updated_at, basis, autonomous, retry_of";
 
 impl ProfileStore {
     pub(crate) fn open(dir: &Path) -> Result<Self> {
@@ -249,6 +256,23 @@ impl ProfileStore {
             db.execute_batch(
                 "ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'done';
                  ALTER TABLE events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
+        let has_autonomous: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('inbox') WHERE name = 'autonomous')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_autonomous {
+            // An older database does not say who approved an item. An approved item from it counts
+            // as approved by the policy, so a resume runs it only if the policy still allows that
+            // without the owner. Otherwise the owner is asked again.
+            db.execute_batch(
+                "BEGIN;
+                 ALTER TABLE inbox ADD COLUMN autonomous INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE inbox ADD COLUMN retry_of INTEGER;
+                 UPDATE inbox SET autonomous = 1 WHERE state = 'approved';
+                 COMMIT;",
             )?;
         }
         Ok(Self {
@@ -552,6 +576,8 @@ impl ProfileStore {
 
     // --- inbox ---
 
+    /// Adds an item. An item that starts `approved` was approved by the policy, not by the
+    /// owner, so it is marked autonomous: the owner approves only by moving a pending item.
     pub fn add_inbox_item(
         &self,
         event_key: &str,
@@ -561,10 +587,11 @@ impl ProfileStore {
         state: ApprovalState,
         now: i64,
     ) -> Result<InboxItem> {
+        let autonomous = state == ApprovalState::Approved;
         let db = self.db();
         db.execute(
-            "INSERT INTO inbox (event_key, body, rationale, basis, state, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            "INSERT INTO inbox (event_key, body, rationale, basis, state, created_at, updated_at, autonomous)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
             (
                 event_key,
                 serde_json::to_string(body)?,
@@ -572,6 +599,7 @@ impl ProfileStore {
                 serde_json::to_string(basis)?,
                 state.as_str(),
                 now,
+                autonomous,
             ),
         )?;
         Ok(InboxItem {
@@ -583,7 +611,49 @@ impl ProfileStore {
             state,
             created_at: now,
             updated_at: now,
+            autonomous,
+            retry_of: None,
         })
+    }
+
+    /// The items in `state`, oldest first.
+    pub fn inbox_in_state(&self, state: ApprovalState) -> Result<Vec<InboxItem>> {
+        let db = self.db();
+        let mut statement = db.prepare(&format!(
+            "SELECT {INBOX_COLUMNS} FROM inbox WHERE state = ?1 ORDER BY id"
+        ))?;
+        let rows = statement
+            .query_map([state.as_str()], inbox_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(inbox_item).collect()
+    }
+
+    /// Moves an item from `from` to `failed` and adds a pending copy of it that names it in
+    /// `retry_of`, in one transaction. Returns the copy, or `None` if the item is not in `from`:
+    /// of two callers, only the one that moves the item gets a copy.
+    pub fn fail_with_pending_copy(&self, id: i64, from: ApprovalState, now: i64) -> Result<Option<InboxItem>> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let moved = tx.execute(
+            "UPDATE inbox SET state = 'failed', updated_at = ?1 WHERE id = ?2 AND state = ?3",
+            (now, id, from.as_str()),
+        )?;
+        if moved != 1 {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO inbox (event_key, body, rationale, basis, state, created_at, updated_at, autonomous, retry_of)
+             SELECT event_key, body, rationale, basis, 'pending', ?1, ?1, 0, id FROM inbox WHERE id = ?2",
+            (now, id),
+        )?;
+        let copy = tx.last_insert_rowid();
+        let raw = tx.query_row(
+            &format!("SELECT {INBOX_COLUMNS} FROM inbox WHERE id = ?1"),
+            [copy],
+            inbox_from_row,
+        )?;
+        tx.commit()?;
+        inbox_item(raw).map(Some)
     }
 
     pub fn inbox_item(&self, id: i64) -> Result<InboxItem> {
@@ -923,6 +993,97 @@ mod tests {
         // An event from the old database counts as handled.
         assert_eq!(s.begin_event("old", &json!({}), 2, 3).unwrap(), EventStart::Done);
         assert_eq!(s.begin_event("new", &json!({}), 3, 3).unwrap(), EventStart::New);
+    }
+
+    #[test]
+    fn an_older_inbox_gets_the_resume_columns_and_its_approved_items_count_as_autonomous() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_dir = dir.path().join("profiles/kim");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let old = Connection::open(profile_dir.join("agent.db")).unwrap();
+        old.execute_batch(
+            r#"CREATE TABLE inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT NOT NULL,
+                 body TEXT NOT NULL, rationale TEXT NOT NULL, basis TEXT NOT NULL DEFAULT '[]',
+                 state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+               INSERT INTO inbox (event_key, body, rationale, state, created_at, updated_at) VALUES
+                 ('k1', '{"kind":"tool_call","tool":"slack/post","args":{}}', 'r', 'approved', 1, 1),
+                 ('k2', '{"kind":"tool_call","tool":"slack/post","args":{}}', 'r', 'pending', 2, 2);"#,
+        )
+        .unwrap();
+        drop(old);
+        let s = ProfileStore::open(&profile_dir).unwrap();
+        let items = s.list_inbox(10).unwrap();
+        let flags: Vec<_> = items.iter().map(|i| (i.id, i.autonomous, i.retry_of)).collect();
+        assert_eq!(flags, [(2, false, None), (1, true, None)]);
+        // Opening again changes nothing.
+        drop(s);
+        let s = ProfileStore::open(&profile_dir).unwrap();
+        assert!(s.inbox_item(1).unwrap().autonomous);
+    }
+
+    #[test]
+    fn only_an_item_that_starts_approved_is_autonomous() {
+        let (_dir, s) = store();
+        let pending = s
+            .add_inbox_item("k1", &tool_call("a"), "r", &[], ApprovalState::Pending, 1)
+            .unwrap();
+        let approved = s
+            .add_inbox_item("k2", &tool_call("b"), "r", &[], ApprovalState::Approved, 2)
+            .unwrap();
+        assert!(!pending.autonomous && approved.autonomous);
+        assert_eq!(s.inbox_item(approved.id).unwrap(), approved);
+        // An owner's approval does not make an item autonomous.
+        s.move_inbox_state(pending.id, ApprovalState::Pending, ApprovalState::Approved, 3)
+            .unwrap();
+        let approved_ids: Vec<_> = s
+            .inbox_in_state(ApprovalState::Approved)
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.id, i.autonomous))
+            .collect();
+        assert_eq!(approved_ids, [(pending.id, false), (approved.id, true)]);
+        assert!(s.inbox_in_state(ApprovalState::Unknown).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pending_copy_replaces_an_item_once_and_only_from_the_given_state() {
+        let (_dir, s) = store();
+        let basis = [ReadNote {
+            tool: "slack/search".into(),
+            args: json!({"query": "deploy"}).as_object().unwrap().clone(),
+        }];
+        let item = s
+            .add_inbox_item("k1", &tool_call("hi"), "asked", &basis, ApprovalState::Approved, 1)
+            .unwrap();
+        // The item is not unknown: nothing changes.
+        assert_eq!(
+            s.fail_with_pending_copy(item.id, ApprovalState::Unknown, 2).unwrap(),
+            None
+        );
+        assert_eq!(s.list_inbox(10).unwrap().len(), 1);
+
+        let copy = s
+            .fail_with_pending_copy(item.id, ApprovalState::Approved, 3)
+            .unwrap()
+            .unwrap();
+        assert_ne!(copy.id, item.id);
+        assert_eq!(
+            (copy.state, copy.retry_of, copy.autonomous, copy.created_at),
+            (ApprovalState::Pending, Some(item.id), false, 3)
+        );
+        assert_eq!(
+            (&copy.event_key, &copy.body, &copy.rationale, &copy.basis),
+            (&item.event_key, &item.body, &item.rationale, &item.basis)
+        );
+        assert_eq!(s.inbox_item(copy.id).unwrap(), copy);
+        let original = s.inbox_item(item.id).unwrap();
+        assert_eq!((original.state, original.updated_at), (ApprovalState::Failed, 3));
+        // A second caller loses and makes no second copy.
+        assert_eq!(
+            s.fail_with_pending_copy(item.id, ApprovalState::Approved, 4).unwrap(),
+            None
+        );
+        assert_eq!(s.list_inbox(10).unwrap().len(), 2);
     }
 
     #[test]

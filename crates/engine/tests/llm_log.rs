@@ -4,12 +4,11 @@ mod common;
 
 use bunsin_api::{EngineApi, Outcome, ReplayCase};
 use bunsin_core::llm::{CompletionResponse, LlmError, StopReason, Usage};
-use bunsin_store::{AppStore, LlmCall};
+use bunsin_store::LlmCall;
 use common::*;
 
 fn calls(rig: &Rig) -> Vec<LlmCall> {
-    let store = AppStore::open(rig.dir.path()).unwrap().open_profile("kim").unwrap();
-    let mut calls = store.llm_calls(100).unwrap();
+    let mut calls = rig.kim_store().llm_calls(100).unwrap();
     calls.reverse();
     calls
 }
