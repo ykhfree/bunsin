@@ -280,6 +280,12 @@ async fn a_token_reaches_only_its_own_profile() {
             expected: bunsin_api::Expected::Unchecked,
         };
         refused(kim.set_principles(other, principles).await);
+        refused(kim.polls(other).await.map(|_| ()));
+        let polls = bunsin_api::PollsUpdate {
+            polls: Vec::new(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_polls(other, polls).await);
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
             base_url: "https://attacker.example".into(),
@@ -810,4 +816,40 @@ async fn the_principles_are_read_and_replaced_over_http() {
     assert!(matches!(empty, Err(ApiError::Invalid(_))), "{empty:?}");
     // The other profile is untouched.
     assert!(rig.engine.principles("kim").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_polls_are_read_and_replaced_over_http() {
+    let rig = rig().await;
+    let lee = rig.client(&rig.lee_token);
+    let loaded = lee.polls("lee").await.unwrap();
+    assert!(loaded.is_empty());
+    let poll: bunsin_core::poll::PollConfig = serde_json::from_value(serde_json::json!({
+        "connector": "slack", "tool": "post", "args": {}, "every_secs": 60,
+        "mapping": {"items": "", "id": "ts", "text": "text", "author": "user", "thread": null},
+        "skip_authors": []
+    }))
+    .unwrap();
+    // `post` writes, so the server refuses it as a poll and stores nothing.
+    let update = |expected| bunsin_api::PollsUpdate {
+        polls: vec![poll.clone()],
+        expected,
+    };
+    let refused = lee
+        .set_polls("lee", update(bunsin_api::Expected::Value(loaded.clone())))
+        .await;
+    assert!(
+        matches!(&refused, Err(ApiError::Invalid(e)) if e.contains("read")),
+        "{refused:?}"
+    );
+    // An empty list is a valid change; a save from the list before it is a conflict.
+    let other = vec![poll.clone()];
+    let stale = lee.set_polls("lee", update(bunsin_api::Expected::Value(other))).await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+    let empty = bunsin_api::PollsUpdate {
+        polls: Vec::new(),
+        expected: bunsin_api::Expected::Value(loaded),
+    };
+    lee.set_polls("lee", empty).await.unwrap();
+    assert!(lee.polls("lee").await.unwrap().is_empty());
 }

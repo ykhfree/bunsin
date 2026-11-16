@@ -5,9 +5,10 @@
 
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, Permissions, PermissionsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot, ToolsReport,
-    WikiPageUpdate,
+    Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
+    ProfileSnapshot, ToolsReport, WikiPageUpdate,
 };
+use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
 use bunsin_core::tool::PinSet;
@@ -42,6 +43,16 @@ pub enum UiCommand {
     SavePrinciples {
         profile: String,
         update: PrinciplesUpdate,
+    },
+    /// Replaces the polls.
+    SavePolls {
+        profile: String,
+        update: PollsUpdate,
+    },
+    /// Runs saved poll number `index` once, without handling its events.
+    TestPoll {
+        profile: String,
+        index: usize,
     },
     /// Saves the LLM endpoint. A typed token travels only in this command.
     SaveLlm {
@@ -120,6 +131,17 @@ pub enum NoteResult {
     },
 }
 
+/// What the last poll command did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PollResult {
+    Saved(Result<(), SaveError>),
+    /// The outer error is a failure of the test or of the server. The events are inside.
+    Tested {
+        index: usize,
+        result: Result<PollPreview, String>,
+    },
+}
+
 /// Why a save did nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SaveError {
@@ -180,6 +202,12 @@ pub struct UiState {
     pub principles_result: Option<Result<(), SaveError>>,
     /// How many `SavePrinciples` commands the bridge has run.
     pub principle_saves: u64,
+    /// The polls of the selected profile, as the server has them.
+    pub polls: Option<Vec<PollConfig>>,
+    /// The result of the last command, if it was a poll command. A failure is shown here, not in `error`.
+    pub poll_result: Option<PollResult>,
+    /// How many poll commands the bridge has run.
+    pub poll_commands: u64,
     /// The LLM endpoint and the connectors of the selected profile, as the server has them.
     pub connections: Option<Connections>,
     /// The result of the last command, if it was a connection command. A failure is shown here, not in `error`.
@@ -247,6 +275,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.privacy_result = None;
     state.permissions_result = None;
     state.principles_result = None;
+    state.poll_result = None;
     state.connection_result = None;
     state.note_result = None;
     let selected = state.selected.clone();
@@ -267,6 +296,16 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             let result = save_for(selected, &profile, api.set_principles(&profile, update)).await;
             state.principles_result = Some(result);
             state.principle_saves += 1;
+            Ok(())
+        }
+        (UiCommand::SavePolls { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_polls(&profile, update)).await;
+            state.poll_result = Some(PollResult::Saved(result));
+            Ok(())
+        }
+        (UiCommand::TestPoll { profile, index }, _) => {
+            let result = for_profile(selected, &profile, api.test_poll(&profile, index)).await;
+            state.poll_result = Some(PollResult::Tested { index, result });
             Ok(())
         }
         (UiCommand::SavePrivacy { profile, update }, _) => {
@@ -366,6 +405,9 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     if state.note_result.is_some() {
         state.note_commands += 1;
     }
+    if state.poll_result.is_some() {
+        state.poll_commands += 1;
+    }
     if let Err(error) = result {
         state.error = Some(error);
     }
@@ -378,6 +420,7 @@ struct Loaded {
     privacy: PrivacyConfig,
     permissions: Permissions,
     principles: Vec<String>,
+    polls: Vec<PollConfig>,
     connections: Connections,
     notes: Vec<WikiSummary>,
     /// The open page. None if no page is open or the server has no such page.
@@ -390,6 +433,7 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<&str>) ->
         privacy: api.privacy(profile).await?,
         permissions: api.permissions(profile).await?,
         principles: api.principles(profile).await?,
+        polls: api.polls(profile).await?,
         connections: api.connections(profile).await?,
         notes: api.wiki_index(profile).await?,
         page: match open {
@@ -409,6 +453,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.privacy = None;
     state.permissions = None;
     state.principles = None;
+    state.polls = None;
     state.connections = None;
     state.notes = None;
     state.connected = false;
@@ -438,6 +483,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.privacy = Some(loaded.privacy);
                 state.permissions = Some(loaded.permissions);
                 state.principles = Some(loaded.principles);
+                state.polls = Some(loaded.polls);
                 state.connections = Some(loaded.connections);
                 state.notes = Some(loaded.notes);
                 if let Some(open) = &mut state.open_note {

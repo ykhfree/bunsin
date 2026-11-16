@@ -189,6 +189,15 @@ pub struct PrinciplesUpdate {
     pub expected: Expected<Vec<String>>,
 }
 
+/// New polls, with the list the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PollsUpdate {
+    /// Every poll. A poll that is not in here is removed.
+    pub polls: Vec<PollConfig>,
+    #[serde(default)]
+    pub expected: Expected<Vec<PollConfig>>,
+}
+
 /// New privacy settings, with what the caller loaded before it changed them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacyUpdate {
@@ -464,6 +473,10 @@ pub trait EngineApi: Send + Sync {
     fn principles<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<String>>>;
     /// Replaces the principles. Each must have 1 to 1,000 characters; at most 50 are allowed.
     fn set_principles<'a>(&'a self, profile: &'a str, update: PrinciplesUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The searches the server repeats to find new events.
+    fn polls<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PollConfig>>>;
+    /// Replaces the polls. The tool of each poll needs a `read` rule and must be in the approved list.
+    fn set_polls<'a>(&'a self, profile: &'a str, update: PollsUpdate) -> BoxFuture<'a, ApiResult<()>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
     /// Sends one request to the saved LLM endpoint and says whether the reply has the form the agent needs.

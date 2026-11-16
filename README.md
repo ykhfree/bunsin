@@ -30,8 +30,7 @@ Bunsin is in early development. Read this list before you use it.
   addresses, phone numbers and the other listed forms. It finds names and postal
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
-  the privacy filter. The window also sets the permission rules and the principles. Polls are
-  edited as a JSON file.
+  the privacy filter. The window also sets the permission rules, the principles and the polls.
 - **Not built yet:** full-text search of the notes, ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
@@ -438,7 +437,14 @@ The same rules as a settings file:
 The server calls the tool every `every_secs` seconds (30 at least) and hands each new
 item to the agent.
 
-- The tool must have a rule with the class `read` and must be in the approved list.
+In the window, the **Agent** view lists the polls with the last run of each. You add,
+change and remove a poll in its fields (the arguments as a JSON object, the mapping as dot
+paths, the authors to skip one in each line), then Save sends the list. The server refuses a
+poll that it would not run and the view shows the reason. **Test** runs a saved poll once and
+shows the events it would hand over, after the privacy filter, like `bunsind poll-test`.
+
+- The tool must have a rule with the class `read` and must be in the approved list. The window's
+  save checks both. A settings file is checked for the rule; an unapproved tool fails at each run.
 - The example above is an illustration. Fit `args` and `mapping` to what your MCP
   server's search tool takes and returns.
 - `mapping` says where the fields are in the tool's result, as dot paths such as
@@ -554,7 +560,7 @@ The window has five views. **Inbox** shows the approval inbox with every argumen
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
 each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
-principles (see [Principles](#principles)). **Settings** has the connections (LLM endpoint,
+principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)). **Settings** has the connections (LLM endpoint,
 connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds.
 
 **Edit before approval.** A waiting call whose rule names places of text has the button

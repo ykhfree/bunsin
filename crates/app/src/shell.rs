@@ -1,11 +1,12 @@
 //! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
-//! privacy settings and connections.
+//! polls, privacy settings and connections.
 
 use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
 use crate::draft_editor::DraftEditor;
 use crate::notes_form::NotesForm;
 use crate::permissions_form::PermissionsForm;
+use crate::polls_form::PollsForm;
 use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
 use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
@@ -30,6 +31,7 @@ pub struct Shell {
     pub(crate) notes: NotesForm,
     pub(crate) permissions: PermissionsForm,
     pub(crate) principles: PrinciplesForm,
+    pub(crate) polls: PollsForm,
     /// The edit of a waiting call in the inbox, if one is open.
     pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
@@ -47,7 +49,7 @@ pub enum View {
     Notes,
     /// What the agent may do with each approved tool.
     Permissions,
-    /// How the agent works: the owner's principles.
+    /// How the agent works: the owner's principles and the searches that find events.
     Agent,
     /// The connections and the privacy filter.
     Settings,
@@ -69,6 +71,7 @@ impl Shell {
                     shell.notes.receive(&state, window, cx);
                     shell.permissions.receive(&state);
                     shell.principles.receive(&state, window, cx);
+                    shell.polls.receive(&state, window, cx);
                     shell.draft_editor.receive(&state);
                     shell.state = state;
                     cx.notify();
@@ -88,6 +91,7 @@ impl Shell {
             notes: NotesForm::new(window, cx),
             permissions: PermissionsForm::new(),
             principles: PrinciplesForm::new(window, cx),
+            polls: PollsForm::new(window, cx),
             draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
@@ -669,6 +673,7 @@ impl Render for Shell {
                 .gap_5()
                 .overflow_y_scroll()
                 .child(self.principles_section(cx))
+                .child(self.polls_section(cx))
                 .into_any_element()
         } else if let Some(notes) = notes {
             notes

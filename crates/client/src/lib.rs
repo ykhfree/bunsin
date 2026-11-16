@@ -3,10 +3,11 @@
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, Permissions, PermissionsUpdate, PollPreview, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
+    Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
     ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
+use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
@@ -275,6 +276,17 @@ impl EngineApi for RemoteEngine {
     fn set_privacy<'a>(&'a self, profile: &'a str, update: PrivacyUpdate) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             self.send_only(Method::PUT, &profile_path(profile, "privacy"), Some(&update))
+                .await
+        })
+    }
+
+    fn polls<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PollConfig>>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "polls"), NO_BODY).await })
+    }
+
+    fn set_polls<'a>(&'a self, profile: &'a str, update: PollsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::PUT, &profile_path(profile, "polls"), Some(&update))
                 .await
         })
     }

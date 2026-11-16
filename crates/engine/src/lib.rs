@@ -4,6 +4,7 @@
 
 mod connections;
 mod notes;
+mod poll_settings;
 mod polling;
 mod principles;
 mod secrets;
@@ -12,8 +13,8 @@ pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -21,6 +22,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
+use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
@@ -1277,6 +1279,14 @@ impl EngineApi for Engine {
 
     fn set_privacy<'a>(&'a self, profile: &'a str, update: PrivacyUpdate) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.replace_privacy(profile, update) })
+    }
+
+    fn polls<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PollConfig>>> {
+        Box::pin(async move { self.read_polls(profile) })
+    }
+
+    fn set_polls<'a>(&'a self, profile: &'a str, update: PollsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_polls(profile, update) })
     }
 
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {

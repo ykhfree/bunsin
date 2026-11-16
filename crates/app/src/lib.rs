@@ -7,6 +7,7 @@ pub mod connections_form;
 pub mod draft_editor;
 pub mod notes_form;
 pub mod permissions_form;
+pub mod polls_form;
 pub mod principles_form;
 pub mod privacy;
 pub mod shell;

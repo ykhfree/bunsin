@@ -13,10 +13,11 @@ use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
     ApiError, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
-    Permissions, PermissionsUpdate, PollPreview, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
-    ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
+use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
@@ -247,6 +248,25 @@ async fn test_llm(
     Ok(Json(engine.test_llm(&profile).await?))
 }
 
+async fn get_polls(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<PollConfig>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.polls(&profile).await?))
+}
+
+async fn put_polls(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<PollsUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_polls(&profile, update).await?))
+}
+
 async fn test_poll(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -366,6 +386,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("permissions"), get(get_permissions).put(put_permissions))
         .route(&profile("principles"), get(get_principles).put(put_principles))
+        .route(&profile("polls"), get(get_polls).put(put_polls))
         .route(&profile("polls/{index}/test"), post(test_poll))
         .route(&profile("llm/test"), post(test_llm))
         .route(&profile("wiki"), get(wiki_index))

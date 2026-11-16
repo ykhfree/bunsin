@@ -6,8 +6,8 @@
 mod common;
 
 use bunsin_api::{
-    CommandConnectorUpdate, ConnectorUpdate, EngineApi, Expected, LlmUpdate, PrinciplesUpdate, TokenChange,
-    WikiPageUpdate,
+    CommandConnectorUpdate, ConnectorUpdate, EngineApi, Expected, LlmUpdate, PollsUpdate, PrinciplesUpdate,
+    TokenChange, WikiPageUpdate,
 };
 use bunsin_app::bridge::{NoteResult, SaveError, UiCommand, UiState, apply};
 use bunsin_app::connect::{AppView, Source};
@@ -165,6 +165,27 @@ async fn fixture() -> (common::Rig, UiState) {
         expected: Expected::Unchecked,
     };
     rig.engine.set_principles("kim", principles).await.unwrap();
+    // A search that the server repeats, after one run.
+    let poll = json!({
+        "connector": "slack", "tool": "search", "args": {"query": "to:me after:yesterday"}, "every_secs": 60,
+        "mapping": {"items": "messages", "id": "ts", "text": "text", "author": "user", "thread": "thread_ts"},
+        "skip_authors": ["U-KIM"]
+    });
+    let polls = PollsUpdate {
+        polls: vec![serde_json::from_value(poll).unwrap()],
+        expected: Expected::Unchecked,
+    };
+    rig.engine.set_polls("kim", polls).await.unwrap();
+    rig.slack.set_result(
+        "search",
+        json!({"messages": [
+            {"ts": "1731750000.000100", "user": "U-LEE", "text": "Can you review the release notes?"},
+            {"ts": "1731750060.000200", "user": "U-PARK", "thread_ts": "1731749000.000100",
+             "text": "The build is green again."},
+            {"ts": "1731750120.000300", "user": "U-KIM", "text": "Thanks, both."}
+        ]}),
+    );
+    rig.engine.poll_profile("kim").await.unwrap();
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     (rig, state)
@@ -378,11 +399,16 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     }
     shot(&mut cx, window, dir, &name("permissions-changes"));
 
-    // The principles, with one being changed.
-    states.send(state.clone()).unwrap();
+    // The principles, with one being changed, and a poll with the result of its test.
+    let test = UiCommand::TestPoll {
+        profile: "kim".into(),
+        index: 0,
+    };
+    states.send(on(test)).unwrap();
     click(&mut cx, "tab-agent");
     click(&mut cx, "principle-edit-1");
     shot(&mut cx, window, dir, &name("agent"));
+    click(&mut cx, "cancel-principle-edit");
 
     // The settings, with the result of a check of the connector.
     click(&mut cx, "tab-settings");
