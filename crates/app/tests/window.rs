@@ -714,3 +714,96 @@ fn a_note_is_approved_in_the_inbox_and_stored_on_the_server(cx: &mut TestAppCont
             .any(|i| i.id == 3 && i.state.as_str() == "pending")
     );
 }
+
+#[gpui_kit::test]
+fn terms_are_added_removed_and_used_by_the_server(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "term-count"), "Terms: 0");
+        let help = label(window, "terms-help");
+        assert!(help.contains("in upper or lower case"), "{help}");
+        // A typed term that is not added is not dropped without notice.
+        window.click("new-term", cx);
+        window.input("Park Jiwon", cx);
+        window.click("save-privacy", cx);
+        assert_eq!(
+            label(window, "privacy-message"),
+            "Add the term or clear its field first"
+        );
+        window.click("add-term", cx);
+        assert_eq!(value(window, "new-term"), "");
+        window.click("new-term", cx);
+        window.input("  12 Teheran-ro  ", cx);
+        window.click("add-term", cx);
+        window.click("new-term", cx);
+        window.input("Lee", cx);
+        window.click("add-term", cx);
+        assert_eq!(label(window, "term-count"), "Terms: 3");
+        // Spaces around a term are not kept.
+        assert_eq!(label(window, "term-1"), "12 Teheran-ro");
+        window.click("remove-term-2", cx);
+        assert_eq!(label(window, "term-count"), "Terms: 2");
+        assert!(window.try_find("term-2").is_none());
+        assert_eq!(label(window, "privacy-changes"), "Not saved");
+        // Add without text adds nothing.
+        window.click("add-term", cx);
+        assert_eq!(label(window, "privacy-message"), "Enter a term.");
+        assert_eq!(label(window, "term-count"), "Terms: 2");
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    let saved = rt.block_on(rig.engine.privacy("kim")).unwrap();
+    assert_eq!(saved.terms, ["Park Jiwon", "12 Teheran-ro"]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "privacy-result"), "Saved");
+        assert_eq!(label(window, "term-0"), "Park Jiwon");
+    });
+
+    rig.llm.reply(
+        &serde_json::json!({
+            "kind": "ignore", "rationale": "nothing to do", "summary": null, "tool": null, "args_json": null
+        })
+        .to_string(),
+        10,
+    );
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e-terms".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "park jiwon moved to 12 TEHERAN-RO".into(),
+    };
+    rt.block_on(rig.engine.ingest("kim", event)).unwrap();
+    let request = serde_json::to_string(rig.llm.requests().last().unwrap()).unwrap();
+    assert!(
+        request.contains("[REDACTED:TERM] moved to [REDACTED:TERM]"),
+        "{request}"
+    );
+    assert!(!request.to_lowercase().contains("jiwon"), "{request}");
+}
+
+#[gpui_kit::test]
+fn a_refused_term_shows_the_server_error_and_keeps_the_form(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.click("new-term", cx);
+        window.input("K", cx);
+        window.click("add-term", cx);
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    on_screen(cx, window, |window, _| {
+        let result = label(window, "privacy-result");
+        assert!(result.contains("term 1 must have 2 to 100 characters"), "{result}");
+        assert_eq!(label(window, "term-0"), "K");
+        assert_eq!(label(window, "privacy-changes"), "Not saved");
+    });
+    assert_eq!(
+        rt.block_on(rig.engine.privacy("kim")).unwrap(),
+        PrivacyConfig::default()
+    );
+}

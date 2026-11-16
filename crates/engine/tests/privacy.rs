@@ -253,3 +253,62 @@ async fn personal_data_in_the_thread_field_is_filtered_too() {
     assert!(!all_requests(&rig).contains(EMAIL));
     assert!(!rig.stores(EMAIL));
 }
+
+#[tokio::test]
+async fn owner_terms_reach_neither_the_llm_nor_the_disk_nor_the_log() {
+    let rig = rig().await;
+    let privacy = PrivacyConfig {
+        terms: vec!["Park Jiwon".into(), "박지원".into()],
+        ..PrivacyConfig::default()
+    };
+    rig.engine
+        .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy.clone()))
+        .await
+        .unwrap();
+    assert_eq!(rig.engine.privacy("kim").await.unwrap(), privacy);
+
+    rig.llm.reply(&ignore(), 10);
+    let text = "PARK JIWON asked whether 박지원님 can join PROJ-12.";
+    rig.engine.ingest("kim", event("e1", "park jiwon", text)).await.unwrap();
+    let requests = all_requests(&rig);
+    for value in ["PARK JIWON", "park jiwon", "박지원"] {
+        assert!(!requests.contains(value), "{value} was sent to the LLM");
+    }
+    // The terms themselves are in the settings. The spellings of the event are nowhere on disk.
+    for value in ["PARK JIWON", "park jiwon", "박지원님"] {
+        assert!(!rig.stores(value), "{value} was written to disk");
+    }
+    assert!(requests.contains("[REDACTED:TERM] asked whether [REDACTED:TERM]님 can join PROJ-12."));
+
+    // The log holds counts only: three removed pieces, and the number of terms in the settings.
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    let received = audit.iter().find(|entry| entry.kind == "event_received").unwrap();
+    assert_eq!(received.detail["redacted"], json!({"TERM": 3}));
+    let changed = audit.iter().find(|entry| entry.kind == "privacy_changed").unwrap();
+    assert_eq!(changed.detail, json!({"custom_patterns": 0, "terms": 2}));
+}
+
+#[tokio::test]
+async fn a_bad_term_is_refused_without_its_text_and_the_old_settings_stay() {
+    let rig = rig().await;
+    let privacy = PrivacyConfig {
+        terms: vec!["Park Jiwon".into(), "P".into()],
+        ..PrivacyConfig::default()
+    };
+    let error = rig
+        .engine
+        .set_privacy("kim", bunsin_api::PrivacyUpdate::unchecked(privacy.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, ApiError::Invalid(m) if m.contains("term 2") && !m.contains("Park")),
+        "{error:?}"
+    );
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.privacy = privacy;
+    assert!(matches!(
+        rig.engine.set_profile_config("kim", config).await,
+        Err(ApiError::Invalid(_))
+    ));
+    assert_eq!(rig.engine.privacy("kim").await.unwrap(), PrivacyConfig::default());
+}

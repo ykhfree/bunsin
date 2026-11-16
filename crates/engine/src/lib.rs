@@ -1161,7 +1161,7 @@ impl Engine {
         Self::check_config(&config)?;
         Self::save_config_from(&store, &loaded, &config)?;
         // Counts only. The patterns can describe what the owner wants hidden.
-        let detail = json!({"custom_patterns": config.privacy.custom.len()});
+        let detail = json!({"custom_patterns": config.privacy.custom.len(), "terms": config.privacy.terms.len()});
         self.audit(&store, "privacy_changed", None, detail)
     }
 }

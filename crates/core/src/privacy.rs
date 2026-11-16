@@ -1,7 +1,7 @@
 //! Removes personal data from text before the text is stored or sent to the LLM.
 //!
 //! The filter works on patterns. It finds email addresses, phone numbers and the
-//! other listed forms. It does not find names or postal addresses.
+//! other listed forms. It finds names and postal addresses only if the owner lists them as terms.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,14 @@ const MAX_CUSTOM_PATTERNS: usize = 50;
 const MAX_PATTERN_LEN: usize = 500;
 /// The compiled size limit of one custom pattern, in bytes.
 const MAX_COMPILED_SIZE: usize = 1 << 20;
+const MAX_TERMS: usize = 200;
+/// The compiled size limit of all terms together, in bytes.
+const MAX_TERMS_COMPILED_SIZE: usize = 1 << 24;
+/// The length limits of one term, in characters. One character would remove too much text.
+const MIN_TERM_CHARS: usize = 2;
+const MAX_TERM_CHARS: usize = 100;
+/// The label in the placeholder of a removed term.
+pub const TERM_LABEL: &str = "TERM";
 
 /// A pattern the owner adds. Text that matches it is removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +44,10 @@ pub struct PrivacyConfig {
     /// Payment card numbers. A number counts only if its check digit is right.
     pub card_number: bool,
     pub custom: Vec<CustomPattern>,
+    /// Literal text the owner wants removed, for example names of colleagues or addresses.
+    /// A term matches anywhere in the text, without regard to case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
 }
 
 impl Default for PrivacyConfig {
@@ -47,6 +59,7 @@ impl Default for PrivacyConfig {
             resident_number: true,
             card_number: true,
             custom: Vec::new(),
+            terms: Vec::new(),
         }
     }
 }
@@ -91,6 +104,46 @@ pub struct Redactor {
     rules: Vec<Rule>,
 }
 
+/// Compiles the owner's terms into one rule. The errors name a term by its position only,
+/// because a term is personal data.
+fn terms_rule(terms: &[String]) -> Result<Option<Rule>, String> {
+    if terms.len() > MAX_TERMS {
+        return Err(format!("at most {MAX_TERMS} terms are allowed"));
+    }
+    let mut literals: Vec<&str> = Vec::with_capacity(terms.len());
+    for (index, term) in terms.iter().enumerate() {
+        let term = term.trim();
+        let chars = term.chars().count();
+        if !(MIN_TERM_CHARS..=MAX_TERM_CHARS).contains(&chars) {
+            return Err(format!(
+                "term {} must have {MIN_TERM_CHARS} to {MAX_TERM_CHARS} characters",
+                index + 1
+            ));
+        }
+        literals.push(term);
+    }
+    if literals.is_empty() {
+        return Ok(None);
+    }
+    // At one position the first alternative wins, so a longer term goes before a term it starts with.
+    literals.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    let pattern = literals
+        .iter()
+        .map(|term| regex::escape(term))
+        .collect::<Vec<_>>()
+        .join("|");
+    let regex = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .size_limit(MAX_TERMS_COMPILED_SIZE)
+        .build()
+        .map_err(|e| format!("the terms cannot be compiled: {e}"))?;
+    Ok(Some(Rule {
+        label: TERM_LABEL.to_owned(),
+        regex,
+        accept: None,
+    }))
+}
+
 /// How many pieces of text were removed, by label. It never holds the removed text.
 pub type RedactionCounts = BTreeMap<String, u32>;
 
@@ -118,6 +171,9 @@ impl Redactor {
         }
         if config.phone {
             rules.push(built_in("PHONE", PHONE, None));
+        }
+        if let Some(terms) = terms_rule(&config.terms)? {
+            rules.push(terms);
         }
         if config.custom.len() > MAX_CUSTOM_PATTERNS {
             return Err(format!("at most {MAX_CUSTOM_PATTERNS} custom patterns are allowed"));
@@ -313,6 +369,7 @@ mod tests {
             resident_number: false,
             card_number: false,
             custom: vec![],
+            terms: vec![],
         };
         assert_eq!(redact_with(&off, text).0, text);
         let only_email = PrivacyConfig {
@@ -406,6 +463,71 @@ mod tests {
         assert!(Redactor::new(&many).err().unwrap().contains("at most 50"));
     }
 
+    fn terms(list: &[&str]) -> PrivacyConfig {
+        PrivacyConfig {
+            terms: list.iter().map(|term| (*term).to_owned()).collect(),
+            ..PrivacyConfig::default()
+        }
+    }
+
+    #[test]
+    fn terms_are_removed_without_regard_to_case() {
+        let config = terms(&["Kim Minsu", "김민수", "12 Teheran-ro"]);
+        let (out, counts) = redact_with(
+            &config,
+            "KIM MINSU and kim minsu met 김민수님 at 12 teheran-ro, mail kim@example.com",
+        );
+        assert_eq!(
+            out,
+            "[REDACTED:TERM] and [REDACTED:TERM] met [REDACTED:TERM]님 at [REDACTED:TERM], mail [REDACTED:EMAIL]"
+        );
+        assert_eq!(counts.get(TERM_LABEL), Some(&4));
+        // Text without a term stays.
+        assert_eq!(redact_with(&config, "Kim Min met Minsu").0, "Kim Min met Minsu");
+    }
+
+    #[test]
+    fn a_term_is_literal_text_not_a_pattern() {
+        let config = terms(&["a.b (c)", "x+"]);
+        assert_eq!(
+            redact_with(&config, "a.b (c) axb (c) x+ xx").0,
+            "[REDACTED:TERM] axb (c) [REDACTED:TERM] xx"
+        );
+    }
+
+    #[test]
+    fn the_longer_of_two_terms_wins_and_spaces_around_a_term_do_not_count() {
+        let config = terms(&["Kim", " Kim Minsu "]);
+        let (out, counts) = redact_with(&config, "Kim Minsu and Kim");
+        assert_eq!(out, "[REDACTED:TERM] and [REDACTED:TERM]");
+        assert_eq!(counts.get(TERM_LABEL), Some(&2));
+        // A placeholder in text that was redacted before is not changed by a term inside it.
+        let config = terms(&["REDACTED", "EMAIL"]);
+        let once = redact_with(&config, "kim@example.com").0;
+        assert_eq!(once, "[REDACTED:EMAIL]");
+        assert_eq!(redact_with(&config, &once), (once, RedactionCounts::new()));
+        assert_eq!(redact_with(&config, "an EMAIL").0, "an [REDACTED:TERM]");
+    }
+
+    #[test]
+    fn bad_terms_are_refused_without_their_text() {
+        let error = |list: &[&str]| Redactor::new(&terms(list)).err().unwrap();
+        assert_eq!(error(&["Kim Minsu", " "]), "term 2 must have 2 to 100 characters");
+        assert!(error(&["K"]).contains("term 1"));
+        let long = "가".repeat(101);
+        let message = error(&["Kim", &long]);
+        assert!(message.contains("term 2") && !message.contains('가'), "{message}");
+        // 100 characters of more than one byte each are allowed.
+        assert!(Redactor::new(&terms(&[&"가".repeat(100)])).is_ok());
+        let many: Vec<String> = (0..201).map(|i| format!("name{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(error(&many).contains("at most 200"));
+        // The largest list compiles.
+        let largest: Vec<String> = (0..200).map(|i| format!("{i:03}{}", "Ü".repeat(97))).collect();
+        let largest: Vec<&str> = largest.iter().map(String::as_str).collect();
+        assert!(Redactor::new(&terms(&largest)).is_ok());
+    }
+
     #[test]
     fn settings_from_an_older_version_get_the_defaults_per_caller() {
         // The type itself requires every field, so a typo in a field name is an error.
@@ -416,6 +538,13 @@ mod tests {
             )
             .is_err()
         );
+        // Settings from before the terms have none. A config without terms is written as before.
+        let older = r#"{"email":true,"phone":true,"resident_number":true,"card_number":true,"custom":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<PrivacyConfig>(older).unwrap(),
+            PrivacyConfig::default()
+        );
+        assert_eq!(serde_json::to_string(&PrivacyConfig::default()).unwrap(), older);
         let full = serde_json::to_string(&PrivacyConfig::default()).unwrap();
         assert_eq!(
             serde_json::from_str::<PrivacyConfig>(&full).unwrap(),

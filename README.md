@@ -26,8 +26,9 @@ Bunsin is in early development. Read this list before you use it.
   five pages of its notes, and use the results. Facts it keeps go into its notes, which you approve page by page (see
   [Notes](#notes)). Nothing is loaded in advance: the notes fill only with what the
   agent read while it handled events, and the search quality depends on your MCP servers.
-- **The privacy filter works on patterns.** It finds email addresses, phone numbers and
-  the other listed forms. It does not find names or postal addresses.
+- **The privacy filter works on patterns and on your list of terms.** It finds email
+  addresses, phone numbers and the other listed forms. It finds names and postal
+  addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules. Principles and polls are
   edited as a JSON file.
@@ -439,7 +440,8 @@ item to the agent.
     "phone": true,
     "resident_number": true,
     "card_number": true,
-    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }]
+    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }],
+    "terms": ["Park Jiwon", "박지원", "12 Teheran-ro"]
   }
 }
 ```
@@ -452,6 +454,11 @@ file or log; the audit log holds counts only.
   resident registration number. A card number counts only if its check digit is right.
 - `custom` patterns use the syntax of the Rust [`regex`](https://docs.rs/regex) crate.
   The server refuses a pattern that does not compile or that matches empty text.
+- `terms` are literal texts, for example names of colleagues or addresses. Each match
+  becomes `[REDACTED:TERM]`. A term matches anywhere and in any case, so `Kim` also removes
+  the start of `Kimball`, and `박지원` also matches in `박지원님`. Spaces around a term do not count.
+  At most 200 terms of 2 to 100 characters. The terms themselves are stored in the profile
+  settings on the server; an error names a term by its position only.
 - The desktop window has a form for these settings.
 - Your own `principles` and your own edits are not filtered.
 
