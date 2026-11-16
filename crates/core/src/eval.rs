@@ -275,6 +275,16 @@ pub enum Verdict {
     Different,
 }
 
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Same => "same",
+            Verdict::Partial => "partial",
+            Verdict::Different => "different",
+        }
+    }
+}
+
 /// The LLM judge's view of one draft. It is shown to the owner and feeds nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

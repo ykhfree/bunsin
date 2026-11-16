@@ -110,7 +110,7 @@
   - 실제 앱은 아이콘 자원을 등록한다(`with_assets`). 등록하지 않으면 체크 표시 같은 아이콘이 그려지지 않는다.
   - 그림 확인: `cargo test -p bunsin-app --test screens -- <폴더>`가 창을 띄우지 않고 각 화면을 두 모드의 PNG로 그린다.
     이 방법으로는 hover, focus 이동, 제목 표시줄, 시스템 모드 변경을 따르는 동작을 확인할 수 없다.
-- 창은 Inbox, Notes, Permissions, Agent, Settings 다섯 화면 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
+- 창은 Inbox, Notes, Permissions, Agent, Learning, Settings 여섯 화면 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
   승인함 테스트는 1280x800 창에서 실행한다.
   - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
     retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
@@ -118,6 +118,7 @@
   - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
   - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.
+  - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
   - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인)과 개인정보 설정.
 - 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `remove_connector`, `privacy`, `set_privacy`).
   app은 설정 전체를 읽거나 쓰지 않는다.
@@ -159,6 +160,19 @@
     제안된 도구에는 "Suggested: Autonomous" 표시가 붙는다. 표시는 단계를 바꾸지 않는다. 소유자가 단계를 고르고 Save를 눌러야 한다.
     보류된 도구에는 안내와 "Clear the hold" 버튼이 있다. 버튼은 `clear_autonomy_hold`만 부르고 규칙을 저장하지 않는다.
     목록 위의 한 줄이 기준을 알려 준다. 기준이 없으면 제안이 꺼져 있다고 알린다. 이 줄을 한 줄로 둔 이유: 1280x800 창에서 기존 클릭 테스트의 버튼이 화면 밖으로 밀렸다.
+- **Learning 화면**(`learning_form.rs`)은 카드 네 개를 감싸서 함께 스크롤한다. bridge는 새로고침마다 `corrections`, `principle_candidates`,
+  `replay_cases`, `eval_report`를 더 읽는다.
+  - 교정: 최신순 목록과 "Retire"(`retire_correction`). 폐기한 것은 표시만 남는다.
+  - 원칙 후보: "Find in my corrections"와 "Find in my replay cases"가 `extract_principles`를 부른다. 결과 개수나 거부 이유는 카드 안에 보인다.
+    `read` 출처는 도구와 인자 입력이 필요하므로 명령(`bunsind extract-principles --from read`)으로만 쓴다.
+    `new` 후보마다 "Adopt", "Edit, then adopt"(입력란에 글을 넣고 "Adopt the edit"), "Dismiss". 채택은 창이 가진 원칙 목록을 `expected`로 보낸다.
+    고치는 후보가 서버에서 `new`가 아니게 되면 입력란을 닫는다.
+  - 평가: 사례 목록과 Delete, "Run the evaluation"(`start_eval`), run 상태, 비율, 통과 기준, 사례마다 한 줄(심판 판정 포함). 사례 추가는 명령(`add-replay-cases`)으로 한다.
+    창에 사례 입력란은 두지 않았다. 지난 메시지를 여러 개 한 번에 넣는 일이 대부분이기 때문이다.
+  - 자율 제안 기준: 전용 API `autonomy_thresholds`와 `set_autonomy_thresholds`(`POST .../autonomy-thresholds`, `.../set-autonomy-thresholds`).
+    저장은 `check_config`(같은 `AutonomyThresholds::check`)를 지나고, 읽은 기준을 `Expected`로 보낸다. 다르면 412이고 화면은 "서버 것 불러오기"와 "그래도 저장"을 보여 준다.
+    입력란의 기준값은 이미 읽는 `autonomy` 응답의 `thresholds`에서 온다(같은 값이므로 호출을 하나 줄였다). 세 칸이 비면 `None`, 모두 정수면 기준이다. 일부만 채우면 창이 보내지 않는다.
+    감사 `autonomy_thresholds_changed`는 새 기준을 남긴다. 명령은 따로 두지 않았다. `config-set`이 같은 일을 한다.
 - **명령줄의 권한 규칙**: `bunsind rules`, `rule-set`, `rule-remove`는 같은 API(`permissions`, `set_permissions`)를 쓴다.
   - 명령은 표를 읽고 규칙 하나만 바꾼 뒤, 읽은 표를 `Expected`로 함께 보낸다. 그 사이에 표가 바뀌었으면 충돌로 거부된다.
     "그래도 저장"은 없다. 명령을 다시 실행하면 새 표에서 시작한다.
@@ -650,9 +664,9 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
 | agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기) | 구현, 테스트 있음. 점검과 자동 반영은 없음. |
-| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI). 창에는 없음. |
-| 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI). 창에는 없음. |
-| 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI). 창에는 없음. |
+| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 사례를 추가하지 않는다. |
+| 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령에만 있다. |
+| 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
 | ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |

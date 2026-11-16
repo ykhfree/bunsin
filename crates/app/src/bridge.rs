@@ -4,13 +4,16 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
-    ProfileSnapshot, Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
+    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate,
+    PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot, Resolution, ToolsReport,
+    WikiPageUpdate,
 };
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::ProfileInfo;
+use bunsin_core::records::{CorrectionRecord, ProfileInfo};
 use bunsin_core::tool::PinSet;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use std::sync::Arc;
@@ -120,6 +123,38 @@ pub enum UiCommand {
     DeleteNote {
         profile: String,
         slug: String,
+    },
+    /// Retires a correction: the agent no longer gets it.
+    RetireCorrection {
+        profile: String,
+        id: i64,
+    },
+    /// Asks the LLM for principle candidates in the owner's texts.
+    ExtractPrinciples {
+        profile: String,
+        source: PrincipleSource,
+    },
+    /// Appends a candidate, or the owner's edit of it, to the principles.
+    AdoptPrinciple {
+        profile: String,
+        adoption: AdoptPrinciple,
+    },
+    DismissPrinciple {
+        profile: String,
+        id: i64,
+    },
+    DeleteReplayCase {
+        profile: String,
+        id: i64,
+    },
+    /// Starts an evaluation run. The server replays the cases in the background.
+    StartEval {
+        profile: String,
+    },
+    /// Replaces the thresholds of the autonomy suggestions.
+    SaveAutonomyThresholds {
+        profile: String,
+        update: AutonomyThresholdsUpdate,
     },
 }
 
@@ -240,6 +275,20 @@ pub struct UiState {
     pub note_result: Option<NoteResult>,
     /// How many `SaveNote` and `DeleteNote` commands the bridge has run.
     pub note_commands: u64,
+    /// The owner's corrections of the selected profile, newest first, as the server has them.
+    pub corrections: Option<Vec<CorrectionRecord>>,
+    /// The principle candidates of the selected profile, newest first.
+    pub candidates: Option<Vec<PrincipleCandidate>>,
+    /// How many candidates the last `ExtractPrinciples` stored, or why it failed. Not an `error`.
+    pub extract_result: Option<Result<usize, String>>,
+    /// The replay cases of the selected profile, oldest first.
+    pub replay_cases: Option<Vec<ReplayCaseRecord>>,
+    /// The newest evaluation run of the selected profile.
+    pub eval_report: Option<EvalReport>,
+    /// The result of the last command, if it was `SaveAutonomyThresholds`. A failed save is shown here, not in `error`.
+    pub thresholds_result: Option<Result<(), SaveError>>,
+    /// How many `SaveAutonomyThresholds` commands the bridge has run.
+    pub threshold_saves: u64,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -296,6 +345,8 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.poll_result = None;
     state.connection_result = None;
     state.note_result = None;
+    state.extract_result = None;
+    state.thresholds_result = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
     let result = match (command, selected) {
@@ -414,6 +465,32 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.note_result = Some(NoteResult::Deleted { slug, result });
             Ok(())
         }
+        (UiCommand::SaveAutonomyThresholds { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_autonomy_thresholds(&profile, update)).await;
+            state.thresholds_result = Some(result);
+            state.threshold_saves += 1;
+            Ok(())
+        }
+        (UiCommand::ExtractPrinciples { profile, source }, _) => {
+            let result = for_profile(selected, &profile, api.extract_principles(&profile, source)).await;
+            state.extract_result = Some(result.map(|found| found.len()));
+            Ok(())
+        }
+        (UiCommand::RetireCorrection { profile, id }, _) => {
+            for_profile(selected, &profile, api.retire_correction(&profile, id)).await
+        }
+        (UiCommand::AdoptPrinciple { profile, adoption }, _) => {
+            for_profile(selected, &profile, api.adopt_principle(&profile, adoption)).await
+        }
+        (UiCommand::DismissPrinciple { profile, id }, _) => {
+            for_profile(selected, &profile, api.dismiss_principle(&profile, id)).await
+        }
+        (UiCommand::DeleteReplayCase { profile, id }, _) => {
+            for_profile(selected, &profile, api.delete_replay_case(&profile, id)).await
+        }
+        (UiCommand::StartEval { profile }, _) => for_profile(selected, &profile, api.start_eval(&profile))
+            .await
+            .map(|_| ()),
         (UiCommand::ClearAutonomyHold { profile, tool }, _) => {
             for_profile(selected, &profile, api.clear_autonomy_hold(&profile, &tool)).await
         }
@@ -470,6 +547,10 @@ struct Loaded {
     polls: Vec<PollConfig>,
     connections: Connections,
     notes: Vec<WikiSummary>,
+    corrections: Vec<CorrectionRecord>,
+    candidates: Vec<PrincipleCandidate>,
+    replay_cases: Vec<ReplayCaseRecord>,
+    eval_report: EvalReport,
     /// The open page. None if no page is open or the server has no such page.
     page: Option<WikiPage>,
     /// The revisions of the open page, if the window shows them.
@@ -487,6 +568,10 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bo
         polls: api.polls(profile).await?,
         connections: api.connections(profile).await?,
         notes: api.wiki_index(profile).await?,
+        corrections: api.corrections(profile).await?,
+        candidates: api.principle_candidates(profile).await?,
+        replay_cases: api.replay_cases(profile).await?,
+        eval_report: api.eval_report(profile).await?,
         history: match open {
             Some((slug, true)) => Some(api.wiki_history(profile, slug).await?),
             _ => None,
@@ -512,6 +597,10 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.polls = None;
     state.connections = None;
     state.notes = None;
+    state.corrections = None;
+    state.candidates = None;
+    state.replay_cases = None;
+    state.eval_report = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -547,6 +636,10 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.polls = Some(loaded.polls);
                 state.connections = Some(loaded.connections);
                 state.notes = Some(loaded.notes);
+                state.corrections = Some(loaded.corrections);
+                state.candidates = Some(loaded.candidates);
+                state.replay_cases = Some(loaded.replay_cases);
+                state.eval_report = Some(loaded.eval_report);
                 if let Some(open) = &mut state.open_note {
                     open.page = loaded.page;
                     open.history = loaded.history;

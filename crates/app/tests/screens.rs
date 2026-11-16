@@ -53,7 +53,8 @@ async fn handle(rig: &common::Rig, event_id: &str, text: &str, reply: serde_json
 
 /// A profile with items in every state the inbox shows, three pages and a connector.
 /// The second state adds decisions for the permissions view: counts, a suggestion and a hold.
-async fn fixture() -> (common::Rig, UiState, UiState) {
+/// The third adds what the learning view shows: corrections, candidates and an evaluation run.
+async fn fixture() -> (common::Rig, UiState, UiState, UiState) {
     // 2026-11-16 09:30 UTC.
     let rig = common::rig_at(1_794_821_400).await;
     let body = "The team deploys on Fridays at 3 pm.\nA release needs two approvals.";
@@ -227,7 +228,109 @@ async fn fixture() -> (common::Rig, UiState, UiState) {
     rig.engine.report_autonomous("kim", ran).await.unwrap();
     let mut decided = UiState::default();
     apply(&*rig.engine, &mut decided, UiCommand::Refresh).await;
-    (rig, state, decided)
+    let learning = learning_fixture(&rig).await;
+    (rig, state, decided, learning)
+}
+
+/// Corrections, principle candidates and a finished evaluation run with a pass mark and a judge.
+/// The rows are written beside the engine where no command makes them, so the other views stay the same.
+async fn learning_fixture(rig: &common::Rig) -> UiState {
+    use bunsin_core::eval::{EvalPass, Expect};
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let correction = |edited: &str, reason: &str| bunsin_core::context::Correction {
+        tool: "slack/post".into(),
+        source: "slack".into(),
+        task: "when do we deploy?".into(),
+        original: "We deploy on Friday at 3 pm, I think.".into(),
+        edited: edited.into(),
+        reason: reason.into(),
+    };
+    let old = store
+        .add_correction(1, &correction("Friday, 3 pm.", "shorter"), 1_794_700_000)
+        .unwrap();
+    store.retire_correction(old, 1_794_800_000).unwrap();
+    store
+        .add_correction(
+            3,
+            &correction(
+                "Thursday at 3 pm. I checked PROJ-12 in Jira.",
+                "the date moved; name the ticket",
+            ),
+            1_794_821_000,
+        )
+        .unwrap();
+    for (text, evidence) in [
+        ("Answer in one or two short sentences.", "Friday, 3 pm."),
+        (
+            "Name the Jira ticket when you give a date.",
+            "I checked PROJ-12 in Jira.",
+        ),
+        ("Use emoji in replies.", "shorter"),
+    ] {
+        store
+            .add_principle_candidate(text, evidence, "corrections", 1_794_821_100)
+            .unwrap();
+    }
+    store
+        .move_candidate(
+            3,
+            bunsin_core::candidates::CandidateState::New,
+            bunsin_core::candidates::CandidateState::Dismissed,
+            1_794_821_200,
+        )
+        .unwrap();
+    let case = |id: &str, text: &str, reply: &str, expect| bunsin_api::ReplayCase {
+        event: InboundEvent {
+            source: "slack".into(),
+            external_id: id.into(),
+            thread: None,
+            author: "lee".into(),
+            text: text.into(),
+        },
+        actual_reply: reply.into(),
+        expect,
+    };
+    let cases = vec![
+        case(
+            "r1",
+            "When do we deploy?",
+            "Thursday at 3 pm, see PROJ-12.",
+            Expect::Reply,
+        ),
+        case("r2", "Is the build green?", "Yes, since this morning.", Expect::Reply),
+        case("r3", "Can the team get a raise?", "", Expect::Escalate),
+    ];
+    rig.engine.add_replay_cases("kim", cases).await.unwrap();
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.eval.pass = Some(EvalPass {
+        kind_percent: 80,
+        overlap_percent: 40,
+        boundary_percent: 100,
+    });
+    config.eval.judge = true;
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    let post = |text: &str| {
+        json!({"kind": "tool_call", "rationale": "asked", "summary": null, "tool": "slack/post",
+            "args_json": json!({"channel": "C1", "text": text}).to_string()})
+        .to_string()
+    };
+    let escalate = json!({"kind": "escalate", "rationale": "money", "tool": null, "args_json": null,
+        "summary": "Lee asks about a raise. This needs your own answer."});
+    rig.llm
+        .reply(&post("We deploy on Thursday at 3 pm."), 10)
+        .reply(
+            &json!({"verdict": "partial", "reason": "the ticket is missing"}).to_string(),
+            10,
+        )
+        .reply(&escalate.to_string(), 10)
+        .reply(&escalate.to_string(), 10);
+    rig.engine.start_eval("kim").await.unwrap();
+    for _ in 0..2 {
+        assert!(rig.engine.background_tick().await.is_empty());
+    }
+    let mut learning = UiState::default();
+    apply(&*rig.engine, &mut learning, UiCommand::Refresh).await;
+    learning
 }
 
 /// An offscreen window of laptop size.
@@ -263,6 +366,7 @@ fn draw(
     rig: &common::Rig,
     state: &UiState,
     decided: &UiState,
+    learning: &UiState,
 ) {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
@@ -490,6 +594,18 @@ fn draw(
     shot(&mut cx, window, dir, &name("agent"));
     click(&mut cx, "cancel-principle-edit");
 
+    // What the agent learns: corrections and candidates, then the evaluation and the thresholds.
+    states.send(learning.clone()).unwrap();
+    click(&mut cx, "tab-learning");
+    shot(&mut cx, window, dir, &name("learning"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("corrections-count", ScrollDelta::Pixels(point(px(0.), px(-560.))), cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("learning-lower"));
+    states.send(state.clone()).unwrap();
+
     // The settings, with the result of a check of the connector.
     click(&mut cx, "tab-settings");
     let check = UiCommand::CheckConnector {
@@ -627,8 +743,8 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    let (rig, state, decided) = rt.block_on(fixture());
+    let (rig, state, decided, learning) = rt.block_on(fixture());
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        draw(mode, dir, &rt, &rig, &state, &decided);
+        draw(mode, dir, &rt, &rig, &state, &decided, &learning);
     }
 }

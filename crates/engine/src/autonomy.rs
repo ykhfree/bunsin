@@ -6,9 +6,9 @@
 //! The hold lives outside the settings, so a saved settings file cannot undo it.
 
 use crate::{Engine, store_error};
-use bunsin_api::{ApiError, ApiResult, Autonomy, ToolAutonomy};
+use bunsin_api::{ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, Expected, ToolAutonomy};
 use bunsin_core::approval::ApprovalState;
-use bunsin_core::autonomy::suggest;
+use bunsin_core::autonomy::{AutonomyThresholds, suggest};
 use bunsin_core::policy::{Tier, ToolClass};
 use bunsin_core::records::{DecisionKind, InboxBody, InboxItem};
 use bunsin_store::ProfileStore;
@@ -123,6 +123,32 @@ impl Engine {
         let detail = json!({"inbox_id": inbox_id, "tool": tool});
         self.audit(&store, "autonomous_reported", Some(&item.event_key), detail)?;
         self.demote(&store, &item, tool, "reported")
+    }
+
+    pub(crate) fn read_thresholds(&self, profile: &str) -> ApiResult<Option<AutonomyThresholds>> {
+        Ok(Self::config(&*self.store(profile)?)?.autonomy)
+    }
+
+    /// Replaces the thresholds, if the stored ones are still the ones the caller loaded.
+    pub(crate) fn save_thresholds(&self, profile: &str, update: AutonomyThresholdsUpdate) -> ApiResult<()> {
+        let store = self.store(profile)?;
+        let (loaded, mut config) = Self::config_with_text(&store)?;
+        if let Expected::Value(expected) = &update.expected
+            && *expected != config.autonomy
+        {
+            return Err(ApiError::Conflict(
+                "the autonomy thresholds are not the ones this form loaded".into(),
+            ));
+        }
+        config.autonomy = update.thresholds;
+        Self::check_config(&config)?;
+        Self::save_config_from(&store, &loaded, &config)?;
+        self.audit(
+            &store,
+            "autonomy_thresholds_changed",
+            None,
+            json!({"thresholds": config.autonomy}),
+        )
     }
 
     /// Clears the hold of a tool. Only the owner does this.

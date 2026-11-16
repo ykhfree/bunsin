@@ -2,7 +2,7 @@
 
 mod common;
 
-use bunsin_api::{ApiError, Edit, EngineApi, Expected, Outcome, PermissionsUpdate};
+use bunsin_api::{ApiError, AutonomyThresholdsUpdate, Edit, EngineApi, Expected, Outcome, PermissionsUpdate};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
@@ -355,4 +355,50 @@ async fn a_held_tool_is_listed_without_its_rule_and_not_suggested() {
     assert_eq!(autonomy.tools.len(), 1);
     assert_eq!(autonomy.tools[0].tool, POST);
     assert!(autonomy.tools[0].held && !autonomy.tools[0].suggested);
+}
+
+#[tokio::test]
+async fn the_thresholds_are_saved_alone_with_their_check_and_a_conflict_check() {
+    let rig = rig().await;
+    assert_eq!(rig.engine.autonomy_thresholds("kim").await.unwrap(), None);
+    let thresholds = AutonomyThresholds {
+        min_reviewed: 20,
+        min_unchanged_percent: 90,
+        window_days: 30,
+    };
+    let update = |thresholds, expected| AutonomyThresholdsUpdate {
+        thresholds,
+        expected: Expected::Value(expected),
+    };
+    rig.engine
+        .set_autonomy_thresholds("kim", update(Some(thresholds), None))
+        .await
+        .unwrap();
+    assert_eq!(rig.engine.autonomy_thresholds("kim").await.unwrap(), Some(thresholds));
+    assert_eq!(rig.engine.autonomy("kim").await.unwrap().thresholds, Some(thresholds));
+    // The rest of the settings stays.
+    let config = rig.engine.profile_config("kim").await.unwrap();
+    assert_eq!(config.policy.rules.len(), 2);
+
+    // The caller loaded no thresholds, but the server holds some now.
+    let stale = rig.engine.set_autonomy_thresholds("kim", update(None, None)).await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+    let empty = AutonomyThresholds {
+        window_days: 0,
+        ..thresholds
+    };
+    let refused = rig
+        .engine
+        .set_autonomy_thresholds("kim", update(Some(empty), Some(thresholds)))
+        .await;
+    assert!(
+        matches!(refused, Err(ApiError::Invalid(ref e)) if e.contains("window_days")),
+        "{refused:?}"
+    );
+    rig.engine
+        .set_autonomy_thresholds("kim", update(None, Some(thresholds)))
+        .await
+        .unwrap();
+    assert_eq!(rig.engine.autonomy_thresholds("kim").await.unwrap(), None);
+    assert_eq!(audit_count(&rig, "autonomy_thresholds_changed").await, 2);
 }

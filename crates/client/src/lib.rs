@@ -6,11 +6,12 @@ use bunsin_api::http::{
     ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
-    AdoptPrinciple, ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit,
-    EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
-    PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport,
-    WikiPageUpdate,
+    AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
+    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate,
+    PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
+    ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
+use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
@@ -356,6 +357,28 @@ impl EngineApi for RemoteEngine {
             let body = ClearAutonomyHoldBody { tool: tool.to_owned() };
             self.send_only(Method::POST, &profile_path(profile, "clear-autonomy-hold"), Some(&body))
                 .await
+        })
+    }
+
+    fn autonomy_thresholds<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Option<AutonomyThresholds>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "autonomy-thresholds"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_autonomy_thresholds<'a>(
+        &'a self,
+        profile: &'a str,
+        update: AutonomyThresholdsUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-autonomy-thresholds"),
+                Some(&update),
+            )
+            .await
         })
     }
 

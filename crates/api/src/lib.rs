@@ -236,6 +236,15 @@ pub struct PrinciplesUpdate {
     pub expected: Expected<Vec<String>>,
 }
 
+/// New autonomy thresholds, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomyThresholdsUpdate {
+    /// `None` turns the suggestions off.
+    pub thresholds: Option<AutonomyThresholds>,
+    #[serde(default)]
+    pub expected: Expected<Option<AutonomyThresholds>>,
+}
+
 /// The owner's adoption of a principle candidate: one text appended to the principles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdoptPrinciple {
@@ -584,6 +593,14 @@ pub trait EngineApi: Send + Sync {
     fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>>;
     /// Clears the hold of a tool. Its calls then follow its step again.
     fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// The owner's thresholds for a suggestion of `autonomous`. `None`: nothing is suggested.
+    fn autonomy_thresholds<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Option<AutonomyThresholds>>>;
+    /// Replaces only the thresholds. They pass the same check as in the settings file.
+    fn set_autonomy_thresholds<'a>(
+        &'a self,
+        profile: &'a str,
+        update: AutonomyThresholdsUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>>;
     /// Stores replay cases after the privacy filter. Returns their IDs, in the order of `cases`.
     fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>>;
     /// The stored replay cases, oldest first, at most 200.

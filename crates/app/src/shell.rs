@@ -1,9 +1,10 @@
 //! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
-//! polls, privacy settings and connections.
+//! polls, learning, privacy settings and connections.
 
 use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
 use crate::draft_editor::DraftEditor;
+use crate::learning_form::LearningForm;
 use crate::notes_form::NotesForm;
 use crate::permissions_form::PermissionsForm;
 use crate::polls_form::PollsForm;
@@ -33,6 +34,7 @@ pub struct Shell {
     pub(crate) permissions: PermissionsForm,
     pub(crate) principles: PrinciplesForm,
     pub(crate) polls: PollsForm,
+    pub(crate) learning: LearningForm,
     /// The edit of a waiting call in the inbox, if one is open.
     pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
@@ -54,6 +56,9 @@ pub enum View {
     Permissions,
     /// How the agent works: the owner's principles and the searches that find events.
     Agent,
+    /// What the agent learns and how the owner checks it: corrections, principle candidates,
+    /// evaluation and the thresholds of the autonomy suggestions.
+    Learning,
     /// The connections and the privacy filter.
     Settings,
 }
@@ -75,6 +80,7 @@ impl Shell {
                     shell.permissions.receive(&state);
                     shell.principles.receive(&state, window, cx);
                     shell.polls.receive(&state, window, cx);
+                    shell.learning.receive(&state, window, cx);
                     shell.draft_editor.receive(&state);
                     shell.state = state;
                     cx.notify();
@@ -95,6 +101,7 @@ impl Shell {
             permissions: PermissionsForm::new(),
             principles: PrinciplesForm::new(window, cx),
             polls: PollsForm::new(window, cx),
+            learning: LearningForm::new(window, cx),
             draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
@@ -569,6 +576,7 @@ impl Shell {
             ("tab-notes", "Notes", "book-open", View::Notes, 0),
             ("tab-permissions", "Permissions", "circle-check", View::Permissions, 0),
             ("tab-agent", "Agent", "bot", View::Agent, 0),
+            ("tab-learning", "Learning", "chart-pie", View::Learning, 0),
             ("tab-settings", "Settings", "settings", View::Settings, 0),
         ]
         .map(|(id, text, picture, view, count)| {
@@ -713,6 +721,7 @@ impl Shell {
             View::Notes => "Notes",
             View::Permissions => "Permissions",
             View::Agent => "Agent",
+            View::Learning => "Learning",
             View::Settings => "Settings",
         };
         let switch = Button::new("kill-switch")
@@ -749,6 +758,8 @@ impl Render for Shell {
 
         let page = if self.view == View::Permissions {
             self.permissions_section(cx)
+        } else if self.view == View::Learning {
+            self.learning_section(cx)
         } else if self.view == View::Agent {
             div()
                 .id("agent")

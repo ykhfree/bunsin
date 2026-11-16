@@ -33,6 +33,8 @@
 //! | POST | `/v1/profiles/{p}/autonomy` | | `Autonomy` |
 //! | POST | `/v1/profiles/{p}/report-autonomous` | `ReportAutonomousBody` | |
 //! | POST | `/v1/profiles/{p}/clear-autonomy-hold` | `ClearAutonomyHoldBody` | |
+//! | POST | `/v1/profiles/{p}/autonomy-thresholds` | | `AutonomyThresholds or null` |
+//! | POST | `/v1/profiles/{p}/set-autonomy-thresholds` | `AutonomyThresholdsUpdate` | |
 //! | POST | `/v1/profiles/{p}/add-replay-cases` | `AddReplayCasesBody` | `[i64]` |
 //! | POST | `/v1/profiles/{p}/replay-cases` | | `[ReplayCaseRecord]` |
 //! | POST | `/v1/profiles/{p}/delete-replay-case` | `DeleteReplayCaseBody` | |

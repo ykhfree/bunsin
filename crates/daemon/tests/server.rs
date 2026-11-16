@@ -298,6 +298,12 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.delete_replay_case(other, 1).await);
         refused(kim.start_eval(other).await.map(|_| ()));
         refused(kim.eval_report(other).await.map(|_| ()));
+        refused(kim.autonomy_thresholds(other).await.map(|_| ()));
+        let thresholds = bunsin_api::AutonomyThresholdsUpdate {
+            thresholds: None,
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_autonomy_thresholds(other, thresholds).await);
         refused(
             kim.extract_principles(other, bunsin_core::candidates::PrincipleSource::Corrections)
                 .await
@@ -1135,4 +1141,23 @@ async fn a_stale_adoption_is_a_conflict_over_http() {
     kim.dismiss_principle("kim", second).await.unwrap();
     let again = kim.dismiss_principle("kim", second).await;
     assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+}
+
+#[tokio::test]
+async fn the_thresholds_are_set_over_http_with_a_conflict_check() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let thresholds = bunsin_core::autonomy::AutonomyThresholds {
+        min_reviewed: 5,
+        min_unchanged_percent: 80,
+        window_days: 14,
+    };
+    let update = |expected| bunsin_api::AutonomyThresholdsUpdate {
+        thresholds: Some(thresholds),
+        expected: bunsin_api::Expected::Value(expected),
+    };
+    kim.set_autonomy_thresholds("kim", update(None)).await.unwrap();
+    assert_eq!(kim.autonomy_thresholds("kim").await.unwrap(), Some(thresholds));
+    let stale = kim.set_autonomy_thresholds("kim", update(None)).await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
 }

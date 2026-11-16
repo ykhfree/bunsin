@@ -689,11 +689,12 @@ macOS Keychain.
 
 ![The inbox of the window](docs/screens/inbox-light.png)
 
-The window has five views. **Inbox** shows the approval inbox with every argument of each
+The window has six views. **Inbox** shows the approval inbox with every argument of each
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
 each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
-principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)). **Settings** has the connections (LLM endpoint,
+principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)).
+**Learning** shows what the agent learns from you and how you check it (see below). **Settings** has the connections (LLM endpoint,
 connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds.
 
 **Edit before approval.** A waiting call whose rule names places of text has the button
@@ -713,6 +714,20 @@ run: drop" and "Run again". A note under them says that a second run can send th
 item runs the call.
 
 ![The edit of a waiting call](docs/screens/inbox-edit-light.png)
+
+**Learning.** Four cards:
+
+- **Corrections**: your edits of drafts, newest first. "Retire" stops giving one to the agent.
+- **Principle candidates**: "Find in my corrections" and "Find in my replay cases" ask the LLM.
+  Each new candidate shows its quote and has "Adopt", "Edit, then adopt" and "Dismiss".
+  An adoption expects the principles that the window shows. If they changed on the server
+  meanwhile, nothing is added and the window shows the refusal.
+- **Evaluation**: the replay cases (add them with `bunsind add-replay-cases`), "Run the
+  evaluation", the state of the run, the rates, the pass mark and one line per case.
+- **Autonomy suggestions**: the thresholds of the suggestions in the permissions view, saved
+  alone with a conflict check. Three empty fields, or "Turn suggestions off", turn them off.
+
+![The learning view](docs/screens/learning-light.png)
 
 The window uses the light or the dark colors of the system. More pictures are in
 [`docs/screens`](docs/screens): the inbox in the dark mode, the notes and the settings.

@@ -5,6 +5,7 @@ pub mod connect;
 pub mod connection;
 pub mod connections_form;
 pub mod draft_editor;
+pub mod learning_form;
 pub mod notes_form;
 pub mod permissions_form;
 pub mod polls_form;

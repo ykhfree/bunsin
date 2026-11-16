@@ -16,10 +16,12 @@ use bunsin_api::http::{
     ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
-    AdoptPrinciple, ApiError, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, EvalReport,
-    LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections, ConnectorUpdate,
+    EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
+    PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
+    WikiPageUpdate,
 };
+use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
@@ -399,6 +401,25 @@ async fn clear_autonomy_hold(
     Ok(Json(engine.clear_autonomy_hold(&profile, &body.tool).await?))
 }
 
+async fn autonomy_thresholds(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Option<AutonomyThresholds>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.autonomy_thresholds(&profile).await?))
+}
+
+async fn set_autonomy_thresholds(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<AutonomyThresholdsUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_autonomy_thresholds(&profile, update).await?))
+}
+
 async fn add_replay_cases(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -553,6 +574,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("autonomy"), post(autonomy))
         .route(&profile("report-autonomous"), post(report_autonomous))
         .route(&profile("clear-autonomy-hold"), post(clear_autonomy_hold))
+        .route(&profile("autonomy-thresholds"), post(autonomy_thresholds))
+        .route(&profile("set-autonomy-thresholds"), post(set_autonomy_thresholds))
         .route(&profile("add-replay-cases"), post(add_replay_cases))
         .route(&profile("replay-cases"), post(replay_cases))
         .route(&profile("delete-replay-case"), post(delete_replay_case))

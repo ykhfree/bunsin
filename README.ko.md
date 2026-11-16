@@ -598,10 +598,11 @@ token을 macOS Keychain에 저장합니다.
 
 ![창의 Inbox 화면](docs/screens/inbox-light.png)
 
-창에는 다섯 화면이 있습니다. **Inbox**는 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
+창에는 여섯 화면이 있습니다. **Inbox**는 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
 **Notes**는 notes의 페이지 목록을 보여 주고, 페이지를 읽고, 고치고, 만들고, 지울 수 있게 합니다.
 **Permissions**는 승인된 도구마다 agent가 할 수 있는 일을 정합니다([권한 규칙](#권한-규칙)).
 **Agent**에는 원칙과 poll이 있습니다([원칙](#원칙), [이벤트 찾기](#이벤트-찾기-폴링)).
+**Learning**은 agent가 사용자에게서 배우는 것과 그것을 확인하는 방법을 보여 줍니다(아래).
 **Settings**에는 연결 설정(LLM endpoint, 커넥터, token, 커넥터의 도구 목록으로 하는 연결 확인)과 개인정보 필터가 있습니다.
 5초마다 서버에서 상태를 다시 읽습니다.
 
@@ -619,6 +620,18 @@ AI 표시는 서버가 수정 뒤에 붙입니다. 그래서 입력란에는 표
 "Run again"은 먼저 묻습니다. 한 번 누르면 버튼이 "Yes, run it again"으로 바뀌고, 같은 항목에서 한 번 더 눌러야 실행합니다.
 
 ![대기 호출의 수정](docs/screens/inbox-edit-light.png)
+
+**Learning.** 카드가 네 개 있습니다.
+
+- **Corrections**: 초안을 고친 기록, 최신순. "Retire"를 누르면 그 기록을 agent에게 더는 주지 않습니다.
+- **Principle candidates**: "Find in my corrections"와 "Find in my replay cases"가 LLM에 묻습니다.
+  새 후보마다 근거 인용과 "Adopt", "Edit, then adopt", "Dismiss" 버튼이 있습니다.
+  채택은 창이 보여 주는 원칙 목록을 기대합니다. 그 사이에 서버의 원칙이 바뀌었으면 아무것도 더하지 않고, 창이 거부를 보여 줍니다.
+- **Evaluation**: 재현 사례(`bunsind add-replay-cases`로 더함), "Run the evaluation", 실행 상태, 비율, 통과 기준, 사례마다 한 줄.
+- **Autonomy suggestions**: Permissions 화면의 제안 기준. 이것만 따로, 충돌 검사와 함께 저장합니다.
+  세 칸을 비우거나 "Turn suggestions off"를 누르면 제안이 꺼집니다.
+
+![Learning 화면](docs/screens/learning-light.png)
 
 창은 시스템의 라이트 또는 다크 설정에 맞는 색을 씁니다. 다른 그림은 [`docs/screens`](docs/screens)에 있습니다:
 다크 모드의 Inbox, Notes, Settings. 그림은 창을 띄우지 않고 테스트 데이터로 그립니다:

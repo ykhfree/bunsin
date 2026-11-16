@@ -19,12 +19,13 @@ pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    AdoptPrinciple, ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit,
-    EngineApi, EvalReport, Expected, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview,
-    PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution,
-    ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
+    ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, LlmTest, LlmUpdate, Outcome, Permissions,
+    PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
+    ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
 use bunsin_core::eval::ReplayCaseRecord;
@@ -1315,6 +1316,18 @@ impl EngineApi for Engine {
 
     fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.clear_hold(profile, tool) })
+    }
+
+    fn autonomy_thresholds<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Option<AutonomyThresholds>>> {
+        Box::pin(async move { self.read_thresholds(profile) })
+    }
+
+    fn set_autonomy_thresholds<'a>(
+        &'a self,
+        profile: &'a str,
+        update: AutonomyThresholdsUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_thresholds(profile, update) })
     }
 
     fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
