@@ -694,3 +694,44 @@ fn the_owner_extracts_adopts_and_dismisses_principle_candidates() {
     );
     assert!(error.contains("has no text"), "{error}");
 }
+
+#[test]
+fn the_owner_checks_the_notes_and_dismisses_a_finding() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let error = stderr_of_failure(server.run(&kim, &["lint-notes", "kim"]), "checks off");
+    assert!(error.contains("checks of the notes are off"), "{error}");
+
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let text = store.setting("config").unwrap().unwrap();
+    let mut config: serde_json::Value = serde_json::from_str(&text).unwrap();
+    config["notes"] = serde_json::json!({"stale_days": 1});
+    store.set_setting("config", &config.to_string()).unwrap();
+    let page = bunsin_core::wiki::WikiText {
+        title: "Deploy".into(),
+        summary: "When".into(),
+        body: "Fridays.".into(),
+    };
+    // A page from long ago: the server's clock is the real one.
+    store
+        .write_wiki_page("deploy", &page, &[], bunsin_core::wiki::WikiAuthor::Owner, 0, None, 1)
+        .unwrap();
+    drop(store);
+
+    let out = stdout_of(server.run(&kim, &["lint-notes", "kim"]), "lint-notes");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "2 finding(s)");
+    assert!(lines[1].contains(" stale deploy: nobody changed it for "), "{out}");
+    assert!(lines[2].contains(" orphan deploy: no other page names it"), "{out}");
+    let id = lines[1].trim_start_matches('#').split(' ').next().unwrap();
+    assert_eq!(
+        stdout_of(server.run(&kim, &["dismiss-finding", "kim", id]), "dismiss-finding"),
+        format!("finding {id} dismissed\n")
+    );
+    let left = stdout_of(server.run(&kim, &["lint-findings", "kim"]), "lint-findings");
+    assert_eq!(left, format!("{}\n", lines[2]));
+}

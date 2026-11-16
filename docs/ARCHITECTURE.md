@@ -115,7 +115,7 @@
   - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
     retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
     정책이 소유자 없이 실행한 항목(`executed`, `failed`)에는 "Report a problem" 버튼이 있다(`report_autonomous`). 도구가 보류 중이면 버튼을 감춘다.
-  - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제(15절).
+  - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제, 오른쪽의 점검 결과(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
   - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.
   - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
@@ -637,9 +637,26 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - 사용자가 쓴 글은 저장할 때 거르지 않는다. 프롬프트에 인용할 때 필터를 거친다.
 - 편집은 출발한 revision을 보낼 수 있고, 다르면 `Conflict`가 된다.
 
+**점검**
+
+- 설정 `notes: {stale_days, lint_every_hours, lint_conflicts}`(모두 `serde(default)`, 기본은 꺼짐). `stale_days`나 `lint_every_hours`가 0이면 저장을 거부한다.
+  `lint_every_hours`가 있는데 `stale_days`도 `lint_conflicts`도 없으면 거부한다. 볼 것이 없는 점검은 `lint_notes`가 거부한다.
+- stale: `stale_days`일보다 오래(경계 초과) 고치지 않은 페이지. orphan: 다른 페이지의 제목, 요약, 본문에 slug가 낱말로 없고
+  (앞뒤에 영숫자나 `-`가 없음), `last_read_at`(없으면 마지막 변경)부터 `stale_days`일보다 오래 지난 페이지. 계산은 core `lint`(IO 없음).
+- 모순(`lint_conflicts`): 페이지마다 제목, 요약, 본문의 검색어(4절의 `query_terms`)를 만들고, `df ≤ max(2, N/4)`인 드문 검색어를
+  2개 이상 함께 쓰는 쌍을 공유 수 순서로 10개까지 고른다. 기각한 쌍은 고르지 않는다. 쌍의 페이지를 필터를 거쳐 `<data>`로 인용하고
+  LLM에 한 번 묻는다(purpose `notes_check`). 답 `{conflicts: [{a, b, detail}]}`에서 보낸 쌍만 받고, 이유는 필터를 거쳐 300자로 자른다.
+  기각: 모든 쌍을 묻기. 300쪽이면 44,850쌍이다.
+- 결과는 표 `lint_findings(id, run_at, kind, slugs, detail, state)`에 둔다. 점검은 `new` 결과를 한 transaction으로 새 결과로 바꾼다.
+  `dismissed` 결과는 남고, 같은 종류와 같은 slug의 결과는 다시 넣지 않는다. 모순 LLM 호출이 실패하면 아무것도 바꾸지 않고 거부한다(오류는 필터를 거친다).
+- 점검 시각은 설정 표의 `notes_checked_at`에 시작할 때 적는다. `background_tick`은 `lint_every_hours`가 지났을 때만 점검한다.
+  그래서 실패한 점검도 다음 간격까지 다시 돌지 않는다. 점검은 밖에 아무것도 보내지 않으므로 정지 스위치와 상관없이 돈다.
+- 점검은 페이지를 고치지 않는다. 감사 `notes_checked`는 종류별 개수와 보낸 쌍의 수만 남긴다.
+- API: `lint_notes`, `lint_findings`(`new`만, 찾은 순서), `dismiss_finding`(`POST .../lint-notes` 등, 같은 이름의 `bunsind` 명령).
+  창의 Notes 화면은 오른쪽 **Checks** 카드에 결과, "Check now", 결과마다 "Dismiss"를 보인다.
+
 **아직 없는 것**
 
-- 주기적 점검(모순, 오래된 내용, 고아 페이지 찾기).
 - 변경안을 승인 없이 자동 반영하는 단계.
 - 지정한 Confluence 스페이스나 Jira 프로젝트를 미리 읽어 넣는 기능.
 - 사용자가 출처 문서의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
@@ -663,7 +680,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
-| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기) | 구현, 테스트 있음. 점검과 자동 반영은 없음. |
+| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검) | 구현, 테스트 있음. 자동 반영은 없음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
 | 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 사례를 추가하지 않는다. |
 | 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령에만 있다. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |

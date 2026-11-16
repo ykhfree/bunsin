@@ -6,6 +6,7 @@ pub mod candidates;
 pub mod context;
 pub mod eval;
 pub mod event;
+pub mod lint;
 pub mod llm;
 pub mod marker;
 pub mod policy;

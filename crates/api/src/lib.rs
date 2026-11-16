@@ -6,6 +6,7 @@ use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::lint::LintFinding;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
@@ -16,7 +17,7 @@ use bunsin_core::records::{
 };
 use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
-use bunsin_core::wiki::{WikiPage, WikiSummary, WikiText};
+use bunsin_core::wiki::{NotesConfig, WikiPage, WikiSummary, WikiText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -52,6 +53,9 @@ pub struct ProfileConfig {
     /// The owner's pass mark for replay evaluation.
     #[serde(default)]
     pub eval: EvalConfig,
+    /// The checks of the agent's notes. Everything is off by default.
+    #[serde(default)]
+    pub notes: NotesConfig,
 }
 
 impl ProfileConfig {
@@ -72,6 +76,7 @@ impl ProfileConfig {
             polls: Vec::new(),
             autonomy: None,
             eval: EvalConfig::default(),
+            notes: NotesConfig::default(),
         }
     }
 }
@@ -627,4 +632,11 @@ pub trait EngineApi: Send + Sync {
     fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>>;
     /// Dismisses a new candidate. A later extraction does not propose its text again.
     fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Checks the notes now with the settings `notes` and returns the findings that are new.
+    /// A check replaces the findings of the last one. It never changes a page.
+    fn lint_notes<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>>;
+    /// The findings of the last check that the owner has not dismissed.
+    fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>>;
+    /// Dismisses a finding. Later checks do not report the same kind for the same pages again.
+    fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
 }

@@ -953,3 +953,60 @@ fn an_old_text_is_saved_with_the_revision_check(cx: &mut TestAppContext) {
         assert_eq!(body(window), "Kim leads.");
     });
 }
+
+#[gpui_kit::test]
+fn the_owner_checks_the_notes_and_dismisses_a_finding(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let now = 30 * 86_400;
+    let rig = rt.block_on(common::rig_at(now));
+    // Check with the default settings: the server says the checks are off. It is not a window error.
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "findings-count"), "Findings: 0");
+        window.click("lint-notes", cx);
+    });
+    wait_until(cx, &shell, "the refused check", |s| s.state.lint_result.is_some());
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "lint-result").contains("checks of the notes are off"));
+    });
+    assert_eq!(shell.read_with(cx, |s, _| s.state.error.clone()), None);
+
+    // A page that nobody changed for 29 days, with checks after 7 days.
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config.notes.stale_days = Some(7);
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let page = WikiText {
+        title: "Deploy".into(),
+        summary: "When".into(),
+        body: "Fridays.".into(),
+    };
+    store
+        .write_wiki_page("deploy", &page, &[], WikiAuthor::Owner, 0, None, 86_400)
+        .unwrap();
+    on_screen(cx, window, |window, cx| window.click("lint-notes", cx));
+    wait_until(cx, &shell, "two findings", |s| {
+        s.state.lint_findings.as_ref().is_some_and(|found| found.len() == 2)
+    });
+    let ids: Vec<i64> = shell.read_with(cx, |s, _| {
+        s.state.lint_findings.as_ref().unwrap().iter().map(|f| f.id).collect()
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "lint-result"), "2 findings.");
+        assert_eq!(label(window, "findings-count"), "Findings: 2");
+        assert_eq!(
+            window.find(format!("finding-{}", ids[0])).label().unwrap_or_default(),
+            "Old: deploy · nobody changed it for 29 day(s)"
+        );
+        assert_eq!(
+            window.find(format!("finding-{}", ids[1])).label().unwrap_or_default(),
+            "Not named: deploy · no other page names it, and the agent never read it"
+        );
+        window.click(format!("dismiss-finding-{}", ids[0]), cx);
+    });
+    wait_until(cx, &shell, "one finding", |s| {
+        s.state.lint_findings.as_ref().is_some_and(|found| found.len() == 1)
+    });
+    // The check changed no page.
+    assert_eq!(rt.block_on(rig.engine.wiki_page("kim", "deploy")).unwrap().revision, 1);
+}

@@ -32,6 +32,43 @@ pub const MAX_UPDATES_PER_EVENT: usize = 3;
 /// The most pages a profile holds. The index of all pages goes into every prompt.
 pub const MAX_PAGES: usize = 300;
 
+/// How the engine looks after the notes. Every part is off by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotesConfig {
+    /// A check reports a page that nobody changed, or that is an orphan, for more than this many days.
+    /// `None`: no page is reported as stale or as an orphan.
+    #[serde(default)]
+    pub stale_days: Option<u32>,
+    /// The server checks the notes this often. `None`: only the owner starts a check.
+    #[serde(default)]
+    pub lint_every_hours: Option<u32>,
+    /// A check also asks the LLM, once, whether pairs of related pages say different things.
+    #[serde(default)]
+    pub lint_conflicts: bool,
+}
+
+impl NotesConfig {
+    /// True if a check has something to look for.
+    pub fn checks_anything(&self) -> bool {
+        self.stale_days.is_some() || self.lint_conflicts
+    }
+
+    /// Refuses settings that check nothing or count no time. The error says what to change.
+    pub fn check(&self) -> Result<(), String> {
+        if self.stale_days == Some(0) {
+            return Err("`notes.stale_days` must be 1 or more".into());
+        }
+        if self.lint_every_hours == Some(0) {
+            return Err("`notes.lint_every_hours` must be 1 or more".into());
+        }
+        if self.lint_every_hours.is_some() && !self.checks_anything() {
+            return Err("`notes.lint_every_hours` needs `notes.stale_days` or `notes.lint_conflicts`".into());
+        }
+        Ok(())
+    }
+}
+
 /// Where a fact on a page came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiSource {
@@ -386,6 +423,30 @@ mod tests {
         assert!(shown.contains("Fridays at 3 pm."));
         assert!(shown.contains("Updated 3 day(s) ago."));
         assert!(shown.contains("- slack/search: {\"query\":\"deploy\"}"));
+    }
+
+    #[test]
+    fn notes_settings_are_off_by_default_and_must_check_something() {
+        let config: NotesConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, NotesConfig::default());
+        assert!(!config.checks_anything());
+        assert_eq!(config.check(), Ok(()));
+        let with = |stale_days, lint_every_hours, lint_conflicts| NotesConfig {
+            stale_days,
+            lint_every_hours,
+            lint_conflicts,
+        };
+        assert_eq!(with(Some(30), Some(24), false).check(), Ok(()));
+        assert_eq!(with(None, Some(24), true).check(), Ok(()));
+        assert!(with(Some(0), None, false).check().unwrap_err().contains("stale_days"));
+        assert!(
+            with(Some(1), Some(0), false)
+                .check()
+                .unwrap_err()
+                .contains("lint_every_hours")
+        );
+        assert!(with(None, Some(24), false).check().unwrap_err().contains("needs"));
+        assert!(serde_json::from_str::<NotesConfig>(r#"{"stale_day": 3}"#).is_err());
     }
 
     #[test]

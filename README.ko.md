@@ -516,7 +516,35 @@ bunsind wiki-history kim team          # 모든 변경. --revision N은 옛 본�
 bunsind wiki-export kim ./notes        # index.md와 pages/*.md
 ```
 
-아직 없는 것: 오래되거나 모순된 페이지의 주기적 점검, 승인 없는 자동 반영, Confluence 스페이스의 사전 수집.
+#### notes 점검
+
+점검은 살펴볼 페이지를 알려 줍니다. 점검은 페이지를 고치지 않습니다.
+설정 `notes`가 무엇을 볼지 정하고, 기본값은 모두 꺼져 있습니다.
+
+```json
+"notes": {"stale_days": 30, "lint_every_hours": 24, "lint_conflicts": true}
+```
+
+- `stale_days`: 이 날수보다 오래 아무도 고치지 않은 페이지는 **오래됨**입니다.
+  다른 페이지가 이름을 낱말로 적지 않고, agent가 이 날수보다 오래 읽지 않은 페이지는 **이름 없음**입니다.
+  agent가 한 번도 읽지 않은 페이지는 마지막 변경부터 셉니다.
+- `lint_conflicts`: 점검이 드문 낱말을 2개 이상 함께 쓰는 페이지 쌍을 최대 10개 골라 LLM에 한 번 묻습니다.
+  페이지는 개인정보 필터를 거친 인용 데이터로 갑니다. 보내지 않은 쌍에 대한 결과는 버립니다.
+  이 설정이 없으면 점검은 LLM을 부르지 않습니다.
+- `lint_every_hours`: 서버가 이 간격으로 점검합니다. 없으면 사용자가 시작할 때만 점검합니다.
+- 점검 결과는 지난 결과를 바꿉니다. 결과를 기각하면 다음 점검은 같은 페이지의 같은 종류를 다시 알리지 않습니다.
+  모순 점검이 실패하면 지난 결과가 남습니다.
+- 창의 Notes 화면에 있는 **Checks** 카드에서 **Check now**를 누르고, 결과마다 **Dismiss**를 누릅니다. 명령줄은 아래와 같습니다.
+
+```sh
+bunsind lint-notes kim         # 지금 점검
+bunsind lint-findings kim      # 기각하지 않은 결과
+bunsind dismiss-finding kim 3
+```
+
+![점검 결과가 있는 Notes 화면](docs/screens/notes-light.png)
+
+아직 없는 것: 승인 없는 자동 반영, Confluence 스페이스의 사전 수집.
 
 ### agent와 일하기
 

@@ -594,8 +594,39 @@ bunsind wiki-history kim team          # every change; --revision N prints an ol
 bunsind wiki-export kim ./notes        # index.md and pages/*.md
 ```
 
-Not built yet: a periodic check for stale or conflicting pages, applying changes without
-approval, and loading a Confluence space in advance.
+#### Checks of the notes
+
+A check reports pages to look at. It never changes a page. The settings `notes` say what
+it looks for; everything is off by default:
+
+```json
+"notes": {"stale_days": 30, "lint_every_hours": 24, "lint_conflicts": true}
+```
+
+- `stale_days`: a page that nobody changed for more than this many days is **old**. A page
+  that no other page names (its name as a whole word) and that the agent did not read for
+  more than this many days is **not named**. A page the agent never read counts from its
+  last change.
+- `lint_conflicts`: the check also asks the LLM, once, about at most 10 pairs of pages that
+  share two or more rare words. The pages go to the LLM as quoted data after the privacy
+  filter. A finding about a pair that was not sent is dropped. Without this setting a check
+  calls no LLM.
+- `lint_every_hours`: the server checks this often. Without it, only you start a check.
+- A check replaces the findings of the last one. Dismiss a finding, and later checks do not
+  report the same kind for the same pages again. If the conflict check fails, the last
+  findings stay.
+- In the window, the **Checks** card of the Notes view has **Check now** and a **Dismiss**
+  button for each finding. On the command line:
+
+```sh
+bunsind lint-notes kim         # check now
+bunsind lint-findings kim      # the findings you have not dismissed
+bunsind dismiss-finding kim 3
+```
+
+![The notes view with the findings of a check](docs/screens/notes-light.png)
+
+Not built yet: applying changes without approval, and loading a Confluence space in advance.
 
 ### Work with the agent
 

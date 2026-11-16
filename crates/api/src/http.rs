@@ -44,6 +44,9 @@
 //! | POST | `/v1/profiles/{p}/principle-candidates` | | `[PrincipleCandidate]` |
 //! | POST | `/v1/profiles/{p}/adopt-principle` | `AdoptPrinciple` | |
 //! | POST | `/v1/profiles/{p}/dismiss-principle` | `DismissPrincipleBody` | |
+//! | POST | `/v1/profiles/{p}/lint-notes` | | `[LintFinding]` |
+//! | POST | `/v1/profiles/{p}/lint-findings` | | `[LintFinding]` |
+//! | POST | `/v1/profiles/{p}/dismiss-finding` | `DismissFindingBody` | |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -124,6 +127,11 @@ pub struct ExtractPrinciplesBody {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DismissPrincipleBody {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DismissFindingBody {
     pub id: i64,
 }
 

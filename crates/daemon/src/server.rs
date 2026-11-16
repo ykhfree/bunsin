@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
-    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, DismissFindingBody,
     DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody,
     ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
@@ -25,6 +25,7 @@ use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::{CorrectionRecord, LlmUsage, ProfileInfo};
@@ -502,6 +503,34 @@ async fn dismiss_principle(
     Ok(Json(engine.dismiss_principle(&profile, body.id).await?))
 }
 
+async fn lint_notes(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<LintFinding>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.lint_notes(&profile).await?))
+}
+
+async fn lint_findings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<LintFinding>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.lint_findings(&profile).await?))
+}
+
+async fn dismiss_finding(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<DismissFindingBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.dismiss_finding(&profile, body.id).await?))
+}
+
 async fn wiki_index(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -585,6 +614,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("principle-candidates"), post(principle_candidates))
         .route(&profile("adopt-principle"), post(adopt_principle))
         .route(&profile("dismiss-principle"), post(dismiss_principle))
+        .route(&profile("lint-notes"), post(lint_notes))
+        .route(&profile("lint-findings"), post(lint_findings))
+        .route(&profile("dismiss-finding"), post(dismiss_finding))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

@@ -195,6 +195,7 @@ async fn fixture() -> (common::Rig, UiState, UiState, UiState) {
         ]}),
     );
     rig.engine.poll_profile("kim").await.unwrap();
+    notes_checks(&rig).await;
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
 
@@ -230,6 +231,61 @@ async fn fixture() -> (common::Rig, UiState, UiState, UiState) {
     apply(&*rig.engine, &mut decided, UiCommand::Refresh).await;
     let learning = learning_fixture(&rig).await;
     (rig, state, decided, learning)
+}
+
+/// An old page and the findings of a check of the notes, for the notes view. The rows are written beside
+/// the engine, so the audit log of the inbox pictures stays the same.
+async fn notes_checks(rig: &common::Rig) {
+    use bunsin_core::lint::{FindingKind, Found};
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.notes.stale_days = Some(30);
+    config.notes.lint_conflicts = true;
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let text = WikiText {
+        title: "Release checklist".into(),
+        summary: "What a release needs".into(),
+        body: "A release needs one approval. Releases go out on Thursdays.".into(),
+    };
+    let long_ago = 1_794_821_400 - 45 * 86_400;
+    store
+        .write_wiki_page(
+            "release-checklist",
+            &text,
+            &[],
+            bunsin_core::wiki::WikiAuthor::Owner,
+            0,
+            None,
+            long_ago,
+        )
+        .unwrap();
+    let found = |kind, slugs: &[&str], detail: &str| Found {
+        kind,
+        slugs: slugs.iter().map(|slug| (*slug).to_owned()).collect(),
+        detail: detail.into(),
+    };
+    store
+        .replace_lint_findings(
+            1_794_821_400,
+            &[
+                found(
+                    FindingKind::Stale,
+                    &["release-checklist"],
+                    "nobody changed it for 45 day(s)",
+                ),
+                found(
+                    FindingKind::Orphan,
+                    &["release-checklist"],
+                    "no other page names it, and the agent never read it",
+                ),
+                found(
+                    FindingKind::Conflict,
+                    &["deploy-schedule", "release-checklist"],
+                    "One page says a release needs two approvals, the other says one.",
+                ),
+            ],
+        )
+        .unwrap();
 }
 
 /// Corrections, principle candidates and a finished evaluation run with a pass mark and a judge.

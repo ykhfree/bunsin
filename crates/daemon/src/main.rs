@@ -302,6 +302,26 @@ enum Command {
         profile: String,
         slug: String,
     },
+    /// Check the notes now with the settings `notes`: stale pages, orphan pages and, with
+    /// `notes.lint_conflicts`, pages that may say different things. A check changes no page.
+    LintNotes {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Show the findings of the last check of the notes that you have not dismissed.
+    LintFindings {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Dismiss a finding. Later checks do not report the same kind for the same pages again.
+    DismissFinding {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
     /// Write a page of the notes yourself. The body is read from a file.
     WikiSet {
         #[command(flatten)]
@@ -587,6 +607,17 @@ fn case_text(case: &bunsin_core::eval::ReplayCaseRecord) -> String {
         e.author,
         e.text.replace('\n', "\n    "),
         case.actual_reply.replace('\n', "\n    ")
+    )
+}
+
+/// A finding of a check of the notes as one line.
+fn finding_line(finding: &bunsin_core::lint::LintFinding) -> String {
+    format!(
+        "#{} {} {}: {}",
+        finding.id,
+        finding.kind.as_str(),
+        finding.slugs.join(" and "),
+        finding.detail.replace('\n', " ")
     )
 }
 
@@ -1081,6 +1112,22 @@ async fn run(cli: Cli) -> Result<(), String> {
             for page in connect(&remote)?.wiki_index(&profile).await.map_err(text)? {
                 println!("{}\t{}\t{}", page.slug, page.title, page.summary);
             }
+        }
+        Command::LintNotes { remote, profile } => {
+            let found = connect(&remote)?.lint_notes(&profile).await.map_err(text)?;
+            println!("{} finding(s)", found.len());
+            for finding in &found {
+                println!("{}", finding_line(finding));
+            }
+        }
+        Command::LintFindings { remote, profile } => {
+            for finding in connect(&remote)?.lint_findings(&profile).await.map_err(text)? {
+                println!("{}", finding_line(&finding));
+            }
+        }
+        Command::DismissFinding { remote, profile, id } => {
+            connect(&remote)?.dismiss_finding(&profile, id).await.map_err(text)?;
+            println!("finding {id} dismissed");
         }
         Command::WikiShow { remote, profile, slug } => {
             let page = connect(&remote)?.wiki_page(&profile, &slug).await.map_err(text)?;

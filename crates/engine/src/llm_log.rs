@@ -26,6 +26,8 @@ pub(crate) enum Purpose {
     Judge,
     /// The search for principle candidates in the owner's texts.
     Principles,
+    /// The conflict check of the notes.
+    NotesCheck,
 }
 
 impl Purpose {
@@ -36,6 +38,7 @@ impl Purpose {
             Purpose::LlmTest => "llm_test",
             Purpose::Judge => "judge",
             Purpose::Principles => "principles",
+            Purpose::NotesCheck => "notes_check",
         }
     }
 }

@@ -1,7 +1,7 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
 use bunsin_api::http::{
-    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, DismissFindingBody,
     DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody,
     ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
@@ -15,6 +15,7 @@ use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
@@ -449,6 +450,28 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let body = DismissPrincipleBody { id };
             self.send_only(Method::POST, &profile_path(profile, "dismiss-principle"), Some(&body))
+                .await
+        })
+    }
+
+    fn lint_notes<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "lint-notes"), NO_BODY)
+                .await
+        })
+    }
+
+    fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "lint-findings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = DismissFindingBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "dismiss-finding"), Some(&body))
                 .await
         })
     }

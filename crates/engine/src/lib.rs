@@ -7,6 +7,7 @@ mod candidates;
 mod connections;
 mod corrections;
 mod eval;
+mod lint;
 mod llm_log;
 mod notes;
 mod poll_settings;
@@ -30,6 +31,7 @@ use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::lint::LintFinding;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
@@ -308,6 +310,7 @@ impl Engine {
         if let Some(pass) = &config.eval.pass {
             pass.check().map_err(ApiError::Invalid)?;
         }
+        config.notes.check().map_err(ApiError::Invalid)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -1368,6 +1371,18 @@ impl EngineApi for Engine {
 
     fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.dismiss(profile, id) })
+    }
+
+    fn lint_notes<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(self.check_notes(profile))
+    }
+
+    fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(async move { self.new_findings(profile) })
+    }
+
+    fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.dismiss_lint_finding(profile, id) })
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {

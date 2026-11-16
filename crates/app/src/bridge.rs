@@ -11,6 +11,7 @@ use bunsin_api::{
 };
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
+use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::{CorrectionRecord, ProfileInfo};
@@ -156,6 +157,15 @@ pub enum UiCommand {
         profile: String,
         update: AutonomyThresholdsUpdate,
     },
+    /// Checks the notes now with the server's settings. A check changes no page.
+    LintNotes {
+        profile: String,
+    },
+    /// Dismisses a finding of a check of the notes.
+    DismissFinding {
+        profile: String,
+        id: i64,
+    },
 }
 
 /// The page of the notes that the window has open.
@@ -289,6 +299,10 @@ pub struct UiState {
     pub thresholds_result: Option<Result<(), SaveError>>,
     /// How many `SaveAutonomyThresholds` commands the bridge has run.
     pub threshold_saves: u64,
+    /// The findings of the last check of the notes that the owner has not dismissed.
+    pub lint_findings: Option<Vec<LintFinding>>,
+    /// How many findings the last `LintNotes` stored, or why it failed. Not an `error`.
+    pub lint_result: Option<Result<usize, String>>,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -347,6 +361,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.note_result = None;
     state.extract_result = None;
     state.thresholds_result = None;
+    state.lint_result = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
     let result = match (command, selected) {
@@ -476,6 +491,14 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.extract_result = Some(result.map(|found| found.len()));
             Ok(())
         }
+        (UiCommand::LintNotes { profile }, _) => {
+            let result = for_profile(selected, &profile, api.lint_notes(&profile)).await;
+            state.lint_result = Some(result.map(|found| found.len()));
+            Ok(())
+        }
+        (UiCommand::DismissFinding { profile, id }, _) => {
+            for_profile(selected, &profile, api.dismiss_finding(&profile, id)).await
+        }
         (UiCommand::RetireCorrection { profile, id }, _) => {
             for_profile(selected, &profile, api.retire_correction(&profile, id)).await
         }
@@ -551,6 +574,7 @@ struct Loaded {
     candidates: Vec<PrincipleCandidate>,
     replay_cases: Vec<ReplayCaseRecord>,
     eval_report: EvalReport,
+    lint_findings: Vec<LintFinding>,
     /// The open page. None if no page is open or the server has no such page.
     page: Option<WikiPage>,
     /// The revisions of the open page, if the window shows them.
@@ -572,6 +596,7 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bo
         candidates: api.principle_candidates(profile).await?,
         replay_cases: api.replay_cases(profile).await?,
         eval_report: api.eval_report(profile).await?,
+        lint_findings: api.lint_findings(profile).await?,
         history: match open {
             Some((slug, true)) => Some(api.wiki_history(profile, slug).await?),
             _ => None,
@@ -601,6 +626,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.candidates = None;
     state.replay_cases = None;
     state.eval_report = None;
+    state.lint_findings = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -640,6 +666,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.candidates = Some(loaded.candidates);
                 state.replay_cases = Some(loaded.replay_cases);
                 state.eval_report = Some(loaded.eval_report);
+                state.lint_findings = Some(loaded.lint_findings);
                 if let Some(open) = &mut state.open_note {
                     open.page = loaded.page;
                     open.history = loaded.history;

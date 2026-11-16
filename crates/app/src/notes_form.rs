@@ -6,6 +6,7 @@ use crate::shell::{Shell, labelled, labelled_as};
 use crate::theme::{card, code_block, field, icon, notice, palette, quiet, utc_minute};
 use bunsin_api::WikiPageUpdate;
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::lint::{FindingKind, LintFinding};
 use bunsin_core::records::InboxBody;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiText};
 use gpui_kit::base::TestSupportExt;
@@ -28,6 +29,18 @@ const EMPTY: &str = "Select a page, or make a new one.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
 const OLD_LOADED: &str = "The old text is in the fields now. Save stores it as a new revision.";
 const OLD_BLOCKED: &str = "This page has changes that are not saved. Save or discard them first.";
+const CHECKS_HELP: &str = "A check reports old pages, pages that nothing names, and, if the settings turn it on, \
+    pages that may say different things. It changes no page. The settings `notes` say what to check.";
+
+/// A finding as one line: what, which pages, and why.
+pub fn finding_text(finding: &LintFinding) -> String {
+    let what = match finding.kind {
+        FindingKind::Stale => "Old",
+        FindingKind::Orphan => "Not named",
+        FindingKind::Conflict => "May conflict",
+    };
+    format!("{what}: {} · {}", finding.slugs.join(" and "), finding.detail)
+}
 
 /// What the fields hold.
 enum Draft {
@@ -533,11 +546,13 @@ impl Shell {
             .text_color(cx.theme().muted_foreground)
             .child(labelled("note-message", form.message.clone().unwrap_or_default()));
         let Some(draft) = &form.draft else {
-            return view.child(
-                editor
-                    .child(labelled_as("note-heading", EMPTY, quiet(EMPTY, cx)))
-                    .child(message),
-            );
+            return view
+                .child(
+                    editor
+                        .child(labelled_as("note-heading", EMPTY, quiet(EMPTY, cx)))
+                        .child(message),
+                )
+                .child(self.notes_side(cx));
         };
 
         let page = match draft {
@@ -682,7 +697,7 @@ impl Shell {
             .gap_2()
             .children(form.blocked.clone().map(|nav| {
                 notice(colors.waiting, cx)
-                    .child(labelled("note-blocked", UNSAVED))
+                    .child(div().flex_1().min_w(px(0.)).child(labelled("note-blocked", UNSAVED)))
                     .child(
                         Button::new("note-discard")
                             .small()
@@ -694,19 +709,20 @@ impl Shell {
                     )
             }))
             .children(form.conflict.then(|| {
-                notice(colors.stopped, cx).child(Self::conflict_warning(
+                notice(colors.stopped, cx).child(div().flex_1().min_w(px(0.)).child(Self::conflict_warning(
                     "note",
                     PAGE_CONFLICT,
                     Self::load_note,
                     |this, cx| this.save_note(true, cx),
                     cx,
-                ))
+                )))
             }))
-            .children(
-                page.is_some_and(|(_, gone)| gone)
-                    .then(|| notice(colors.stopped, cx).child(labelled("note-gone", GONE))),
-            )
-            .children(pending.then(|| notice(colors.waiting, cx).child(labelled("note-pending", PENDING))))
+            .children(page.is_some_and(|(_, gone)| gone).then(|| {
+                notice(colors.stopped, cx).child(div().flex_1().min_w(px(0.)).child(labelled("note-gone", GONE)))
+            }))
+            .children(pending.then(|| {
+                notice(colors.waiting, cx).child(div().flex_1().min_w(px(0.)).child(labelled("note-pending", PENDING)))
+            }))
             .children(
                 page.is_some_and(|(base, _)| base.author == WikiAuthor::Agent)
                     .then(|| labelled_as("note-agent-page", AGENT_PAGE, quiet(AGENT_PAGE, cx))),
@@ -718,8 +734,9 @@ impl Shell {
                 heading,
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_3()
+                    .gap_x_3()
                     .child(
                         div()
                             .text_lg()
@@ -761,6 +778,90 @@ impl Shell {
             .child(message)
             .children(self.note_history(cx))
             .children(sources);
-        view.child(editor)
+        view.child(editor).child(self.notes_side(cx))
+    }
+
+    /// The column beside the page: the checks of the notes.
+    fn notes_side(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .id("notes-side")
+            .w(px(300.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .overflow_y_scroll()
+            .child(self.checks_card(cx))
+    }
+
+    /// The findings of the last check, with a button to check now and one to dismiss each finding.
+    fn checks_card(&self, cx: &Context<Self>) -> impl IntoElement {
+        let result = match &self.state.lint_result {
+            None => String::new(),
+            Some(Ok(0)) => "No finding.".to_owned(),
+            Some(Ok(1)) => "1 finding.".to_owned(),
+            Some(Ok(found)) => format!("{found} findings."),
+            Some(Err(error)) => error.clone(),
+        };
+        let findings = self.state.lint_findings.as_deref().unwrap_or_default();
+        let count = match findings.len() {
+            0 => "Nothing to look at.".to_owned(),
+            1 => "1 finding to look at.".to_owned(),
+            count => format!("{count} findings to look at."),
+        };
+        let rows = findings.iter().map(|finding| {
+            let id = finding.id;
+            let text = finding_text(finding);
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .py_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(labelled_as(
+                    format!("finding-{id}"),
+                    text.clone(),
+                    div().text_sm().child(SharedString::from(text)),
+                ))
+                .child(
+                    div().flex().child(
+                        Button::new(SharedString::from(format!("dismiss-finding-{id}")))
+                            .small()
+                            .outline()
+                            .label("Dismiss")
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if let Some(profile) = this.notes.profile.clone() {
+                                    this.send(UiCommand::DismissFinding { profile, id });
+                                }
+                            })),
+                    ),
+                )
+        });
+        card(cx)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Checks"))
+            .child(quiet(CHECKS_HELP, cx))
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        Button::new("lint-notes")
+                            .small()
+                            .outline()
+                            .label("Check now")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                if let Some(profile) = this.notes.profile.clone() {
+                                    this.send(UiCommand::LintNotes { profile });
+                                }
+                            })),
+                    ),
+            )
+            .child(div().text_sm().child(labelled("lint-result", result)))
+            .child(labelled_as(
+                "findings-count",
+                format!("Findings: {}", findings.len()),
+                quiet(count, cx),
+            ))
+            .child(div().flex().flex_col().children(rows))
     }
 }

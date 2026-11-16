@@ -269,13 +269,16 @@ impl Engine {
         Ok(())
     }
 
-    /// The work that runs without a request: one step of each profile's evaluation run.
-    /// It ignores the kill switch, because it sends nothing. One failing profile does not stop the others.
+    /// The work that runs without a request: one step of each profile's evaluation run, and a check of
+    /// its notes when one is due. It ignores the kill switch, because it sends nothing to other people.
+    /// One failing profile does not stop the others.
     pub async fn background_tick(&self) -> Vec<(String, ApiError)> {
         let mut failures = Vec::new();
         for profile in self.app.list_profiles().unwrap_or_default() {
-            if let Err(error) = self.eval_tick(&profile.id).await {
-                failures.push((profile.id, error));
+            for result in [self.eval_tick(&profile.id).await, self.lint_tick(&profile.id).await] {
+                if let Err(error) = result {
+                    failures.push((profile.id.clone(), error));
+                }
             }
         }
         failures

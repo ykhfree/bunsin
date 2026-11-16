@@ -317,6 +317,9 @@ async fn a_token_reaches_only_its_own_profile() {
         };
         refused(kim.adopt_principle(other, adoption).await);
         refused(kim.dismiss_principle(other, 1).await);
+        refused(kim.lint_notes(other).await.map(|_| ()));
+        refused(kim.lint_findings(other).await.map(|_| ()));
+        refused(kim.dismiss_finding(other, 1).await);
         refused(
             kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
                 .await
@@ -1160,4 +1163,33 @@ async fn the_thresholds_are_set_over_http_with_a_conflict_check() {
     assert_eq!(kim.autonomy_thresholds("kim").await.unwrap(), Some(thresholds));
     let stale = kim.set_autonomy_thresholds("kim", update(None)).await;
     assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+}
+
+#[tokio::test]
+async fn the_notes_are_checked_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let off = kim.lint_notes("kim").await;
+    assert!(matches!(off, Err(ApiError::NotAllowed(_))), "{off:?}");
+    let mut config = kim.profile_config("kim").await.unwrap();
+    config.notes.stale_days = Some(1);
+    kim.set_profile_config("kim", config).await.unwrap();
+    let text = bunsin_core::wiki::WikiText {
+        title: "Deploy".into(),
+        summary: "When".into(),
+        body: "Fridays.".into(),
+    };
+    let update = bunsin_api::WikiPageUpdate {
+        text,
+        expected_revision: Some(0),
+    };
+    kim.set_wiki_page("kim", "deploy", update).await.unwrap();
+    rig.clock.fetch_add(2 * 86_400, std::sync::atomic::Ordering::SeqCst);
+    let found = kim.lint_notes("kim").await.unwrap();
+    assert_eq!(found.len(), 2);
+    assert_eq!(kim.lint_findings("kim").await.unwrap(), found);
+    kim.dismiss_finding("kim", found[0].id).await.unwrap();
+    assert_eq!(kim.lint_findings("kim").await.unwrap(), found[1..]);
+    let gone = kim.dismiss_finding("kim", 999).await;
+    assert!(matches!(gone, Err(ApiError::NotFound(_))), "{gone:?}");
 }
