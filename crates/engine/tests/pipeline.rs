@@ -651,6 +651,7 @@ async fn replay_hides_the_real_reply_and_leaves_no_inbox_item() {
     let case = ReplayCase {
         event: event("old-1", "when do we deploy?"),
         actual_reply: "REAL-ANSWER-THURSDAY".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     let result = rig.engine.replay("kim", case).await.unwrap();
 

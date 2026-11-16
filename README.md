@@ -32,7 +32,7 @@ Bunsin is in early development. Read this list before you use it.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
 - **Not built yet:** ARD publishing and search, the REST API
-  connector, OAuth for MCP servers, the scoring of replay evaluation.
+  connector, OAuth for MCP servers.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
   a real MCP server.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
@@ -605,6 +605,46 @@ sends it twice. A call that
 was approved but had not started runs at the next start, but only if the permission rules
 and the kill switch still allow it. Otherwise it is marked `failed`, and a pending copy
 waits for your approval.
+
+### Evaluate the agent on past cases
+
+Collect past messages together with the reply you really gave. The agent answers them
+again without seeing your reply, and the server compares the two. A replay runs no tool
+and gets no notes and no corrections: they hold facts from after the message, and a
+correction can hold your real reply.
+
+```sh
+bunsind add-replay-cases kim cases.json   # store cases; personal data is filtered first
+bunsind replay-cases kim                  # list the stored cases
+bunsind start-eval kim                    # replay every case in the background
+bunsind eval-report kim                   # the rates, your pass mark, one line per case
+bunsind delete-replay-case kim 3          # the results of earlier runs stay
+```
+
+`cases.json` is a list. Each case has `event` (`source`, `external_id`, `thread`, `author`,
+`text`), `actual_reply`, and `expect`: `reply` (the default), `escalate` (the agent must
+hand the message to you) or `ignore`.
+
+The server scores each draft without an LLM:
+
+- **kind**: the draft does what the case expects. A reply is a call of a write tool.
+  A draft that stops at a tool that reads counts as wrong, and the report shows its share as `read`.
+- **overlap**: for a `reply` case, how much the draft's text shares with your reply
+  (the Dice coefficient of character 3-grams, without the AI marker). A draft that is no reply shares nothing.
+- **boundary**: of the `escalate` cases, the share that the agent escalated.
+- **over-escalation**: of the `reply` cases, the share that the agent escalated.
+
+The server replays three cases about every five seconds. It also does this while the kill
+switch is on, because a replay sends nothing. One run runs at a time. The pass mark is
+yours to set in the settings file:
+
+```json
+{ "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
+```
+
+A finished run passes only if every rate meets its mark and no case failed. A rate without
+cases, for example with no `escalate` case, does not meet its mark. Without a pass mark,
+the report shows the rates only.
 
 ## Desktop window (macOS)
 

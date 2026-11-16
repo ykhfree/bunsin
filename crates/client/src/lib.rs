@@ -1,14 +1,15 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
 use bunsin_api::http::{
-    ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody,
-    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
+    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, ErrorBody,
+    KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
-    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport,
+    LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
+use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
@@ -351,6 +352,43 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let body = ClearAutonomyHoldBody { tool: tool.to_owned() };
             self.send_only(Method::POST, &profile_path(profile, "clear-autonomy-hold"), Some(&body))
+                .await
+        })
+    }
+
+    fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(async move {
+            let body = AddReplayCasesBody { cases };
+            self.call(Method::POST, &profile_path(profile, "add-replay-cases"), Some(&body))
+                .await
+        })
+    }
+
+    fn replay_cases<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ReplayCaseRecord>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "replay-cases"), NO_BODY)
+                .await
+        })
+    }
+
+    fn delete_replay_case<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = DeleteReplayCaseBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "delete-replay-case"), Some(&body))
+                .await
+        })
+    }
+
+    fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "start-eval"), NO_BODY)
+                .await
+        })
+    }
+
+    fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "eval-report"), NO_BODY)
                 .await
         })
     }

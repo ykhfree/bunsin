@@ -444,6 +444,7 @@ async fn replay_sees_no_notes() {
     let case = ReplayCase {
         event: event("old", "lee", "q"),
         actual_reply: "x".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     rig.engine.replay("kim", case).await.unwrap();
     let request = serde_json::to_string(&rig.llm.requests()).unwrap();

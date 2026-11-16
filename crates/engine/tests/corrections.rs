@@ -175,6 +175,7 @@ async fn a_replay_gets_no_correction_even_one_with_the_real_reply() {
     let case = ReplayCase {
         event: event("old", "lee", "who owns the release notes?"),
         actual_reply: "Mina owns them.".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     rig.engine.replay("kim", case).await.unwrap();
     let replayed = serde_json::to_string(rig.llm.requests().last().unwrap()).unwrap();

@@ -21,7 +21,7 @@ const CORRECTIONS_IN_PROMPT: usize = 5;
 
 /// The text of a call as the owner reads it: the texts at the places of the rule, without the
 /// AI marker, joined by blank lines. A call whose rule names no place gives its arguments as JSON.
-fn draft_text(args: &Map<String, Value>, outgoing: Option<&OutgoingText>, marker: &str) -> String {
+pub(crate) fn draft_text(args: &Map<String, Value>, outgoing: Option<&OutgoingText>, marker: &str) -> String {
     let places = outgoing
         .and_then(|outgoing| text_places(args, outgoing).ok())
         .unwrap_or_default();

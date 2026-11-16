@@ -3,6 +3,7 @@
 pub mod http;
 
 use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
@@ -47,6 +48,9 @@ pub struct ProfileConfig {
     /// When the window suggests that a tool run without asking. `None`: it suggests nothing.
     #[serde(default)]
     pub autonomy: Option<AutonomyThresholds>,
+    /// The owner's pass mark for replay evaluation.
+    #[serde(default)]
+    pub eval: EvalConfig,
 }
 
 impl ProfileConfig {
@@ -66,6 +70,7 @@ impl ProfileConfig {
             privacy: PrivacyConfig::default(),
             polls: Vec::new(),
             autonomy: None,
+            eval: EvalConfig::default(),
         }
     }
 }
@@ -416,6 +421,9 @@ pub struct ReplayCase {
     pub event: InboundEvent,
     /// What the person really answered. The agent never sees it.
     pub actual_reply: String,
+    /// What the owner expects the agent to do. The default is a reply.
+    #[serde(default)]
+    pub expect: Expect,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -423,6 +431,24 @@ pub struct ReplayResult {
     pub proposal: Option<Proposal>,
     pub error: Option<String>,
     pub actual_reply: String,
+    /// The score of the proposal, computed without an LLM. `None` if there is no proposal.
+    #[serde(default)]
+    pub score: Option<CaseScore>,
+}
+
+/// The newest evaluation run, with its results and rates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalReport {
+    /// `None` if no run was started.
+    pub run: Option<EvalRun>,
+    /// The cases the run has not replayed yet. 0 when it is done.
+    pub remaining: u32,
+    pub results: Vec<EvalResult>,
+    pub summary: EvalSummary,
+    /// The owner's pass mark, from the settings.
+    pub pass: Option<EvalPass>,
+    /// Whether the finished run meets the pass mark. `None` while it runs or without a mark.
+    pub passed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -545,4 +571,16 @@ pub trait EngineApi: Send + Sync {
     fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>>;
     /// Clears the hold of a tool. Its calls then follow its step again.
     fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// Stores replay cases after the privacy filter. Returns their IDs, in the order of `cases`.
+    fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>>;
+    /// The stored replay cases, oldest first, at most 200.
+    fn replay_cases<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ReplayCaseRecord>>>;
+    /// Deletes a replay case. The results of earlier runs stay.
+    fn delete_replay_case<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Starts an evaluation run of every stored case and returns its ID. The server replays a few
+    /// cases at a time in the background, also while the kill switch is on: a replay sends nothing.
+    /// Refused while a run is running or if there is no case.
+    fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>>;
+    /// The newest evaluation run and its results.
+    fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>>;
 }

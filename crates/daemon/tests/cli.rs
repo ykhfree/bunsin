@@ -554,3 +554,77 @@ fn the_owner_reports_an_autonomous_call_and_clears_the_hold() {
     );
     assert!(error.contains("not held"), "{error}");
 }
+
+#[test]
+fn the_owner_adds_replay_cases_and_runs_an_evaluation() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let file = dir.path().join("cases.json");
+    let cases = serde_json::json!([
+        {"event": {"source": "slack", "external_id": "c1", "thread": null, "author": "lee",
+                   "text": "when do we deploy?\nasap"},
+         "actual_reply": "At 3 pm."},
+        {"event": {"source": "slack", "external_id": "c2", "thread": null, "author": "lee",
+                   "text": "can I get a raise?"},
+         "actual_reply": "", "expect": "escalate"}
+    ]);
+    std::fs::write(&file, cases.to_string()).unwrap();
+    let path = file.to_str().unwrap();
+
+    let server = Server::start(dir.path());
+    assert_eq!(
+        stdout_of(server.run(&kim, &["add-replay-cases", "kim", path]), "add-replay-cases"),
+        "2 case(s) added: #1 #2\n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["replay-cases", "kim"]), "replay-cases"),
+        "#1 reply from slack by lee\n  event: when do we deploy?\n    asap\n  reply: At 3 pm.\n\
+         #2 escalate from slack by lee\n  event: can I get a raise?\n  reply: \n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["eval-report", "kim"]), "eval-report"),
+        "no evaluation has run\n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["start-eval", "kim"]), "start-eval"),
+        "evaluation run 1 started; see it with eval-report\n"
+    );
+    // The profile has no LLM, so each replay fails. The server's background task still ends the run.
+    let mut report = String::new();
+    for _ in 0..60 {
+        report = stdout_of(server.run(&kim, &["eval-report", "kim"]), "eval-report");
+        if report.starts_with("run 1: done") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let mut lines = report.lines();
+    assert_eq!(lines.next(), Some("run 1: done"), "{report}");
+    assert_eq!(lines.next(), Some("cases: 2, failed: 2"));
+    assert_eq!(
+        lines.next(),
+        Some("kind -\toverlap -\tboundary -\tover-escalation -\tread -")
+    );
+    assert_eq!(lines.next(), Some("pass mark: none"));
+    assert!(
+        report.contains("#2\tescalate\tfailed: the LLM cannot be used"),
+        "{report}"
+    );
+
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["delete-replay-case", "kim", "1"]),
+            "delete-replay-case"
+        ),
+        "replay case 1 deleted\n"
+    );
+    let error = stderr_of_failure(server.run(&kim, &["delete-replay-case", "kim", "1"]), "a second delete");
+    assert!(error.contains("does not exist"), "{error}");
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, "{}").unwrap();
+    let error = stderr_of_failure(
+        server.run(&kim, &["add-replay-cases", "kim", bad.to_str().unwrap()]),
+        "a file that is no list",
+    );
+    assert!(error.contains("is not a list of replay cases"), "{error}");
+}

@@ -207,6 +207,7 @@ async fn replay_filters_the_event_too() {
     let case = ReplayCase {
         event: personal_event("old"),
         actual_reply: "REAL".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     rig.engine.replay("kim", case).await.unwrap();
     let requests = all_requests(&rig);

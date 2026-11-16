@@ -235,6 +235,25 @@
     `min_unchanged_percent`가 100을 넘거나 `window_days`가 0이면 저장을 거부한다.
   - 엔진은 단계를 올리지 않는다. 소유자만 `set_permissions`(창, `bunsind rule-set`)로 올린다. delete는 제안하지 않고 자율이 되지 않는다.
   - `autonomy`(`POST .../autonomy`, `bunsind autonomy`): write·delete 규칙과 보류된 도구마다 개수, 보류, 제안을 돌려준다.
+- **재현 평가(PLAN 4.7)**: 표 `replay_cases(id, event, actual_reply, expect, created_at)`, `eval_runs(id, state, started_at, finished_at)`,
+  `eval_results(run_id, case_id, expect, kind, kind_ok, overlap_permille, draft, error, judge)`.
+  - 사례의 이벤트와 실제 답은 저장하기 전에 개인정보 필터를 거친다. `expect`는 `reply`(기본값), `escalate`, `ignore`이다.
+  - 재현은 도구를 실행하지 않고, notes와 교정 기록을 받지 않는다(13절). LLM 호출 로그의 purpose는 `replay`이다.
+  - 채점은 LLM 없이 한다(core `eval`). 종류: 쓰기 규칙의 도구 호출은 `reply`, 읽기 규칙이나 notes 도구의 호출은 `read`,
+    delete 규칙이나 규칙 없는 도구의 호출은 `other_tool`이다. `read`는 불일치로 세고 비율을 따로 낸다.
+    겹침: 소문자로 바꾸고 공백을 하나로 줄인 글의 문자 3-gram Dice 계수(천분율). 초안 글은 교정 기록과 같은 `draft_text`(AI 표시 제외)이다.
+    `reply` 사례에만 있고, 답이 아닌 초안은 0이다. 경계: `escalate` 사례 중 넘긴 비율. 과잉 넘김: `reply` 사례 중 넘긴 비율.
+    비율은 내림한 백분율이고, 셀 사례가 없으면 `None`이다. 실패한 재현(LLM 오류)은 어느 비율에도 들지 않는다.
+  - 결과 행은 `expect`를 함께 저장한다. 사례를 지워도 보고서가 바뀌지 않게 하기 위해서이다. 그래서 설계의 `eval_runs.summary` 열은 두지 않고 결과에서 계산한다.
+  - 초안 글과 오류 글은 저장하기 전에 필터를 거친다. 오류는 upstream의 응답 본문을 담을 수 있기 때문이다.
+  - `start_eval`은 실행 행만 만든다. 실행은 한 번에 하나이고, 사례가 없으면 거부한다. 서버의 poll 작업이 `poll_all()` 뒤에
+    `background_tick()`을 부르고, 이것이 프로필마다 실행 중인 run의 사례를 3개씩 재현한다. 남은 사례가 없으면 run을 `done`으로 바꾸고 감사 `eval_finished`를 남긴다.
+    진행은 저장된 행에서만 정한다(결과가 없는 사례). 그래서 재시작 뒤에도 이어진다. 실행 중에 더한 사례도 그 run에 든다.
+  - 재현은 밖에 아무것도 보내지 않으므로 정지 스위치와 상관없이 진행한다. 기각: 요청 하나에서 전체 실행. 종료 유예 300초를 넘는다.
+  - 통과 기준은 소유자가 정한다: 설정 `eval.pass: {kind_percent, overlap_percent, boundary_percent}`(serde 기본값 없음). 100을 넘으면 저장을 거부한다.
+    끝난 run은 실패한 사례가 없고 세 비율이 모두 기준 이상일 때만 통과한다. `None`인 비율은 기준을 넘지 못한다(경계 사례가 없는 세트는 통과하지 않는다).
+  - API: `add_replay_cases`, `replay_cases`(200개), `delete_replay_case`, `start_eval`, `eval_report`(최신 run). 경로는 `POST .../<kebab-case 이름>`, 명령은 같은 이름의 `bunsind` 명령이다.
+    `replay`(사례 하나를 바로 재현)는 결과에 `score`를 더한다.
 - 비밀 값은 설정에 저장하지 않는다. 9절을 본다.
 
 ## 5. LLM 어댑터
@@ -613,7 +632,8 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
 | agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기) | 구현, 테스트 있음. 점검과 자동 반영은 없음. |
-| 원칙 후보 추출, 재현 평가의 채점 | 없음 |
+| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI). 창에는 없음. |
+| 원칙 후보 추출 | 없음 |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI). 창에는 없음. |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |

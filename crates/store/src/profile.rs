@@ -1,3 +1,5 @@
+mod learning;
+
 use crate::{Result, StoreError};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
@@ -354,6 +356,7 @@ impl ProfileStore {
         let mut db = Connection::open(dir.join("agent.db"))?;
         db.busy_timeout(crate::BUSY_TIMEOUT)?;
         db.execute_batch(SCHEMA)?;
+        db.execute_batch(learning::SCHEMA)?;
         // A database from before events could be retried lacks two columns.
         let has_status: bool = db.query_row(
             "SELECT EXISTS (SELECT 1 FROM pragma_table_info('events') WHERE name = 'status')",

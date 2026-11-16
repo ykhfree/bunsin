@@ -5,6 +5,7 @@
 mod autonomy;
 mod connections;
 mod corrections;
+mod eval;
 mod llm_log;
 mod notes;
 mod poll_settings;
@@ -17,12 +18,13 @@ pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected,
-    LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
+    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport,
+    Expected, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
     PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
+use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
@@ -298,6 +300,9 @@ impl Engine {
         }
         if let Some(thresholds) = &config.autonomy {
             thresholds.check().map_err(ApiError::Invalid)?;
+        }
+        if let Some(pass) = &config.eval.pass {
+            pass.check().map_err(ApiError::Invalid)?;
         }
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
@@ -1003,31 +1008,6 @@ impl Engine {
         }
     }
 
-    async fn replay_case(&self, profile: &str, case: ReplayCase) -> ApiResult<ReplayResult> {
-        let ctx = self.ctx(profile).await?;
-        let store = &ctx.store;
-        // Only the event goes to the LLM. The real reply is kept for the comparison.
-        let event = Self::redact_event(&ctx.redactor, case.event, &mut RedactionCounts::new());
-        let key = event.dedupe_key();
-        // Replay runs no tool. A search made today would find the real reply and spoil the comparison.
-        let (proposed, replies) = self.propose(&ctx, &event, &key, false, Purpose::Replay).await?;
-        for reply in &replies {
-            let stored = ctx.redactor.redact(reply, &mut RedactionCounts::new());
-            store
-                .put_artifact("replay_reply", stored.as_bytes(), self.now(), Some(&key), None)
-                .map_err(store_error)?;
-        }
-        let (proposal, error) = match proposed {
-            Proposed::Ready { proposal, .. } => (Some(proposal), None),
-            Proposed::Retry(error) | Proposed::Stop(error) => (None, Some(error)),
-        };
-        Ok(ReplayResult {
-            proposal,
-            error,
-            actual_reply: case.actual_reply,
-        })
-    }
-
     /// Sends one request to the saved LLM endpoint. The request has the reply schema and the output
     /// limit of a real request, because an endpoint can accept a plain request and refuse those.
     /// It holds no data of the profile. It runs with the kill switch on: it changes nothing.
@@ -1332,6 +1312,26 @@ impl EngineApi for Engine {
 
     fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.clear_hold(profile, tool) })
+    }
+
+    fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(async move { self.add_cases(profile, cases) })
+    }
+
+    fn replay_cases<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ReplayCaseRecord>>> {
+        Box::pin(async move { self.read_cases(profile) })
+    }
+
+    fn delete_replay_case<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.delete_case(profile, id) })
+    }
+
+    fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>> {
+        Box::pin(async move { self.start_run(profile) })
+    }
+
+    fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>> {
+        Box::pin(async move { self.read_eval_report(profile) })
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {

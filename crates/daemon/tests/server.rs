@@ -184,6 +184,7 @@ async fn an_owner_works_through_the_server_like_through_the_engine() {
     let case = ReplayCase {
         event: event("old"),
         actual_reply: "REAL".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     let result = kim.replay("kim", case).await.unwrap();
     assert_eq!(result.actual_reply, "REAL");
@@ -292,6 +293,11 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.autonomy(other).await.map(|_| ()));
         refused(kim.report_autonomous(other, inbox_id).await);
         refused(kim.clear_autonomy_hold(other, "slack/post").await);
+        refused(kim.add_replay_cases(other, Vec::new()).await.map(|_| ()));
+        refused(kim.replay_cases(other).await.map(|_| ()));
+        refused(kim.delete_replay_case(other, 1).await);
+        refused(kim.start_eval(other).await.map(|_| ()));
+        refused(kim.eval_report(other).await.map(|_| ()));
         refused(
             kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
                 .await
@@ -320,6 +326,7 @@ async fn a_token_reaches_only_its_own_profile() {
                 ReplayCase {
                     event: event("r"),
                     actual_reply: "x".into(),
+                    expect: bunsin_core::eval::Expect::Reply,
                 },
             )
             .await
@@ -1055,4 +1062,33 @@ async fn an_autonomous_call_is_reported_and_its_hold_cleared_over_http() {
     rig.llm.reply(&post("Once more."), 10);
     let outcome = kim.ingest("kim", event("e3")).await.unwrap();
     assert!(matches!(outcome, Outcome::Executed { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn an_evaluation_runs_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let case = ReplayCase {
+        event: event("old-1"),
+        actual_reply: "We deploy at 3 pm.".into(),
+        expect: bunsin_core::eval::Expect::Reply,
+    };
+    let ids = kim.add_replay_cases("kim", vec![case]).await.unwrap();
+    assert_eq!(kim.replay_cases("kim").await.unwrap()[0].id, ids[0]);
+    rig.llm.reply(&post("We deploy at 3 pm."), 10);
+    let run = kim.start_eval("kim").await.unwrap();
+    let again = kim.start_eval("kim").await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+    // The server's poll task replays the cases. This test has none, so it ticks here.
+    assert!(rig.engine.background_tick().await.is_empty());
+    assert!(rig.engine.background_tick().await.is_empty());
+    let report = kim.eval_report("kim").await.unwrap();
+    assert_eq!(
+        report.run.as_ref().map(|r| (r.id, r.state)),
+        Some((run, bunsin_core::eval::RunState::Done))
+    );
+    assert_eq!(report.summary.kind_percent, Some(100));
+    kim.delete_replay_case("kim", ids[0]).await.unwrap();
+    let gone = kim.delete_replay_case("kim", ids[0]).await;
+    assert!(matches!(gone, Err(ApiError::NotFound(_))), "{gone:?}");
 }

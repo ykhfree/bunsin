@@ -71,6 +71,7 @@ async fn each_purpose_is_logged_and_added_up_apart() {
     let case = ReplayCase {
         event: event("old-1", "lee", "when is the deploy?"),
         actual_reply: "Friday.".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     rig.engine.replay("kim", case.clone()).await.unwrap();
     rig.llm.reply(&ignore(), 5);

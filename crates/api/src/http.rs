@@ -33,6 +33,11 @@
 //! | POST | `/v1/profiles/{p}/autonomy` | | `Autonomy` |
 //! | POST | `/v1/profiles/{p}/report-autonomous` | `ReportAutonomousBody` | |
 //! | POST | `/v1/profiles/{p}/clear-autonomy-hold` | `ClearAutonomyHoldBody` | |
+//! | POST | `/v1/profiles/{p}/add-replay-cases` | `AddReplayCasesBody` | `[i64]` |
+//! | POST | `/v1/profiles/{p}/replay-cases` | | `[ReplayCaseRecord]` |
+//! | POST | `/v1/profiles/{p}/delete-replay-case` | `DeleteReplayCaseBody` | |
+//! | POST | `/v1/profiles/{p}/start-eval` | | `i64` |
+//! | POST | `/v1/profiles/{p}/eval-report` | | `EvalReport` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -49,7 +54,7 @@
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 
-use crate::{ApiError, Edit, Resolution};
+use crate::{ApiError, Edit, ReplayCase, Resolution};
 use serde::{Deserialize, Serialize};
 
 pub const PROFILES: &str = "/v1/profiles";
@@ -94,6 +99,16 @@ pub struct ReportAutonomousBody {
 pub struct ClearAutonomyHoldBody {
     /// `<connector>/<tool>`.
     pub tool: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddReplayCasesBody {
+    pub cases: Vec<ReplayCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteReplayCaseBody {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

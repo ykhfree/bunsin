@@ -423,6 +423,41 @@ enum Command {
         /// <connector>/<tool>
         tool: String,
     },
+    /// Store replay cases from a JSON file: an array of objects with `event`, `actual_reply` and
+    /// optional `expect` (`reply`, `escalate` or `ignore`; the default is `reply`). The server
+    /// filters personal data before it stores them.
+    AddReplayCases {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        file: PathBuf,
+    },
+    /// Show the stored replay cases, oldest first.
+    ReplayCases {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Delete a replay case. The results of earlier runs stay.
+    DeleteReplayCase {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
+    /// Start an evaluation of every stored case. The server replays a few cases every few seconds.
+    /// Read the result with `eval-report`.
+    StartEval {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Show the newest evaluation run: its rates, the pass mark, and one line per case.
+    EvalReport {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -498,6 +533,83 @@ fn autonomy_lines(autonomy: &bunsin_api::Autonomy) -> Vec<String> {
             c.autonomous,
             c.autonomous_failed
         ));
+    }
+    lines
+}
+
+/// A replay case as indented lines. A line break in a text starts an indented line too.
+fn case_text(case: &bunsin_core::eval::ReplayCaseRecord) -> String {
+    let e = &case.event;
+    format!(
+        "#{} {} from {} by {}\n  event: {}\n  reply: {}\n",
+        case.id,
+        case.expect.as_str(),
+        e.source,
+        e.author,
+        e.text.replace('\n', "\n    "),
+        case.actual_reply.replace('\n', "\n    ")
+    )
+}
+
+/// The report of the newest evaluation run as lines.
+fn eval_lines(report: &bunsin_api::EvalReport) -> Vec<String> {
+    let Some(run) = &report.run else {
+        return vec!["no evaluation has run".to_owned()];
+    };
+    let rate = |rate: Option<u32>| rate.map_or_else(|| "-".to_owned(), |rate| format!("{rate}%"));
+    let s = &report.summary;
+    let state = match run.state {
+        bunsin_core::eval::RunState::Running => format!("running, {} case(s) left", report.remaining),
+        bunsin_core::eval::RunState::Done => "done".to_owned(),
+    };
+    let mark = match (&report.pass, report.passed) {
+        (None, _) => "pass mark: none".to_owned(),
+        (Some(p), passed) => format!(
+            "pass mark: kind {}%, overlap {}%, boundary {}%: {}",
+            p.kind_percent,
+            p.overlap_percent,
+            p.boundary_percent,
+            match passed {
+                Some(true) => "passed",
+                Some(false) => "not passed",
+                None => "not judged yet",
+            }
+        ),
+    };
+    let mut lines = vec![
+        format!("run {}: {state}", run.id),
+        format!("cases: {}, failed: {}", s.cases, s.errors),
+        format!(
+            "kind {}\toverlap {}\tboundary {}\tover-escalation {}\tread {}",
+            rate(s.kind_percent),
+            rate(s.overlap_percent),
+            rate(s.boundary_percent),
+            rate(s.over_escalation_percent),
+            rate(s.read_percent)
+        ),
+        mark,
+        "case\texpect\tdraft\tkind\toverlap".to_owned(),
+    ];
+    for result in &report.results {
+        let line = match (&result.score, &result.error) {
+            (Some(score), _) => format!(
+                "#{}\t{}\t{}\t{}\t{}",
+                result.case_id,
+                result.expect.as_str(),
+                score.kind.as_str(),
+                if score.kind_ok { "ok" } else { "wrong" },
+                score
+                    .overlap_permille
+                    .map_or_else(|| "-".to_owned(), |permille| format!("{}%", permille / 10))
+            ),
+            (None, error) => format!(
+                "#{}\t{}\tfailed: {}",
+                result.case_id,
+                result.expect.as_str(),
+                error.as_deref().unwrap_or_default()
+            ),
+        };
+        lines.push(line);
     }
     lines
 }
@@ -1057,6 +1169,35 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .await
                 .map_err(text)?;
             println!("hold of {tool} cleared");
+        }
+        Command::AddReplayCases { remote, profile, file } => {
+            let content = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            let cases: Vec<bunsin_api::ReplayCase> = serde_json::from_str(&content)
+                .map_err(|e| format!("{} is not a list of replay cases: {e}", file.display()))?;
+            let ids = connect(&remote)?
+                .add_replay_cases(&profile, cases)
+                .await
+                .map_err(text)?;
+            let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+            println!("{} case(s) added: {}", ids.len(), ids.join(" "));
+        }
+        Command::ReplayCases { remote, profile } => {
+            for case in connect(&remote)?.replay_cases(&profile).await.map_err(text)? {
+                print!("{}", case_text(&case));
+            }
+        }
+        Command::DeleteReplayCase { remote, profile, id } => {
+            connect(&remote)?.delete_replay_case(&profile, id).await.map_err(text)?;
+            println!("replay case {id} deleted");
+        }
+        Command::StartEval { remote, profile } => {
+            let run = connect(&remote)?.start_eval(&profile).await.map_err(text)?;
+            println!("evaluation run {run} started; see it with eval-report");
+        }
+        Command::EvalReport { remote, profile } => {
+            for line in eval_lines(&connect(&remote)?.eval_report(&profile).await.map_err(text)?) {
+                println!("{line}");
+            }
         }
         Command::Reject {
             remote,

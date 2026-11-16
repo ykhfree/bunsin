@@ -11,14 +11,15 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
-    ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody,
-    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
+    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, ErrorBody,
+    KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
-    ApiError, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
-    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    ApiError, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, EvalReport, LlmTest,
+    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
+use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
@@ -396,6 +397,49 @@ async fn clear_autonomy_hold(
     Ok(Json(engine.clear_autonomy_hold(&profile, &body.tool).await?))
 }
 
+async fn add_replay_cases(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<AddReplayCasesBody>,
+) -> Reply<Vec<i64>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.add_replay_cases(&profile, body.cases).await?))
+}
+
+async fn replay_cases(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<ReplayCaseRecord>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.replay_cases(&profile).await?))
+}
+
+async fn delete_replay_case(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<DeleteReplayCaseBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.delete_replay_case(&profile, body.id).await?))
+}
+
+async fn start_eval(State(engine): State<Arc<Engine>>, headers: HeaderMap, Path(profile): Path<String>) -> Reply<i64> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.start_eval(&profile).await?))
+}
+
+async fn eval_report(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<EvalReport> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.eval_report(&profile).await?))
+}
+
 async fn wiki_index(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -468,6 +512,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("autonomy"), post(autonomy))
         .route(&profile("report-autonomous"), post(report_autonomous))
         .route(&profile("clear-autonomy-hold"), post(clear_autonomy_hold))
+        .route(&profile("add-replay-cases"), post(add_replay_cases))
+        .route(&profile("replay-cases"), post(replay_cases))
+        .route(&profile("delete-replay-case"), post(delete_replay_case))
+        .route(&profile("start-eval"), post(start_eval))
+        .route(&profile("eval-report"), post(eval_report))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(
@@ -612,6 +661,9 @@ impl Poller {
             loop {
                 for (profile, error) in engine.poll_all().await {
                     eprintln!("poll of profile {profile} failed: {error}");
+                }
+                for (profile, error) in engine.background_tick().await {
+                    eprintln!("the background work of profile {profile} failed: {error}");
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(POLL_TICK) => {}
