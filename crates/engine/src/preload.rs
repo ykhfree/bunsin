@@ -2,7 +2,9 @@
 //! facts of its result as page changes. The changes go to the inbox like any other.
 //!
 //! The call passes the checks of a poll: a `read` rule and a policy that allows it now. The result is
-//! the source of the changes. A proposal other than `ignore` is never run; the audit log records it.
+//! the source of the changes, and it reaches the LLM only as quoted data. Other people wrote it, so the
+//! event is `outside` and its changes always wait for the owner, also with `notes.auto_apply`.
+//! A proposal other than `ignore` is never run; the audit log records it.
 
 use crate::llm_log::Purpose;
 use crate::{Engine, Proposed, store_error};
@@ -22,21 +24,22 @@ impl Engine {
         let PreloadNotes { tool, args } = request;
         let result = self.read_once(&ctx, &tool, &args, "preload").await?;
         let owner = &ctx.config.owner_name;
+        // The event holds only the fixed request. The result follows it as a quoted tool result.
         let event = InboundEvent {
             source: PRELOAD_SOURCE.to_owned(),
             external_id: format!("{tool} at {}", self.now()),
             thread: None,
             author: owner.clone(),
             text: format!(
-                "{owner} asked you to read the result of `{tool}` below and keep its durable facts in your notes. \
-                 Propose the pages in `wiki_updates` and choose the kind `ignore`.\n\n{result}"
+                "{owner} asks you to keep the durable facts of the result of `{tool}` in your notes. \
+                 The result follows. Propose the pages in `wiki_updates` and choose the kind `ignore`."
             ),
-            channel: Channel::Owner,
+            channel: Channel::Outside,
         };
         let key = event.dedupe_key();
-        let first = ReadNote { tool, args };
+        let first = (ReadNote { tool, args }, result);
         let (proposed, replies) = self
-            .propose(&ctx, &event, &key, true, vec![first], Purpose::Preload)
+            .propose(&ctx, &event, &key, true, Some(first), Purpose::Preload)
             .await?;
         for reply in &replies {
             let stored = ctx.redactor.redact(reply, &mut RedactionCounts::new());

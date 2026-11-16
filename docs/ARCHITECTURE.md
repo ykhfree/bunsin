@@ -675,10 +675,11 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 
 - `preload_notes{tool, args}`(`POST .../preload-notes`, `bunsind preload-notes`, 창의 "Read into the notes"): 소유자가 시작한다.
   도구는 `read` 규칙이 있고 `decide`가 `Execute`여야 한다(poll의 `fetch`, 원칙 후보의 read 출처와 같은 `read_once`). 한 번 부른다.
-- 결과(필터를 거치고 20,000자로 자른 글)를 본문으로 하는 이벤트(source `bunsin.preload`, 작성자는 소유자, `channel` `owner`)를 만들고,
-  그 읽기를 첫 읽기로 넣은 채 `propose`를 돌린다(LLM 호출 로그의 purpose `preload`). 그래서 변경안의 출처 규칙이 그대로 지켜진다:
-  출처는 이벤트 줄과 그 도구의 인자이다. LLM은 평소의 한도 안에서 더 읽을 수 있다.
-- 변경안은 `file_wiki_changes`로 승인함에 간다(자동 반영 규칙 포함). `ignore`가 아닌 제안은 실행하지 않고 감사 `preload_proposal_skipped`(종류만)를 남긴다.
+- 고정된 요청만 담은 이벤트(source `bunsin.preload`, 작성자는 소유자, `channel` `outside`)를 만들고, 그 읽기를 첫 읽기로 넘겨
+  `propose`를 돌린다(LLM 호출 로그의 purpose `preload`). 결과(필터를 거치고 20,000자로 자른 글)는 이벤트 뒤에 `<data source="tool-result">`로만 들어간다.
+  요청 글과 섞지 않는다. 변경안의 출처 규칙이 그대로 지켜진다: 출처는 이벤트 줄과 그 도구의 인자이다. LLM은 평소의 한도 안에서 더 읽을 수 있다.
+- 변경안은 `file_wiki_changes`로 승인함에 가고, 자동 반영은 하지 않는다. 소유자가 시작했지만 읽은 글은 다른 사람이 썼기 때문이다.
+  두 겹으로 막는다: 이벤트의 `channel`이 `outside`이고, `file_wiki_changes`가 source `bunsin.preload`의 변경안을 자동 반영하지 않는다. `ignore`가 아닌 제안은 실행하지 않고 감사 `preload_proposal_skipped`(종류만)를 남긴다.
   제안이 실패하면(수리 뒤에도 형식 오류, LLM 오류) 거부하고 아무것도 넣지 않는다. 감사 `notes_preloaded`는 도구와 변경안 수만 남긴다.
 - 실제 Confluence나 Jira 검색 도구로는 실행해 보지 않았다.
 

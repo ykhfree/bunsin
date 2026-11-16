@@ -651,9 +651,10 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 
 - The tool needs a rule with the class `read`, and its tool list must be the approved one, as for a poll.
   Bunsin calls it once with your arguments.
-- The agent gets the result (after the privacy filter) and proposes pages. It may read more
-  tools and pages, with the usual limits. The changes go to the inbox like other page changes,
-  with the read as their source. With `notes.auto_apply`, they follow the rules above.
+- The agent gets the result after the privacy filter, as quoted data, and proposes pages. It may
+  read more tools and pages, with the usual limits. The changes go to the inbox like other page
+  changes, with the read as their source. They always wait for you, also with `notes.auto_apply`:
+  you started the read, but other people wrote what it found.
 - Whatever else the agent proposes (a reply, an escalation) is not run. The audit log records it.
 - In the window, the **Read into the notes** card of the Notes view does the same.
 

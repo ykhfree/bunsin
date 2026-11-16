@@ -134,8 +134,10 @@ impl Engine {
         let page_count = store.wiki_index().map_err(store_error)?.len();
         let mut filed = Vec::new();
         // An event from outside can be written to steer the agent, so its changes always wait for the owner.
+        // So do the changes of a pre-load: the owner starts it, but other people wrote what it read.
         let may_apply = ctx.config.notes.auto_apply
             && event.channel == Channel::Owner
+            && event.source != crate::PRELOAD_SOURCE
             && !store.kill_switch().map_err(store_error)?;
         for update in updates {
             let existing = store.wiki_page(&update.slug).map_err(store_error)?;

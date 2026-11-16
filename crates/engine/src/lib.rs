@@ -418,15 +418,16 @@ impl Engine {
     ///
     /// If the LLM asks for a tool that reads, and `allow_reads` is set, the tool runs and the
     /// LLM gets its result and is asked again. This repeats until the LLM proposes something
-    /// else. An invalid reply gets one repair request. `reads` holds the reads made before, whose
-    /// results are in the event. Returns the outcome and every raw reply.
+    /// else. An invalid reply gets one repair request. `first_read` is a read made before the request, with
+    /// its filtered result: the result goes in as quoted data, like the result of a later read.
+    /// Returns the outcome and every raw reply.
     async fn propose(
         &self,
         ctx: &Ctx,
         event: &InboundEvent,
         key: &str,
         allow_reads: bool,
-        mut reads: Vec<ReadNote>,
+        first_read: Option<(ReadNote, String)>,
         purpose: Purpose,
     ) -> ApiResult<(Proposed, Vec<String>)> {
         let Ctx {
@@ -463,6 +464,15 @@ impl Engine {
             },
             &mut counts,
         );
+        let mut reads = Vec::new();
+        if let Some((note, text)) = first_read {
+            let quoted = bunsin_core::context::quote_untrusted("tool-result", &text);
+            request.messages[0].content.push_str(&format!(
+                "\nResult of `{}`, read before this request:\n{quoted}",
+                note.tool
+            ));
+            reads.push(note);
+        }
 
         let mut replies = Vec::new();
         let mut pages_read: BTreeSet<String> = BTreeSet::new();
@@ -818,7 +828,7 @@ impl Engine {
         event: &InboundEvent,
     ) -> ApiResult<Outcome> {
         let ctx = self.ctx(profile).await?;
-        let (proposed, replies) = self.propose(&ctx, event, key, true, Vec::new(), Purpose::Event).await?;
+        let (proposed, replies) = self.propose(&ctx, event, key, true, None, Purpose::Event).await?;
         for reply in &replies {
             // The LLM can write personal data that it made up or was told in the owner's
             // principles. The stored copy of its reply passes the filter like other text.
