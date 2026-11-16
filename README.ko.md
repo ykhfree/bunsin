@@ -278,6 +278,26 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - 원칙은 소유자의 지시이므로 개인정보 필터가 바꾸지 않습니다.
 - 감사 로그에는 변경의 개수만 남고, 원칙의 글은 남지 않습니다.
 
+#### 지난 글에서 찾은 원칙 후보
+
+서버는 사용자의 지난 글이 따르는 규칙을 LLM에 물을 수 있습니다. LLM은 후보만 제안합니다.
+사용자가 채택하기 전에는 어떤 후보도 원칙이 되지 않습니다.
+
+```sh
+bunsind extract-principles kim --from corrections     # 초안을 고친 기록과 이유
+bunsind extract-principles kim --from replay-cases    # 재현 사례의 실제 답
+bunsind extract-principles kim --from read --tool slack/search --args '{"query":"from:me"}'
+bunsind principle-candidates kim
+bunsind adopt-principle kim 4                          # 4번 후보를 원칙 목록 끝에 더함
+bunsind adopt-principle kim 5 --text "Answer in one line."   # 고친 글을 대신 더함
+bunsind dismiss-principle kim 6
+```
+
+- 글은 개인정보 필터를 거친 뒤 인용 데이터로 LLM에 갑니다. `read` 출처는 `read` 규칙이 있는 도구 하나를 poll과 같은 검사를 거쳐 한 번 부릅니다.
+- 서버는 요청마다 후보를 최대 10개 남깁니다. 300자를 넘거나, `[REDACTED:...]` 자리표시자를 담거나, 근거로 인용한 글이 사용자의 글에 없는 후보는 버립니다.
+  이미 원칙이거나 후보인 글도 버립니다. 그래서 기각한 후보는 다시 나오지 않습니다.
+- 채택은 원칙 저장과 같은 경로로 글 하나를 더하고, 한도도 같습니다. 원칙을 읽은 뒤에 원칙이 바뀌었으면 채택은 거부됩니다(HTTP 412).
+
 ### 권한 규칙
 
 창의 **Permissions** 화면은 승인된 도구를 하나씩 보여 주고, 버튼으로 규칙을 정하게 합니다.

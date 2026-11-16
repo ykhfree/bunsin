@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod autonomy;
+pub mod candidates;
 pub mod context;
 pub mod eval;
 pub mod event;

@@ -628,3 +628,69 @@ fn the_owner_adds_replay_cases_and_runs_an_evaluation() {
     );
     assert!(error.contains("is not a list of replay cases"), "{error}");
 }
+
+#[test]
+fn the_owner_extracts_adopts_and_dismisses_principle_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let first = store
+        .add_principle_candidate("Ask first.", "ask me\nfirst", "corrections", 5)
+        .unwrap()
+        .to_string();
+    let second = store
+        .add_principle_candidate("Be brief.", "short", "read:slack/search", 6)
+        .unwrap()
+        .to_string();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["principle-candidates", "kim"]),
+            "principle-candidates"
+        ),
+        format!(
+            "#{second} new from read:slack/search\n  text: Be brief.\n  evidence: short\n\
+             #{first} new from corrections\n  text: Ask first.\n  evidence: ask me\n    first\n"
+        )
+    );
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["adopt-principle", "kim", &first, "--text", "Ask me first."]),
+            "adopt-principle"
+        ),
+        format!("candidate {first} added to the principles\n")
+    );
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["dismiss-principle", "kim", &second]),
+            "dismiss-principle"
+        ),
+        format!("candidate {second} dismissed\n")
+    );
+    let error = stderr_of_failure(
+        server.run(&kim, &["adopt-principle", "kim", &second]),
+        "adopt a dismissed one",
+    );
+    assert!(error.contains("dismissed already"), "{error}");
+    let config = stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show");
+    let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(config["principles"], serde_json::json!(["Ask me first."]));
+
+    // The checks of the options run before the server is asked.
+    let error = stderr_of_failure(
+        server.run(&kim, &["extract-principles", "kim", "--from", "read"]),
+        "read without a tool",
+    );
+    assert!(error.contains("needs --tool"), "{error}");
+    // The profile has no correction yet.
+    let error = stderr_of_failure(
+        server.run(&kim, &["extract-principles", "kim", "--from", "corrections"]),
+        "no texts",
+    );
+    assert!(error.contains("has no text"), "{error}");
+}

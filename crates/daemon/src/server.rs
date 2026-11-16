@@ -11,14 +11,16 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
-    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, ErrorBody,
-    KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
+    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody,
+    ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
-    ApiError, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, EvalReport, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiError, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, EvalReport,
+    LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
+use bunsin_core::candidates::PrincipleCandidate;
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
@@ -440,6 +442,45 @@ async fn eval_report(
     Ok(Json(engine.eval_report(&profile).await?))
 }
 
+async fn extract_principles(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<ExtractPrinciplesBody>,
+) -> Reply<Vec<PrincipleCandidate>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.extract_principles(&profile, body.source).await?))
+}
+
+async fn principle_candidates(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<PrincipleCandidate>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.principle_candidates(&profile).await?))
+}
+
+async fn adopt_principle(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(adoption): Json<AdoptPrinciple>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.adopt_principle(&profile, adoption).await?))
+}
+
+async fn dismiss_principle(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<DismissPrincipleBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.dismiss_principle(&profile, body.id).await?))
+}
+
 async fn wiki_index(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -517,6 +558,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("delete-replay-case"), post(delete_replay_case))
         .route(&profile("start-eval"), post(start_eval))
         .route(&profile("eval-report"), post(eval_report))
+        .route(&profile("extract-principles"), post(extract_principles))
+        .route(&profile("principle-candidates"), post(principle_candidates))
+        .route(&profile("adopt-principle"), post(adopt_principle))
+        .route(&profile("dismiss-principle"), post(dismiss_principle))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

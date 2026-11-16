@@ -259,6 +259,19 @@
     판정은 `eval_results.judge`(이유는 필터를 거친다)에만 저장하고 보고서에만 보인다. 호출이 실패하거나 답이 형식에 맞지 않으면 판정이 없고, 사례는 실패가 아니다.
     비율과 통과 판정(`EvalSummary::of`)의 입력은 `(Expect, Option<CaseScore>)`이고, 정책과 `suggest`의 입력에도 판정이 없다. 타입으로 막는다.
     테스트: 심판을 켜고 판정이 `same`, `different`, 형식 오류여도 비율, 통과, `autonomy()`, 결정 개수가 같다.
+- **원칙 후보(PLAN 5절의 5단계)**: 표 `principle_candidates(id, text, evidence, source, state, created_at, decided_at)`. state는 `new`, `adopted`, `dismissed`이다.
+  - `extract_principles(source)`의 출처: `corrections`(폐기하지 않은 교정의 수정본과 이유), `replay_cases`(재현 사례의 실제 답),
+    `read{tool, args}`(read 규칙이고 `decide`가 Execute인 도구를 한 번 부른 결과, poll의 `fetch`와 같은 검사). 글은 다시 필터를 거친다. 저장 뒤에 소유자가 단어를 더했을 수 있기 때문이다.
+  - 글은 `<data source="owner-text">`로 인용하고 합계 20,000자까지 보낸다. LLM은 `{candidates: [{text, evidence}]}`로 답한다. LLM 호출 로그의 purpose는 `principles`이다.
+  - 엔진의 거부 규칙(core `candidates::accept`): 글과 근거를 필터한 뒤, 빈 글, 300자 초과, `[REDACTED:` 포함, 입력 글에 정확히 없는 근거를 버린다.
+    이미 있는 후보(모든 state)나 원칙과 같은 글도 버린다. 그래서 기각한 후보는 다시 나오지 않는다. 최대 10개를 `new`로 저장한다.
+    근거는 `quote_untrusted`가 바꾼 `&lt;`와 `&amp;`를 되돌린 뒤 비교한다. 감사 `principles_extracted`는 출처 이름과 개수만 남긴다(read의 인자는 사람 이름을 담을 수 있다).
+  - LLM 호출이 실패하면 거부(409)이고, 오류 글은 필터를 거친다. 출처에 글이 없으면 LLM을 부르지 않고 거부한다.
+  - `adopt_principle{id, text, expected}`: 후보가 `new`이고 `expected`가 지금 원칙과 같아야 한다(다르면 412). 후보를 `adopted`로 먼저 옮긴 뒤(CAS)
+    `replace_principles`로 글 하나를 끝에 더한다. 그래서 공백 정리, 50개·1,000자 한도, 감사 `principles_changed`가 같다. 저장이 실패하면 후보를 `new`로 되돌린다.
+    `text`는 소유자가 고친 글이다. 원칙은 필터를 거치지 않는다(12절). 감사 `principle_adopted`는 id와 고쳤는지만 남긴다.
+  - `dismiss_principle(id)`: `new`만 `dismissed`로 옮긴다. LLM은 채택하지 않는다. 기각: 일괄 채택.
+  - API와 명령: `extract-principles`, `principle-candidates`, `adopt-principle`(명령은 원칙을 읽어 `expected`로 보낸다), `dismiss-principle`.
 - 비밀 값은 설정에 저장하지 않는다. 9절을 본다.
 
 ## 5. LLM 어댑터
@@ -638,7 +651,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
 | agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기) | 구현, 테스트 있음. 점검과 자동 반영은 없음. |
 | 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI). 창에는 없음. |
-| 원칙 후보 추출 | 없음 |
+| 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI). 창에는 없음. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI). 창에는 없음. |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |

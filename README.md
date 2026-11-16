@@ -329,6 +329,30 @@ view warns and offers "Load the server's version" and "Save anyway".
 - Principles are your own instructions, so the privacy filter does not change them.
 - The audit log records the counts of a change, not the text.
 
+#### Principle candidates from your past texts
+
+The server can ask the LLM which rules your past texts follow. It proposes candidates only.
+Nothing becomes a principle until you adopt it.
+
+```sh
+bunsind extract-principles kim --from corrections     # your edits of drafts and your reasons
+bunsind extract-principles kim --from replay-cases    # the real replies of your replay cases
+bunsind extract-principles kim --from read --tool slack/search --args '{"query":"from:me"}'
+bunsind principle-candidates kim
+bunsind adopt-principle kim 4                          # add candidate 4 to the end of the principles
+bunsind adopt-principle kim 5 --text "Answer in one line."   # add your edit of it instead
+bunsind dismiss-principle kim 6
+```
+
+- The texts reach the LLM as quoted data after the privacy filter. A `read` source calls one
+  tool that has a `read` rule, with the same checks as a poll.
+- The server keeps at most 10 candidates per request. It drops a candidate that has more than
+  300 characters, holds a `[REDACTED:...]` placeholder, or quotes as its evidence something
+  that is not in your texts. It also drops a text that is a principle or a candidate already,
+  so a dismissed candidate does not come back.
+- An adoption appends one text through the same save as the principles, with the same limits.
+  If the principles changed since you read them, the adoption is refused (HTTP 412).
+
 ### Permission rules
 
 In the window, the **Permissions** view lists each approved tool and sets its rule with

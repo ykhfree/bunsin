@@ -38,6 +38,10 @@
 //! | POST | `/v1/profiles/{p}/delete-replay-case` | `DeleteReplayCaseBody` | |
 //! | POST | `/v1/profiles/{p}/start-eval` | | `i64` |
 //! | POST | `/v1/profiles/{p}/eval-report` | | `EvalReport` |
+//! | POST | `/v1/profiles/{p}/extract-principles` | `ExtractPrinciplesBody` | `[PrincipleCandidate]` |
+//! | POST | `/v1/profiles/{p}/principle-candidates` | | `[PrincipleCandidate]` |
+//! | POST | `/v1/profiles/{p}/adopt-principle` | `AdoptPrinciple` | |
+//! | POST | `/v1/profiles/{p}/dismiss-principle` | `DismissPrincipleBody` | |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -108,6 +112,16 @@ pub struct AddReplayCasesBody {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteReplayCaseBody {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtractPrinciplesBody {
+    pub source: bunsin_core::candidates::PrincipleSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DismissPrincipleBody {
     pub id: i64,
 }
 

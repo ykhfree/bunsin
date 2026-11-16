@@ -24,6 +24,8 @@ pub(crate) enum Purpose {
     LlmTest,
     /// The LLM judge of an evaluation run.
     Judge,
+    /// The search for principle candidates in the owner's texts.
+    Principles,
 }
 
 impl Purpose {
@@ -33,6 +35,7 @@ impl Purpose {
             Purpose::Replay => "replay",
             Purpose::LlmTest => "llm_test",
             Purpose::Judge => "judge",
+            Purpose::Principles => "principles",
         }
     }
 }

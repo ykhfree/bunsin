@@ -458,6 +458,45 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Ask the LLM for principles in your past texts. It reads them as quoted data after the privacy
+    /// filter. The results are candidates only: adopt or dismiss each one.
+    ExtractPrinciples {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// `corrections`: your edits and reasons. `replay-cases`: the real replies of the replay cases.
+        /// `read`: the result of one call of a tool with a read rule, named by --tool and --args.
+        #[arg(long, value_parser = ["corrections", "replay-cases", "read"])]
+        from: String,
+        /// <connector>/<tool>, with --from read.
+        #[arg(long)]
+        tool: Option<String>,
+        /// The arguments of the tool as a JSON object, with --from read.
+        #[arg(long)]
+        args: Option<String>,
+    },
+    /// Show the principle candidates, newest first.
+    PrincipleCandidates {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Add a new candidate to the end of your principles. With --text, add your edit of it instead.
+    AdoptPrinciple {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Dismiss a new candidate. A later extraction does not propose its text again.
+    DismissPrinciple {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -549,6 +588,41 @@ fn case_text(case: &bunsin_core::eval::ReplayCaseRecord) -> String {
         e.text.replace('\n', "\n    "),
         case.actual_reply.replace('\n', "\n    ")
     )
+}
+
+/// A principle candidate as indented lines.
+fn candidate_text(candidate: &bunsin_core::candidates::PrincipleCandidate) -> String {
+    format!(
+        "#{} {} from {}\n  text: {}\n  evidence: {}\n",
+        candidate.id,
+        candidate.state.as_str(),
+        candidate.source,
+        candidate.text.replace('\n', "\n    "),
+        candidate.evidence.replace('\n', "\n    ")
+    )
+}
+
+/// The source of an extraction from the options of `extract-principles`.
+fn principle_source(
+    from: &str,
+    tool: Option<String>,
+    args: Option<String>,
+) -> Result<bunsin_core::candidates::PrincipleSource, String> {
+    use bunsin_core::candidates::PrincipleSource;
+    match (from, tool) {
+        ("read", Some(tool)) => {
+            let args = match args {
+                Some(text) => serde_json::from_str(&text).map_err(|e| format!("--args is not a JSON object: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            Ok(PrincipleSource::Read { tool, args })
+        }
+        ("read", None) => Err("--from read needs --tool".to_owned()),
+        (_, Some(_)) => Err("--tool goes only with --from read".to_owned()),
+        (_, None) if args.is_some() => Err("--args goes only with --from read".to_owned()),
+        ("corrections", None) => Ok(PrincipleSource::Corrections),
+        _ => Ok(PrincipleSource::ReplayCases),
+    }
 }
 
 /// The report of the newest evaluation run as lines.
@@ -1198,6 +1272,49 @@ async fn run(cli: Cli) -> Result<(), String> {
             for line in eval_lines(&connect(&remote)?.eval_report(&profile).await.map_err(text)?) {
                 println!("{line}");
             }
+        }
+        Command::ExtractPrinciples {
+            remote,
+            profile,
+            from,
+            tool,
+            args,
+        } => {
+            let source = principle_source(&from, tool, args)?;
+            let found = connect(&remote)?
+                .extract_principles(&profile, source)
+                .await
+                .map_err(text)?;
+            println!("{} new candidate(s)", found.len());
+            for candidate in &found {
+                print!("{}", candidate_text(candidate));
+            }
+        }
+        Command::PrincipleCandidates { remote, profile } => {
+            for candidate in connect(&remote)?.principle_candidates(&profile).await.map_err(text)? {
+                print!("{}", candidate_text(&candidate));
+            }
+        }
+        Command::AdoptPrinciple {
+            remote,
+            profile,
+            id,
+            text: edit,
+        } => {
+            let engine = connect(&remote)?;
+            // The adoption appends to the principles read here. A change meanwhile is refused.
+            let principles = engine.principles(&profile).await.map_err(text)?;
+            let adoption = bunsin_api::AdoptPrinciple {
+                id,
+                text: edit,
+                expected: bunsin_api::Expected::Value(principles),
+            };
+            engine.adopt_principle(&profile, adoption).await.map_err(text)?;
+            println!("candidate {id} added to the principles");
+        }
+        Command::DismissPrinciple { remote, profile, id } => {
+            connect(&remote)?.dismiss_principle(&profile, id).await.map_err(text)?;
+            println!("candidate {id} dismissed");
         }
         Command::Reject {
             remote,

@@ -3,6 +3,7 @@
 pub mod http;
 
 use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
@@ -231,6 +232,18 @@ pub struct PermissionsUpdate {
 pub struct PrinciplesUpdate {
     /// Every principle, in the order of the prompt. A principle that is not in here is removed.
     pub principles: Vec<String>,
+    #[serde(default)]
+    pub expected: Expected<Vec<String>>,
+}
+
+/// The owner's adoption of a principle candidate: one text appended to the principles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdoptPrinciple {
+    pub id: i64,
+    /// The owner's edit of the candidate's text. `None` adopts the text as it is.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The principles the caller loaded. The adoption is refused if the server holds others.
     #[serde(default)]
     pub expected: Expected<Vec<String>>,
 }
@@ -583,4 +596,18 @@ pub trait EngineApi: Send + Sync {
     fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>>;
     /// The newest evaluation run and its results.
     fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>>;
+    /// Asks the LLM for principles in the owner's texts of `source`, which it reads as quoted data after
+    /// the privacy filter. Stores and returns the candidates that pass the checks. None becomes a principle.
+    fn extract_principles<'a>(
+        &'a self,
+        profile: &'a str,
+        source: PrincipleSource,
+    ) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>>;
+    /// Every candidate, newest first, at most 200.
+    fn principle_candidates<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>>;
+    /// Appends the text of a new candidate, or the owner's edit of it, to the principles. The save has the
+    /// same checks as `set_principles`.
+    fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>>;
+    /// Dismisses a new candidate. A later extraction does not propose its text again.
+    fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
 }

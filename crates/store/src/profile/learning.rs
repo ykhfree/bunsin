@@ -1,7 +1,8 @@
-//! The tables of replay evaluation.
+//! The tables of replay evaluation and of principle candidates.
 
 use super::ProfileStore;
 use crate::{Result, StoreError};
+use bunsin_core::candidates::{CandidateState, PrincipleCandidate};
 use bunsin_core::eval::{CaseScore, DraftKind, EvalResult, EvalRun, Expect, ReplayCaseRecord, RunState};
 use bunsin_core::event::InboundEvent;
 use rusqlite::{OptionalExtension, Row, TransactionBehavior};
@@ -31,6 +32,15 @@ CREATE TABLE IF NOT EXISTS eval_results (
     error TEXT,
     judge TEXT,
     PRIMARY KEY (run_id, case_id)
+);
+CREATE TABLE IF NOT EXISTS principle_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    source TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER
 );
 ";
 
@@ -73,6 +83,35 @@ fn run(raw: (i64, String, i64, Option<i64>)) -> Result<EvalRun> {
         finished_at,
     })
 }
+
+type CandidateRow = (i64, String, String, String, String, i64, Option<i64>);
+
+fn candidate_from_row(row: &Row<'_>) -> rusqlite::Result<CandidateRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+fn candidate(raw: CandidateRow) -> Result<PrincipleCandidate> {
+    let (id, text, evidence, source, state, created_at, decided_at) = raw;
+    Ok(PrincipleCandidate {
+        id,
+        text,
+        evidence,
+        source,
+        state: CandidateState::parse(&state).ok_or_else(|| bad(state))?,
+        created_at,
+        decided_at,
+    })
+}
+
+const CANDIDATE_COLUMNS: &str = "id, text, evidence, source, state, created_at, decided_at";
 
 impl ProfileStore {
     /// Stores a replay case and returns its ID. The caller filters the texts first.
@@ -239,6 +278,63 @@ impl ProfileStore {
     }
 }
 
+impl ProfileStore {
+    /// Stores a new candidate and returns its ID. The caller filters the texts first.
+    pub fn add_principle_candidate(&self, text: &str, evidence: &str, source: &str, now: i64) -> Result<i64> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO principle_candidates (text, evidence, source, state, created_at)
+             VALUES (?1, ?2, ?3, 'new', ?4)",
+            (text, evidence, source, now),
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+
+    /// All candidates, newest first, at most `limit`.
+    pub fn principle_candidates(&self, limit: u32) -> Result<Vec<PrincipleCandidate>> {
+        let db = self.db();
+        let mut statement = db.prepare(&format!(
+            "SELECT {CANDIDATE_COLUMNS} FROM principle_candidates ORDER BY id DESC LIMIT ?1"
+        ))?;
+        let rows = statement
+            .query_map([limit], candidate_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(candidate).collect()
+    }
+
+    /// The texts of every candidate, in any state.
+    pub fn candidate_texts(&self) -> Result<Vec<String>> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT text FROM principle_candidates")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn principle_candidate(&self, id: i64) -> Result<PrincipleCandidate> {
+        let raw = self
+            .db()
+            .query_row(
+                &format!("SELECT {CANDIDATE_COLUMNS} FROM principle_candidates WHERE id = ?1"),
+                [id],
+                candidate_from_row,
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("principle candidate", id))?;
+        candidate(raw)
+    }
+
+    /// Moves a candidate from `from` to `to`. Returns false if it was not in `from`, so of two callers
+    /// only one moves it. A move back to `new` clears the decision time.
+    pub fn move_candidate(&self, id: i64, from: CandidateState, to: CandidateState, now: i64) -> Result<bool> {
+        let decided_at = (to != CandidateState::New).then_some(now);
+        let changed = self.db().execute(
+            "UPDATE principle_candidates SET state = ?1, decided_at = ?2 WHERE id = ?3 AND state = ?4",
+            (to.as_str(), decided_at, id, from.as_str()),
+        )?;
+        Ok(changed == 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::AppStore;
@@ -328,5 +424,33 @@ mod tests {
         // A new run starts after the last one is done, and sees only the remaining case.
         let next = store.start_eval_run(30).unwrap().unwrap();
         assert_eq!(store.unscored_cases(next, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_candidate_moves_from_new_once() {
+        use bunsin_core::candidates::CandidateState::*;
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppStore::open(dir.path()).unwrap();
+        app.create_profile("kim", "Kim", 1).unwrap();
+        let store = app.open_profile("kim").unwrap();
+        let first = store
+            .add_principle_candidate("Ask first.", "ask me", "corrections", 5)
+            .unwrap();
+        let second = store
+            .add_principle_candidate("Be brief.", "short", "replay_cases", 6)
+            .unwrap();
+        let listed = store.principle_candidates(10).unwrap();
+        assert_eq!(listed.iter().map(|c| c.id).collect::<Vec<_>>(), vec![second, first]);
+        assert_eq!((listed[1].state, listed[1].decided_at), (New, None));
+
+        assert!(store.move_candidate(first, New, Adopted, 9).unwrap());
+        assert!(!store.move_candidate(first, New, Dismissed, 10).unwrap());
+        let adopted = store.principle_candidate(first).unwrap();
+        assert_eq!((adopted.state, adopted.decided_at), (Adopted, Some(9)));
+        // A move back to new, after a failed save, clears the decision time.
+        assert!(store.move_candidate(first, Adopted, New, 11).unwrap());
+        assert_eq!(store.principle_candidate(first).unwrap().decided_at, None);
+        assert!(store.principle_candidate(99).is_err());
+        assert_eq!(store.candidate_texts().unwrap().len(), 2);
     }
 }

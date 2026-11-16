@@ -3,6 +3,7 @@
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
 mod autonomy;
+mod candidates;
 mod connections;
 mod corrections;
 mod eval;
@@ -18,11 +19,13 @@ pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport,
-    Expected, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit,
+    EngineApi, EvalReport, Expected, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview,
+    PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution,
+    ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
@@ -1332,6 +1335,26 @@ impl EngineApi for Engine {
 
     fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>> {
         Box::pin(async move { self.read_eval_report(profile) })
+    }
+
+    fn extract_principles<'a>(
+        &'a self,
+        profile: &'a str,
+        source: PrincipleSource,
+    ) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(self.extract(profile, source))
+    }
+
+    fn principle_candidates<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(async move { self.read_candidates(profile) })
+    }
+
+    fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.adopt(profile, adoption) })
+    }
+
+    fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.dismiss(profile, id) })
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {

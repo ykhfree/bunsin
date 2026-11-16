@@ -1,14 +1,17 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
 use bunsin_api::http::{
-    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, ErrorBody,
-    KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
+    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody,
+    ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
-    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport,
-    LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit,
+    EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
+    PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport,
+    WikiPageUpdate,
 };
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
@@ -389,6 +392,40 @@ impl EngineApi for RemoteEngine {
     fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>> {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "eval-report"), NO_BODY)
+                .await
+        })
+    }
+
+    fn extract_principles<'a>(
+        &'a self,
+        profile: &'a str,
+        source: PrincipleSource,
+    ) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(async move {
+            let body = ExtractPrinciplesBody { source };
+            self.call(Method::POST, &profile_path(profile, "extract-principles"), Some(&body))
+                .await
+        })
+    }
+
+    fn principle_candidates<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "principle-candidates"), NO_BODY)
+                .await
+        })
+    }
+
+    fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::POST, &profile_path(profile, "adopt-principle"), Some(&adoption))
+                .await
+        })
+    }
+
+    fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = DismissPrincipleBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "dismiss-principle"), Some(&body))
                 .await
         })
     }

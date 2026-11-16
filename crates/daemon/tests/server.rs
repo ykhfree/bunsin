@@ -299,6 +299,19 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.start_eval(other).await.map(|_| ()));
         refused(kim.eval_report(other).await.map(|_| ()));
         refused(
+            kim.extract_principles(other, bunsin_core::candidates::PrincipleSource::Corrections)
+                .await
+                .map(|_| ()),
+        );
+        refused(kim.principle_candidates(other).await.map(|_| ()));
+        let adoption = bunsin_api::AdoptPrinciple {
+            id: 1,
+            text: None,
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.adopt_principle(other, adoption).await);
+        refused(kim.dismiss_principle(other, 1).await);
+        refused(
             kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
                 .await
                 .map(|_| ()),
@@ -1091,4 +1104,35 @@ async fn an_evaluation_runs_over_http() {
     kim.delete_replay_case("kim", ids[0]).await.unwrap();
     let gone = kim.delete_replay_case("kim", ids[0]).await;
     assert!(matches!(gone, Err(ApiError::NotFound(_))), "{gone:?}");
+}
+
+#[tokio::test]
+async fn a_stale_adoption_is_a_conflict_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let first = store
+        .add_principle_candidate("Ask first.", "ask me", "corrections", 5)
+        .unwrap();
+    let second = store
+        .add_principle_candidate("Be brief.", "short", "corrections", 5)
+        .unwrap();
+    let listed = kim.principle_candidates("kim").await.unwrap();
+    assert_eq!(listed.iter().map(|c| c.id).collect::<Vec<_>>(), [second, first]);
+
+    let loaded = kim.principles("kim").await.unwrap();
+    let adopt = |id| bunsin_api::AdoptPrinciple {
+        id,
+        text: None,
+        expected: bunsin_api::Expected::Value(loaded.clone()),
+    };
+    kim.adopt_principle("kim", adopt(first)).await.unwrap();
+    // The second adoption started from the list before the first one.
+    let stale = kim.adopt_principle("kim", adopt(second)).await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+    assert_eq!(bunsin_api::http::status_of(&stale.unwrap_err()), 412);
+    assert_eq!(kim.principles("kim").await.unwrap(), ["Ask first."]);
+    kim.dismiss_principle("kim", second).await.unwrap();
+    let again = kim.dismiss_principle("kim", second).await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
 }
