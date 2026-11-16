@@ -51,6 +51,14 @@ enum Kind {
     Command,
 }
 
+/// The token field that the Keychain fields fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeychainTarget {
+    Llm,
+    /// The token of the connector in the connector form.
+    Connector,
+}
+
 /// The kinds, in the order of the choices on screen.
 const KINDS: [(Kind, &str); 2] = [(Kind::Address, "Address"), (Kind::Command, "Command on the server")];
 
@@ -137,13 +145,13 @@ pub struct ConnectionsForm {
     name: Entity<InputState>,
     address: Entity<InputState>,
     token: Entity<InputState>,
-    /// The service and the account of a Keychain item that holds the LLM token.
+    /// The service and the account of a Keychain item that holds a token.
     keychain_service: Entity<InputState>,
     keychain_account: Entity<InputState>,
     /// What the last read of the Keychain did.
     keychain_message: Option<String>,
-    /// True while the Keychain fields are shown. Most owners type the token, so they start hidden.
-    keychain_open: bool,
+    /// The token field whose Keychain fields are shown. Most owners type the token, so they start hidden.
+    keychain_open: Option<KeychainTarget>,
     /// The header that carries the connector's token. Empty: `Authorization: Bearer`.
     token_header: Entity<InputState>,
     /// Whether the connector draft is an address or a command.
@@ -255,7 +263,7 @@ impl ConnectionsForm {
             keychain_service: input("Where, for example api.anthropic.com", window, cx),
             keychain_account: input("Account", window, cx),
             keychain_message: None,
-            keychain_open: false,
+            keychain_open: None,
             token_header: input("Authorization: Bearer", window, cx),
             kind: Kind::Address,
             command: input("/usr/local/bin/npx", window, cx),
@@ -309,10 +317,12 @@ impl ConnectionsForm {
         if llm_saved {
             // The token is on the server now, even if the reload after the save failed.
             set(&self.llm_token, "", window, cx);
-            self.clear_keychain(window, cx);
+            if self.keychain_open == Some(KeychainTarget::Llm) {
+                self.clear_keychain(window, cx);
+            }
         }
         if matches!(result, Some(ConnectionResult::ConnectorSaved { result: Ok(()), .. })) {
-            // The form is empty for the next connector.
+            // The form is empty for the next connector. Loading it also hides its Keychain fields.
             self.load_connector("", None, window, cx);
         }
         let (Some(profile), Some(connections)) = (&state.selected, &state.connections) else {
@@ -426,6 +436,10 @@ impl ConnectionsForm {
             .unwrap_or_default();
         set(&self.secret_name, "", window, cx);
         set(&self.secret_value, "", window, cx);
+        // A message about a token that was copied into the emptied field would be wrong now.
+        if self.keychain_open == Some(KeychainTarget::Connector) {
+            self.clear_keychain(window, cx);
+        }
         self.connector_base = connector.map(|c| (name.to_owned(), c.clone()));
         self.connector_message = None;
         self.connector_conflict = None;
@@ -461,7 +475,26 @@ impl ConnectionsForm {
         set(&self.keychain_service, "", window, cx);
         set(&self.keychain_account, "", window, cx);
         self.keychain_message = None;
-        self.keychain_open = false;
+        self.keychain_open = None;
+    }
+
+    /// Shows the Keychain fields for `target`, or hides them if they are shown for it.
+    /// The fields keep their text, so the owner can read the same item for the other token.
+    fn toggle_keychain(&mut self, target: KeychainTarget) {
+        self.keychain_message = None;
+        self.keychain_open = if self.keychain_open == Some(target) {
+            None
+        } else {
+            Some(target)
+        };
+    }
+
+    /// The token field that the Keychain fields fill.
+    fn keychain_field(&self, target: KeychainTarget) -> &Entity<InputState> {
+        match target {
+            KeychainTarget::Llm => &self.llm_token,
+            KeychainTarget::Connector => &self.token,
+        }
     }
 
     /// True if the LLM fields are not the endpoint `llm` of the server, or the server has none.
@@ -615,10 +648,14 @@ impl Shell {
         self.send(UiCommand::SaveConnector { profile, name, update });
     }
 
-    /// Copies the password of the named Keychain item into the masked token field.
-    /// Nothing goes to the server before Save.
+    /// Copies the password of the named Keychain item into the masked token field that the
+    /// Keychain fields are open for. Nothing goes to the server before Save.
     fn read_keychain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let form = &mut self.connections;
+        let Some(target) = form.keychain_open else {
+            return;
+        };
+        let field = form.keychain_field(target).clone();
         let service = text(&form.keychain_service, cx).trim().to_owned();
         let account = text(&form.keychain_account, cx).trim().to_owned();
         if service.is_empty() || account.is_empty() {
@@ -628,18 +665,86 @@ impl Shell {
         let found = self.keychain.password(&service, &account);
         // A token from an earlier read must not stay in the field beside "was not read".
         if !matches!(&found, Ok(password) if !password.trim().is_empty()) {
-            set(&form.llm_token, "", window, cx);
+            set(&field, "", window, cx);
         }
         form.keychain_message = Some(match found {
             Ok(password) if password.trim().is_empty() => KEYCHAIN_EMPTY.to_owned(),
             Ok(password) => {
                 // A save reads every field without the space around its text, so a line end
                 // after the password does not reach the server.
-                set(&form.llm_token, &password, window, cx);
+                set(&field, &password, window, cx);
                 KEYCHAIN_READ.to_owned()
             }
             Err(error) => format!("The token was not read: {error}."),
         });
+    }
+
+    /// The button that shows or hides the Keychain fields of one token field.
+    fn keychain_toggle(&self, id: &'static str, target: KeychainTarget, cx: &Context<Self>) -> impl IntoElement {
+        Button::new(id)
+            .self_start()
+            .small()
+            .ghost()
+            .label(if self.connections.keychain_open == Some(target) {
+                "Hide the Keychain fields"
+            } else {
+                "Copy the token from the Keychain"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.connections.toggle_keychain(target);
+                cx.notify();
+            }))
+    }
+
+    /// The Keychain fields, if they are open for `target`. Only one set is on screen at a time.
+    fn keychain_fields(&self, target: KeychainTarget, cx: &Context<Self>) -> Option<Div> {
+        let form = &self.connections;
+        (form.keychain_open == Some(target)).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(labelled_as("keychain-help", KEYCHAIN_HELP, quiet(KEYCHAIN_HELP, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_2()
+                        .child(
+                            field(
+                                "Where (service)",
+                                Input::new(&form.keychain_service)
+                                    .id("keychain-service")
+                                    .aria_label("Keychain service"),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            field(
+                                "Account",
+                                Input::new(&form.keychain_account)
+                                    .id("keychain-account")
+                                    .aria_label("Keychain account"),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            Button::new("read-keychain")
+                                .outline()
+                                .label("Read from Keychain")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.read_keychain(window, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(labelled(
+                    "keychain-message",
+                    form.keychain_message.clone().unwrap_or_default(),
+                )))
+        })
     }
 
     /// Tests the saved endpoint. A draft is not tested, so the form must equal the server's settings.
@@ -858,67 +963,8 @@ impl Shell {
                     cx,
                 ))
                 // The Keychain fields open on request. Closed, they take one line.
-                .child(
-                    Button::new("open-keychain")
-                        .self_start()
-                        .small()
-                        .ghost()
-                        .label(if form.keychain_open {
-                            "Hide the Keychain fields"
-                        } else {
-                            "Copy the token from the Keychain"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.connections.keychain_open = !this.connections.keychain_open;
-                            cx.notify();
-                        })),
-                )
-                .children(form.keychain_open.then(|| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(labelled_as("keychain-help", KEYCHAIN_HELP, quiet(KEYCHAIN_HELP, cx)))
-                        .child(
-                            div()
-                                .flex()
-                                .items_end()
-                                .gap_2()
-                                .child(
-                                    field(
-                                        "Where (service)",
-                                        Input::new(&form.keychain_service)
-                                            .id("keychain-service")
-                                            .aria_label("Keychain service"),
-                                        cx,
-                                    )
-                                    .flex_1(),
-                                )
-                                .child(
-                                    field(
-                                        "Account",
-                                        Input::new(&form.keychain_account)
-                                            .id("keychain-account")
-                                            .aria_label("Keychain account"),
-                                        cx,
-                                    )
-                                    .flex_1(),
-                                )
-                                .child(
-                                    Button::new("read-keychain")
-                                        .outline()
-                                        .label("Read from Keychain")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.read_keychain(window, cx);
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(labelled(
-                            "keychain-message",
-                            form.keychain_message.clone().unwrap_or_default(),
-                        )))
-                }))
+                .child(self.keychain_toggle("open-keychain", KeychainTarget::Llm, cx))
+                .children(self.keychain_fields(KeychainTarget::Llm, cx))
                 .child(labelled_as(
                     "llm-token-state",
                     token_text(llm_token),
@@ -1005,7 +1051,7 @@ impl Shell {
         let selected_kind = KINDS.iter().position(|(kind, _)| *kind == form.kind);
         // Only the fields of the chosen kind are shown.
         let kind_fields: Vec<AnyElement> = match form.kind {
-            Kind::Address => vec![
+            Kind::Address => [
                 field(
                     "Address of the MCP server",
                     Input::new(&form.address)
@@ -1030,7 +1076,16 @@ impl Shell {
                     cx,
                 )
                 .into_any_element(),
-            ],
+                self.keychain_toggle("open-connector-keychain", KeychainTarget::Connector, cx)
+                    .into_any_element(),
+            ]
+            .into_iter()
+            // The Keychain fields of the connector token, while they are open.
+            .chain(
+                self.keychain_fields(KeychainTarget::Connector, cx)
+                    .map(IntoElement::into_any_element),
+            )
+            .collect(),
             Kind::Command => {
                 // The rows name each secret variable. A value is never on screen.
                 let secret_rows: Vec<AnyElement> = form

@@ -245,14 +245,15 @@ bunsind connector-remove kim jira                # removes the connector and its
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every
   `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
-- In the window, **Copy the token from the Keychain** reads the LLM token from an item
-  that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
+- In the window, **Copy the token from the Keychain** reads the LLM token or the token of
+  an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
   The token is copied once to the server: a later change in the Keychain does not reach
   it. macOS can ask you to allow the access if another app made the item. The window
   does not respond while macOS asks. The read finds application passwords of the login
   Keychain only: not "Internet password" items, and not items of iCloud Keychain or the
-  Passwords app. Only the LLM token has this feature.
+  Passwords app. One set of Keychain fields is open at a time, under the token it fills.
+  A read that fails empties that token field, so Save does not send an earlier token.
 - With `--wire openai-chat` or `openai-responses`, `llm-set` needs `--base-url` and `--model`.
   Only the Claude format has defaults.
 - A Claude API key that is not scoped to one workspace also needs a workspace ID. Set

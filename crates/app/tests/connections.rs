@@ -1668,6 +1668,137 @@ fn the_keychain_token_is_sent_as_it_is_and_never_for_another_profile(cx: &mut Te
     assert_eq!(last_save(cx), ("lee".to_owned(), TokenChange::Keep));
 }
 
+#[gpui_kit::test]
+fn a_connector_token_is_copied_from_the_keychain_with_the_same_rules(cx: &mut TestAppContext) {
+    use bunsin_api::Connections;
+    use bunsin_app::bridge::{UiCommand, UiState};
+    use gpui_kit::AppContext;
+    // The test is the bridge: it sends the states, and it answers no command.
+    let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(gpui_kit::init);
+    let keychain = std::sync::Arc::new(FakeKeychain::default());
+    let lookup = keychain.clone();
+    // Tall enough for the whole settings page, as in `open_settings`.
+    let options = gpui_kit::WindowOptions {
+        window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+            origin: Default::default(),
+            size: gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2100.)),
+        })),
+        ..Default::default()
+    };
+    let (window, _shell) = cx.update(|cx| {
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| {
+                let mut shell = Shell::new(receiver, commands, window, cx);
+                shell.set_keychain(lookup);
+                shell
+            })
+        })
+        .unwrap()
+    });
+    let mut last_command = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        let sent: Vec<_> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+        sent.last().cloned()
+    };
+    let state = UiState {
+        selected: Some("kim".into()),
+        connections: Some(Connections {
+            llm: None,
+            connectors: Default::default(),
+        }),
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(state).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "open-connector-keychain"),
+            "Copy the token from the Keychain"
+        );
+        // One set of Keychain fields is on screen at a time. It moves to the field that asked last.
+        window.click("open-keychain", cx);
+        window.click("open-connector-keychain", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(window.find_all("keychain-service").len(), 1);
+        assert_eq!(label(window, "open-keychain"), "Copy the token from the Keychain");
+        assert_eq!(label(window, "open-connector-keychain"), "Hide the Keychain fields");
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "connector-address", "https://mcp.example/jira");
+        read_keychain(window, cx, "api.anthropic.com", "kim");
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "keychain-message"), KEYCHAIN_READ);
+        // The token is in the masked connector field, not in the LLM field and not in a label.
+        assert_eq!(
+            window.find("connector-token").role(),
+            Some(gpui_kit::Role::PasswordInput)
+        );
+        assert_eq!(value(window, "llm-token"), "");
+        assert_not_on_screen(window, KEYCHAIN_VALUE, "https://mcp.example/jira");
+        window.click("save-connector", cx);
+    });
+    match last_command(cx) {
+        Some(UiCommand::SaveConnector { profile, name, update }) => {
+            assert_eq!((profile.as_str(), name.as_str()), ("kim", "jira"));
+            assert_eq!(update.token, TokenChange::Set(KEYCHAIN_VALUE.into()));
+        }
+        other => panic!("expected a save of the connector, got {other:?}"),
+    }
+
+    // A read that fails after a good one empties the connector token field.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "nobody");
+    });
+    on_screen(cx, window, |window, cx| {
+        let message = label(window, "keychain-message");
+        assert!(message.starts_with("The token was not read: "), "{message}");
+        assert!(!message.contains(KEYCHAIN_VALUE), "{message}");
+        window.click("save-connector", cx);
+    });
+    match last_command(cx) {
+        Some(UiCommand::SaveConnector { update, .. }) => assert_eq!(update.token, TokenChange::Keep),
+        other => panic!("expected a save of the connector, got {other:?}"),
+    }
+    assert_eq!(*keychain.0.lock().unwrap(), 2);
+
+    // A successful save of the connector empties the form and hides its Keychain fields.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "kim")
+    });
+    let saved = UiState {
+        selected: Some("kim".into()),
+        connections: Some(Connections {
+            llm: None,
+            connectors: Default::default(),
+        }),
+        connection_result: Some(ConnectionResult::ConnectorSaved {
+            name: "jira".into(),
+            result: Ok(()),
+        }),
+        connection_commands: 1,
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(saved).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert!(window.try_find("keychain-service").is_none());
+        assert_eq!(value(window, "connector-token"), "");
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "connector-address", "https://mcp.example/jira");
+        window.click("save-connector", cx);
+    });
+    match last_command(cx) {
+        Some(UiCommand::SaveConnector { update, .. }) => assert_eq!(update.token, TokenChange::Keep),
+        other => panic!("expected a save of the connector, got {other:?}"),
+    }
+}
+
 const SECRET_VALUE: &str = "sv-secret-VALUE-63e0";
 
 /// Types a secret variable into its fields. Does not press Add.
