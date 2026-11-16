@@ -478,10 +478,17 @@ bunsind approve kim 1              # 대기 중인 1번 항목을 실행
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
 bunsind resolve-unknown kim 1 drop # 멈춤으로 끊긴 항목: done, drop, retry 중 하나
+bunsind corrections kim            # agent의 초안을 고친 기록
+bunsind retire-correction kim 3    # 3번 교정을 남기되 agent에게 더는 주지 않음
 bunsind stop kim on                # 정지 스위치: 이 프로필의 모든 쓰기를 멈춤
 ```
 
-이유를 붙인 수정은 교정 기록으로 저장됩니다. agent는 다음 프롬프트부터 최근 교정 기록을 봅니다.
+대기 중인 호출을 고치면 교정 기록이 저장됩니다. 기록은 AI 표시를 뗀 초안과 수정본, 이유, 호출이 답한 메시지를 담습니다.
+모든 글은 저장하기 전에 개인정보 필터를 거칩니다.
+새 메시지가 오면 agent는 비슷한 지난 메시지의 교정 기록을 최대 5개 받습니다.
+서버는 함께 쓰인 낱말로 기록을 찾고, 드문 낱말에 더 큰 무게를 줍니다. 임베딩은 쓰지 않습니다.
+재현 평가는 교정 기록을 받지 않습니다. 기록 하나가 실제 답을 담을 수 있기 때문입니다.
+폐기한 교정 기록은 저장된 채로 남고, 어떤 프롬프트에도 들어가지 않습니다.
 
 승인된 호출이 실행되는 중에 서버가 멈추면, 다음 시작은 그 호출을 다시 실행하지 않습니다.
 호출이 이미 도구에 닿았을 수 있기 때문입니다. `status`는 그 항목을 `unknown`으로 보여 줍니다.

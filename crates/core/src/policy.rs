@@ -96,14 +96,6 @@ impl ToolRule {
             outgoing_text,
         }
     }
-
-    /// The one argument that holds all the text, if the rule names it with `arg`.
-    pub fn text_arg(&self) -> Option<&str> {
-        match &self.outgoing_text {
-            OutgoingText::Arg(name) => Some(name),
-            OutgoingText::None | OutgoingText::Paths(_) => None,
-        }
-    }
 }
 
 /// The permission table of one profile. Keys are tool IDs: `<connector>/<tool>`.
@@ -243,9 +235,9 @@ mod tests {
     fn a_rule_must_say_where_the_outgoing_text_is() {
         let parse = |text: &str| serde_json::from_str::<ToolRule>(text);
         let rule = parse(r#"{"class": "write", "tier": "approve", "outgoing_text": {"arg": "text"}}"#).unwrap();
-        assert_eq!(rule.text_arg(), Some("text"));
+        assert_eq!(rule.outgoing_text, OutgoingText::Arg("text".into()));
         let silent = parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none"}"#).unwrap();
-        assert_eq!(silent.text_arg(), None);
+        assert_eq!(silent.outgoing_text, OutgoingText::None);
         // Leaving the field out is an error, not "no marker".
         assert!(parse(r#"{"class": "write", "tier": "approve"}"#).is_err());
         // A misspelled field is an error too.
@@ -265,8 +257,6 @@ mod tests {
         assert_eq!(both.locations(), ["text", "blocks.*.text"]);
         assert_eq!(both.check(), Ok(()));
         let rule = ToolRule::write(ToolClass::Write, both);
-        // A rule with several places has no single text argument.
-        assert_eq!(rule.text_arg(), None);
         assert_eq!(
             serde_json::to_value(&rule.outgoing_text).unwrap(),
             serde_json::json!({"paths": ["text", "blocks.*.text"]})

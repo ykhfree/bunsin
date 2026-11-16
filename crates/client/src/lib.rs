@@ -1,7 +1,8 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
 use bunsin_api::http::{
-    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody, profile_path,
+    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody,
+    RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
@@ -12,7 +13,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::{LlmUsage, ProfileInfo};
+use bunsin_core::records::{CorrectionRecord, LlmUsage, ProfileInfo};
 use bunsin_core::tool::PinSet;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -373,6 +374,21 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connections/connectors/{name}"));
             self.send_only(Method::DELETE, &path, NO_BODY).await
+        })
+    }
+
+    fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "corrections"), NO_BODY)
+                .await
+        })
+    }
+
+    fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = RetireCorrectionBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "retire-correction"), Some(&body))
+                .await
         })
     }
 

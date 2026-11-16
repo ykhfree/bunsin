@@ -320,13 +320,16 @@ async fn an_edit_is_sent_marked_and_recorded_as_a_correction() {
     rig.engine.approve("kim", id, Some(edit)).await.unwrap();
     assert_eq!(rig.slack.calls()[0].1["text"], format!("Short version.\n\n{MARKER}"));
 
-    // The next proposal request carries the correction.
+    // The next request about a similar task carries the correction, without the AI marker.
     rig.llm.reply(&post("ok"), 10);
-    rig.engine.ingest("kim", event("e2", "another question")).await.unwrap();
+    rig.engine
+        .ingest("kim", event("e2", "please answer again"))
+        .await
+        .unwrap();
     let prompt = &rig.llm.requests()[1].messages[0].content;
     assert!(prompt.contains("too long for this channel"));
-    assert!(prompt.contains("A long and formal first draft."));
-    assert!(prompt.contains("Short version."));
+    assert!(prompt.contains("draft: A long and formal first draft.\nedit: Short version.\nreason:"));
+    assert!(!prompt.contains(MARKER), "{prompt}");
 
     let artifacts = rig.engine.snapshot("kim").await.unwrap().artifacts;
     assert!(

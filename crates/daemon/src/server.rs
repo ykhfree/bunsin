@@ -11,7 +11,8 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
-    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody, status_of,
+    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody,
+    RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
     ApiError, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
@@ -21,7 +22,7 @@ use bunsin_api::{
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::{LlmUsage, ProfileInfo};
+use bunsin_core::records::{CorrectionRecord, LlmUsage, ProfileInfo};
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use bunsin_engine::Engine;
 use std::net::SocketAddr;
@@ -347,6 +348,25 @@ async fn delete_connector(
     Ok(Json(engine.remove_connector(&profile, &name).await?))
 }
 
+async fn corrections(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<CorrectionRecord>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.corrections(&profile).await?))
+}
+
+async fn retire_correction(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<RetireCorrectionBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.retire_correction(&profile, body.id).await?))
+}
+
 async fn wiki_index(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -414,6 +434,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("llm/test"), post(test_llm))
         .route(&profile("llm-usage"), post(llm_usage))
         .route(&profile("resolve-unknown"), post(resolve_unknown))
+        .route(&profile("corrections"), post(corrections))
+        .route(&profile("retire-correction"), post(retire_correction))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

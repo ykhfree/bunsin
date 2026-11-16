@@ -28,6 +28,8 @@
 //! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
 //! | POST | `/v1/profiles/{p}/llm-usage` | | `[LlmUsage]` |
 //! | POST | `/v1/profiles/{p}/resolve-unknown` | `ResolveUnknownBody` | `Outcome or null` |
+//! | POST | `/v1/profiles/{p}/corrections` | | `[CorrectionRecord]` |
+//! | POST | `/v1/profiles/{p}/retire-correction` | `RetireCorrectionBody` | |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -73,6 +75,11 @@ pub struct RejectBody {
 pub struct ResolveUnknownBody {
     pub inbox_id: i64,
     pub resolution: Resolution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetireCorrectionBody {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

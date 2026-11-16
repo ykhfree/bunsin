@@ -287,6 +287,8 @@ async fn a_token_reaches_only_its_own_profile() {
         };
         refused(kim.set_polls(other, polls).await);
         refused(kim.llm_usage(other).await.map(|_| ()));
+        refused(kim.corrections(other).await.map(|_| ()));
+        refused(kim.retire_correction(other, 1).await);
         refused(
             kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
                 .await
@@ -971,5 +973,43 @@ async fn an_unknown_item_is_resolved_over_http() {
     assert_ne!(copy, inbox_id);
     assert_eq!(rig.slack.calls().len(), 1);
     let again = kim.resolve_unknown("kim", inbox_id, bunsin_api::Resolution::Done).await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+}
+
+#[tokio::test]
+async fn corrections_are_listed_and_retired_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    rig.llm.reply(&post("A long draft."), 10);
+    let Outcome::PendingApproval { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap() else {
+        panic!("expected a pending item")
+    };
+    let edit = Edit {
+        args: json!({"channel": "C1", "text": "Short."}).as_object().unwrap().clone(),
+        reason: "shorter".into(),
+    };
+    kim.approve("kim", inbox_id, Some(edit)).await.unwrap();
+
+    let records = kim.corrections("kim").await.unwrap();
+    assert_eq!(records.len(), 1);
+    let c = &records[0].correction;
+    assert_eq!(
+        (
+            c.original.as_str(),
+            c.edited.as_str(),
+            c.reason.as_str(),
+            c.task.as_str()
+        ),
+        ("A long draft.", "Short.", "shorter", "hi")
+    );
+    // Another profile neither sees nor retires it.
+    let lee = rig.client(&rig.lee_token);
+    assert!(lee.corrections("lee").await.unwrap().is_empty());
+    let refused = lee.retire_correction("kim", records[0].id).await;
+    assert!(matches!(refused, Err(ApiError::Unauthorized(_))), "{refused:?}");
+
+    kim.retire_correction("kim", records[0].id).await.unwrap();
+    assert!(kim.corrections("kim").await.unwrap()[0].retired_at.is_some());
+    let again = kim.retire_correction("kim", records[0].id).await;
     assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
 }

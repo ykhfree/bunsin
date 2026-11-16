@@ -217,8 +217,8 @@ async fn replay_filters_the_event_too() {
 async fn a_correction_with_personal_data_is_filtered_in_later_prompts() {
     let rig = rig().await;
     rig.llm.reply(&post("Draft."), 10);
-    let Outcome::PendingApproval { inbox_id } = rig.engine.ingest("kim", event("e1", "lee", "hi")).await.unwrap()
-    else {
+    let first = event("e1", "lee", "who owns the release notes?");
+    let Outcome::PendingApproval { inbox_id } = rig.engine.ingest("kim", first).await.unwrap() else {
         panic!("expected a pending item")
     };
     // The owner types an address into the edit and the reason.
@@ -234,13 +234,24 @@ async fn a_correction_with_personal_data_is_filtered_in_later_prompts() {
     assert!(rig.slack.calls()[0].1["text"].as_str().unwrap().contains(EMAIL));
 
     rig.llm.reply(&ignore(), 10);
-    rig.engine.ingest("kim", event("e2", "lee", "again")).await.unwrap();
+    rig.engine
+        .ingest("kim", event("e2", "lee", "the release notes again"))
+        .await
+        .unwrap();
     let later = serde_json::to_string(&rig.llm.requests()[1]).unwrap();
     assert!(
         later.contains("[REDACTED:EMAIL]") && later.contains("[REDACTED:PHONE]"),
         "{later}"
     );
     assert!(!later.contains(EMAIL) && !later.contains(PHONE));
+    // The stored correction and the audit entry of the edit hold the filtered text only.
+    let stored = serde_json::to_string(&rig.engine.corrections("kim").await.unwrap()).unwrap();
+    assert!(
+        stored.contains("Mail [REDACTED:EMAIL].") && !stored.contains(EMAIL),
+        "{stored}"
+    );
+    let audit = serde_json::to_string(&rig.engine.snapshot("kim").await.unwrap().audit).unwrap();
+    assert!(audit.contains("[REDACTED:PHONE]") && !audit.contains(PHONE), "{audit}");
 }
 
 #[tokio::test]

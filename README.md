@@ -550,11 +550,18 @@ bunsind approve kim 1              # run pending item 1
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
 bunsind resolve-unknown kim 1 drop # an item cut by a stop: done, drop or retry
+bunsind corrections kim            # your stored edits of the agent's drafts
+bunsind retire-correction kim 3    # keep correction 3, but stop giving it to the agent
 bunsind stop kim on                # the kill switch: stops all writes of this profile
 ```
 
-An edit with a reason is stored as a correction. The agent sees recent corrections in
-its next prompts.
+An edit of a pending call is stored as a correction: the text of the draft and of your
+edit without the AI marker, your reason, and the message the call answered. All of it
+passes the privacy filter before it is stored. When a new message comes in, the agent gets
+up to five corrections of similar past messages. The server finds them by the words they
+share, and a rare word counts more than a common one. It uses no embeddings. A replay gets
+no corrections: one of them can hold the real reply. A retired correction stays stored
+and reaches no prompt.
 
 If the server stops while it runs an approved call, the next start does not run that call
 again: it may have reached its tool already. `status` shows it as `unknown`. Check the

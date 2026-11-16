@@ -443,3 +443,47 @@ fn a_start_marks_a_cut_call_unknown_and_the_owner_resolves_it() {
     );
     assert!(error.contains("not unknown"), "{error}");
 }
+
+#[test]
+fn the_owner_lists_and_retires_corrections() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let correction = bunsin_core::context::Correction {
+        tool: "slack/post".into(),
+        source: "slack".into(),
+        task: "when is the deploy?".into(),
+        original: "It is on Friday.\nI think.".into(),
+        edited: "Thursday.".into(),
+        reason: "it moved".into(),
+    };
+    let id = store.add_correction(4, &correction, 1).unwrap().to_string();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    let listed = stdout_of(server.run(&kim, &["corrections", "kim"]), "corrections");
+    assert_eq!(
+        listed,
+        format!(
+            "#{id} slack/post from slack\n  task: when is the deploy?\n  draft: It is on Friday.\n    I think.\n  \
+             edit: Thursday.\n  reason: it moved\n"
+        )
+    );
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["retire-correction", "kim", &id]),
+            "retire-correction"
+        ),
+        format!("correction {id} retired\n")
+    );
+    let listed = stdout_of(server.run(&kim, &["corrections", "kim"]), "corrections");
+    assert!(
+        listed.starts_with(&format!("#{id} slack/post from slack (retired)\n")),
+        "{listed}"
+    );
+    let error = stderr_of_failure(server.run(&kim, &["retire-correction", "kim", &id]), "a second retire");
+    assert!(error.contains("already retired"), "{error}");
+}

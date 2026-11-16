@@ -8,7 +8,7 @@ use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, LlmUsage, ProfileInfo};
+use bunsin_core::records::{ArtifactMeta, AuditEntry, CorrectionRecord, InboxItem, LlmUsage, ProfileInfo};
 use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use bunsin_core::wiki::{WikiPage, WikiSummary, WikiText};
@@ -465,6 +465,10 @@ pub trait EngineApi: Send + Sync {
     /// Removes a connector and its stored token.
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;
     /// The agent's notes: one line per page.
+    /// The stored corrections, also the retired ones. Newest first, at most 200.
+    fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>>;
+    /// Retires a correction: it stays stored, but no prompt gets it. A retired correction cannot be retired again.
+    fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
     fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>>;
     /// Stores the owner's text for a page. The owner's text replaces the agent's. The sources of the page stay.

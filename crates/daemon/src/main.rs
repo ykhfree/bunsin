@@ -387,6 +387,19 @@ enum Command {
         #[arg(value_parser = ["done", "retry", "drop"])]
         resolution: String,
     },
+    /// Show the stored corrections: the edits you made to the agent's drafts. Newest first.
+    Corrections {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Retire a correction. It stays stored, but the agent no longer gets it.
+    RetireCorrection {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -409,6 +422,22 @@ fn page_markdown(page: &bunsin_core::wiki::WikiPage) -> String {
     }
     for source in &page.sources {
         text.push_str(&format!("- {}: {}\n", source.origin, source.detail));
+    }
+    text
+}
+
+/// A correction as indented lines. A line break in a text starts an indented line too.
+fn correction_text(record: &bunsin_core::records::CorrectionRecord) -> String {
+    let c = &record.correction;
+    let retired = if record.retired_at.is_some() { " (retired)" } else { "" };
+    let mut text = format!("#{} {} from {}{retired}\n", record.id, c.tool, c.source);
+    for (label, value) in [
+        ("task", &c.task),
+        ("draft", &c.original),
+        ("edit", &c.edited),
+        ("reason", &c.reason),
+    ] {
+        text.push_str(&format!("  {label}: {}\n", value.replace('\n', "\n    ")));
     }
     text
 }
@@ -936,6 +965,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 Some(outcome) => println!("{}", json(&outcome)),
                 None => println!("item {inbox_id} resolved"),
             }
+        }
+        Command::Corrections { remote, profile } => {
+            for record in connect(&remote)?.corrections(&profile).await.map_err(text)? {
+                print!("{}", correction_text(&record));
+            }
+        }
+        Command::RetireCorrection { remote, profile, id } => {
+            connect(&remote)?.retire_correction(&profile, id).await.map_err(text)?;
+            println!("correction {id} retired");
         }
         Command::Reject {
             remote,

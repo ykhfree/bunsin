@@ -1,6 +1,7 @@
 //! Rows that the store keeps and the UI shows.
 
 use crate::approval::ApprovalState;
+use crate::context::Correction;
 use crate::wiki::{WikiSource, WikiText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -95,4 +96,17 @@ pub struct LlmUsage {
     pub output_tokens: u64,
     /// The time of all calls together, in milliseconds.
     pub latency_ms: u64,
+}
+
+/// A stored correction, as the owner reviews it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectionRecord {
+    pub id: i64,
+    /// The inbox item whose draft the owner edited.
+    pub inbox_id: i64,
+    #[serde(flatten)]
+    pub correction: Correction,
+    pub created_at: i64,
+    /// Unix seconds. A retired correction stays stored, but no prompt gets it.
+    pub retired_at: Option<i64>,
 }

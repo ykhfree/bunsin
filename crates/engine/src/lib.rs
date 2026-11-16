@@ -3,6 +3,7 @@
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
 mod connections;
+mod corrections;
 mod llm_log;
 mod notes;
 mod poll_settings;
@@ -20,7 +21,7 @@ use bunsin_api::{
     ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
-use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
+use bunsin_core::context::{ContextInput, ToolHint, assemble};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
@@ -29,7 +30,7 @@ use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
-use bunsin_core::records::{InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
+use bunsin_core::records::{CorrectionRecord, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
 use bunsin_core::wiki::{WIKI_READ_TOOL, WikiPage, WikiSummary, WikiUpdate, index_text, page_text};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
@@ -42,7 +43,6 @@ use std::sync::{Arc, Mutex};
 
 const CONFIG_KEY: &str = "config";
 const LIST_LIMIT: u32 = 200;
-const CORRECTIONS_IN_PROMPT: u32 = 5;
 /// How many times the handling of one event is tried before the owner is asked.
 const MAX_EVENT_ATTEMPTS: u32 = 3;
 /// How many tools that read the agent may call for one event.
@@ -158,14 +158,6 @@ fn store_error(error: StoreError) -> ApiError {
         StoreError::NoSuchProfile(_) | StoreError::NotFound(..) => ApiError::NotFound(error.to_string()),
         StoreError::BadProfileId(_) | StoreError::ProfileExists(_) => ApiError::Invalid(error.to_string()),
         other => internal(other),
-    }
-}
-
-/// The text the user sees and edits: the one outgoing-text argument, or all arguments.
-fn draft_text(args: &Map<String, Value>, text_arg: Option<&str>) -> String {
-    match text_arg.and_then(|name| args.get(name)).and_then(Value::as_str) {
-        Some(text) => text.to_owned(),
-        None => Value::Object(args.clone()).to_string(),
     }
 }
 
@@ -423,12 +415,15 @@ impl Engine {
             runtime,
             redactor,
         } = ctx;
-        let corrections = store.recent_corrections(CORRECTIONS_IN_PROMPT).map_err(store_error)?;
         let mut tools = Self::tool_hints(config);
-        // Replay gets no notes: they hold facts from after the replayed event.
-        let notes_index = match allow_reads {
-            true => Some(index_text(&store.wiki_index().map_err(store_error)?, self.now())),
-            false => None,
+        // Replay gets no notes and no corrections: they hold facts from after the replayed event,
+        // and a correction can hold the real reply.
+        let (corrections, notes_index) = match allow_reads {
+            true => (
+                Self::similar_corrections(store, event)?,
+                Some(index_text(&store.wiki_index().map_err(store_error)?, self.now())),
+            ),
+            false => (Vec::new(), None),
         };
         if allow_reads {
             tools.push(ToolHint {
@@ -898,7 +893,6 @@ impl Engine {
         let config = &ctx.config;
         let key = item.event_key.clone();
         let rule = config.policy.rules.get(&tool_id);
-        let text_arg = rule.and_then(|rule| rule.text_arg());
 
         if let Some(Edit {
             args: mut edited,
@@ -910,14 +904,7 @@ impl Engine {
                 mark_args(&mut edited, &rule.outgoing_text, &config.ai_marker)
                     .map_err(|e| ApiError::Invalid(e.to_string()))?;
             }
-            let correction = Correction {
-                tool: tool_id.clone(),
-                source: String::new(),
-                task: String::new(),
-                original: draft_text(&args, text_arg),
-                edited: draft_text(&edited, text_arg),
-                reason,
-            };
+            let correction = Self::correction(&ctx, &item, &tool_id, &args, &edited, &reason)?;
             let body = InboxBody::ToolCall {
                 tool: tool_id.clone(),
                 args: edited,
@@ -1359,6 +1346,14 @@ impl EngineApi for Engine {
 
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.delete_connector(profile, name) })
+    }
+
+    fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>> {
+        Box::pin(async move { self.read_corrections(profile) })
+    }
+
+    fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.retire(profile, id) })
     }
 
     fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {

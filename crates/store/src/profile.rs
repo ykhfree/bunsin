@@ -1,7 +1,8 @@
 use crate::{Result, StoreError};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem, LlmUsage, ReadNote};
+use bunsin_core::event::InboundEvent;
+use bunsin_core::records::{ArtifactMeta, AuditEntry, CorrectionRecord, InboxBody, InboxItem, LlmUsage, ReadNote};
 use bunsin_core::search::{TermQuery, rank, term_query};
 use bunsin_core::sha256_hex;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiSource, WikiSummary, WikiText};
@@ -454,6 +455,19 @@ impl ProfileStore {
         Ok(EventStart::Retry { attempt: attempts + 1 })
     }
 
+    /// The stored form of an event: after the privacy filter. `None` if no event has this key.
+    pub fn event(&self, dedupe_key: &str) -> Result<Option<InboundEvent>> {
+        let payload: Option<String> = self
+            .db()
+            .query_row(
+                "SELECT payload FROM events WHERE dedupe_key = ?1",
+                [dedupe_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.map(|text| serde_json::from_str(&text)).transpose()?)
+    }
+
     /// Closes an event. It is not handled again.
     pub fn finish_event(&self, dedupe_key: &str) -> Result<()> {
         self.db()
@@ -873,23 +887,46 @@ impl ProfileStore {
             .collect()
     }
 
-    /// Newest first.
-    pub fn recent_corrections(&self, limit: u32) -> Result<Vec<Correction>> {
+    /// All corrections, also the retired ones. Newest first.
+    pub fn corrections(&self, limit: u32) -> Result<Vec<CorrectionRecord>> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT tool, source, task, original, edited, reason FROM corrections ORDER BY id DESC LIMIT ?1",
+            "SELECT id, inbox_id, tool, source, task, original, edited, reason, created_at, retired_at
+             FROM corrections ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], |row| {
-            Ok(Correction {
-                tool: row.get(0)?,
-                source: row.get(1)?,
-                task: row.get(2)?,
-                original: row.get(3)?,
-                edited: row.get(4)?,
-                reason: row.get(5)?,
+            Ok(CorrectionRecord {
+                id: row.get(0)?,
+                inbox_id: row.get(1)?,
+                correction: Correction {
+                    tool: row.get(2)?,
+                    source: row.get(3)?,
+                    task: row.get(4)?,
+                    original: row.get(5)?,
+                    edited: row.get(6)?,
+                    reason: row.get(7)?,
+                },
+                created_at: row.get(8)?,
+                retired_at: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Retires a correction. Returns false if it was retired before.
+    pub fn retire_correction(&self, id: i64, now: i64) -> Result<bool> {
+        let db = self.db();
+        let changed = db.execute(
+            "UPDATE corrections SET retired_at = ?1 WHERE id = ?2 AND retired_at IS NULL",
+            (now, id),
+        )?;
+        let exists: bool = db.query_row("SELECT EXISTS (SELECT 1 FROM corrections WHERE id = ?1)", [id], |row| {
+            row.get(0)
+        })?;
+        if !exists {
+            return Err(StoreError::NotFound("correction", id));
+        }
+        Ok(changed == 1)
     }
 
     // --- LLM calls ---
@@ -1341,14 +1378,58 @@ mod tests {
     }
 
     #[test]
-    fn corrections_come_back_newest_first() {
+    fn corrections_are_listed_newest_first_and_retired_once() {
         let (_dir, s) = store();
+        let mut ids = Vec::new();
         for (i, reason) in ["too long", "wrong tone", "missing link"].iter().enumerate() {
-            s.add_correction(1, &correction("slack", "t", reason), i as i64)
-                .unwrap();
+            ids.push(
+                s.add_correction(i as i64 + 7, &correction("slack", "t", reason), i as i64)
+                    .unwrap(),
+            );
         }
-        let reasons: Vec<String> = s.recent_corrections(2).unwrap().into_iter().map(|c| c.reason).collect();
-        assert_eq!(reasons, ["missing link", "wrong tone"]);
+        let listed = s.corrections(2).unwrap();
+        let rows: Vec<_> = listed
+            .iter()
+            .map(|r| {
+                (
+                    r.id,
+                    r.inbox_id,
+                    r.correction.reason.as_str(),
+                    r.created_at,
+                    r.retired_at,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [(ids[2], 9, "missing link", 2, None), (ids[1], 8, "wrong tone", 1, None)]
+        );
+        assert_eq!(listed[0].correction, correction("slack", "t", "missing link"));
+
+        assert!(s.retire_correction(ids[1], 50).unwrap());
+        // A second retire changes nothing, also not the time.
+        assert!(!s.retire_correction(ids[1], 60).unwrap());
+        assert_eq!(s.corrections(3).unwrap()[1].retired_at, Some(50));
+        assert!(matches!(
+            s.retire_correction(999, 70),
+            Err(StoreError::NotFound("correction", 999))
+        ));
+    }
+
+    #[test]
+    fn a_stored_event_is_read_back_by_its_key() {
+        let (_dir, s) = store();
+        let event = InboundEvent {
+            source: "slack".into(),
+            external_id: "1".into(),
+            thread: None,
+            author: "lee".into(),
+            text: "deploy?".into(),
+        };
+        s.begin_event("k1", &serde_json::to_value(&event).unwrap(), 1, 3)
+            .unwrap();
+        assert_eq!(s.event("k1").unwrap(), Some(event));
+        assert_eq!(s.event("k2").unwrap(), None);
     }
 
     fn terms(text: &str) -> Vec<String> {
