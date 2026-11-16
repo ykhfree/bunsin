@@ -227,7 +227,7 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   "서버 환경 변수", "없음" 중 하나만 보여 줍니다.
 - `--token-stdin`이 없으면 저장된 token을 유지합니다. `--clear-token`은 token을 지웁니다.
 - 창이 설정을 읽은 뒤에 다른 사람이 같은 설정을 바꿨으면, 창은 덮어쓰기 전에 경고합니다.
-  명령줄과 `config-set`은 이 검사를 하지 않습니다.
+  명령줄과 `config-set`은 이 검사를 하지 않습니다. 권한 규칙 명령(`rule-set`, `rule-remove`)만 검사합니다.
 - token은 입력한 주소에 묶입니다. 연결을 다른 host나 port로 옮기면 token을 다시 입력해야 합니다.
   서버는 그 경우 token 유지를 거부합니다.
 - 커넥터 이름은 a-z, 0-9, `-`로 된 1~32자입니다. 이름은 모든 도구 ID의 앞부분이 됩니다(예: `slack/post_message`).
@@ -275,10 +275,25 @@ Save는 표 전체를 보내고, 화면은 저장 전에 바뀌는 규칙을 하
 ![창의 Permissions 화면](docs/screens/permissions-light.png)
 
 - 버튼은 도구 입력의 최상위에 있는 글 인자만 보여 줍니다. 인자를 누르면 그 인자가 더해지거나 빠집니다. 그래서 여러 인자를 고를 수 있습니다.
-- 글이 다른 값 안에 들어 있으면 설정 파일에 규칙을 적으십시오.
+- 글이 다른 값 안에 들어 있으면 `bunsind rule-set`이나 설정 파일로 규칙을 정하십시오.
   화면은 그런 규칙을 있는 그대로 보여 주고, 저장할 때 유지하고, 선택지 하나로 남겨 둡니다.
 - 규칙을 바꾸면 승인함에서 이미 기다리는 항목에도 적용됩니다. 서버는 승인하는 시점의 규칙에 따라 AI 표시를 붙입니다.
 - poll이 쓰는 규칙은 지울 수 없습니다. 화면이 서버의 거부 이유를 보여 줍니다.
+
+명령줄에서는 규칙을 하나씩 바꿉니다.
+
+```sh
+bunsind rules kim                                   # 규칙마다 한 줄. 규칙 없는 승인된 도구는 "off"
+bunsind rule-set kim slack/search --class read
+bunsind rule-set kim slack/post --class write --text text --text 'blocks.*.text.text'
+bunsind rule-set kim slack/delete --class delete --tier approve --no-text
+bunsind rule-remove kim slack/search
+```
+
+- write 또는 delete 규칙에는 `--text <자리>`(자리가 여럿이면 반복)나 `--no-text`가 반드시 있어야 합니다.
+  `--tier`를 빼면 `approve`입니다. delete는 `autonomous`가 될 수 없습니다.
+- 명령은 표를 읽고, 규칙 하나를 바꾸고, 읽은 표와 함께 보냅니다.
+  그 사이에 다른 사람이 규칙을 바꿨으면 서버가 거부하고, 아무것도 저장되지 않습니다.
 
 같은 규칙을 설정 파일로 적으면 다음과 같습니다.
 

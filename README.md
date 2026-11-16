@@ -262,7 +262,8 @@ bunsind connector-remove kim jira                # removes the connector and its
   only "token stored on the server", "token from the server's environment" or "no token".
 - Without `--token-stdin` the stored token is kept. `--clear-token` removes it.
 - If someone else changed the same settings after the window loaded them, the window
-  warns before it overwrites. The command line and `config-set` do not check.
+  warns before it overwrites. The command line and `config-set` do not check, except
+  the rule commands (`rule-set`, `rule-remove`).
 - A token belongs to the address it was entered for. If you move a connection to another
   host or port, enter the token again; the server refuses to keep it.
 - A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
@@ -317,18 +318,34 @@ bunsind connector-remove kim jira                # removes the connector and its
 
 In the window, the **Permissions** view lists each approved tool and sets its rule with
 buttons: Off, Read, Write or Delete, then the step and the arguments that hold the text
-for other people. A click on an argument adds or removes it, so you can choose several. Nothing is chosen for you from a tool's name or description. A write
-or delete rule cannot be saved until you say where its text is, or that it sends none.
+for other people. A click on an argument adds or removes it, so you can choose several.
+Nothing is chosen for you from a tool's name or description. A write or delete rule
+cannot be saved until you say where its text is, or that it sends none.
 Save sends the whole table, and the view lists each change before you save.
 
 ![The permissions view of the window](docs/screens/permissions-light.png)
 
 - The buttons offer the text arguments at the top of a tool's input. If the text is
-  inside another value, write the rule in the settings file. The view shows such a rule
-  as it is, keeps it on save, and keeps it as one of the choices.
+  inside another value, set the rule with `bunsind rule-set` or in the settings file.
+  The view shows such a rule as it is, keeps it on save, and keeps it as one of the choices.
 - A rule change also applies to items that already wait in the inbox: at approval the
   server adds the AI marker by the rule in force at that time.
 - A rule that a poll needs cannot be removed. The view shows the server's reason.
+
+On the command line, one rule at a time:
+
+```sh
+bunsind rules kim                                   # one line per rule; "off" for an approved tool without one
+bunsind rule-set kim slack/search --class read
+bunsind rule-set kim slack/post --class write --text text --text 'blocks.*.text.text'
+bunsind rule-set kim slack/delete --class delete --tier approve --no-text
+bunsind rule-remove kim slack/search
+```
+
+- A write or delete rule needs `--text <place>` (repeat it for more places) or `--no-text`.
+  `--tier` defaults to `approve`. A delete cannot be `autonomous`.
+- The command reads the table, changes one rule and sends the table with what it read.
+  If someone changed the rules in between, the server refuses and nothing is saved.
 
 The same rules as a settings file:
 

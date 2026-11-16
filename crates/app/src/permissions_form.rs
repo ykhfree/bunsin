@@ -19,7 +19,8 @@ const HELP: &str = "The agent can use a tool only if it has a rule here. Read: t
     Write and Delete: the step says how far the agent goes. For a tool that sends text to other people, choose \
     every argument that holds such text: the server adds the AI marker to each.";
 const NESTED: &str = "The buttons list the text arguments at the top of a tool's input. A click adds or removes one. \
-    If the text is inside another value, for example in the items of a list, set the rule in the settings file.";
+    If the text is inside another value, for example in the items of a list, set the rule with \
+    `bunsind rule-set` or in the settings file.";
 const PAGE_CONFLICT: &str = "The rules changed on the server since this view loaded them. Nothing was saved.";
 const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 

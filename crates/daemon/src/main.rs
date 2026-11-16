@@ -12,7 +12,7 @@ use bunsin_core::records::InboxBody;
 use bunsin_core::settings::Wire;
 use bunsin_daemon::keystore::KeyStore;
 use bunsin_daemon::server::{Poller, ServeConfig, serve};
-use bunsin_daemon::{RealBackends, UpstreamPolicy};
+use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
 use bunsin_engine::Engine;
 use bunsin_engine::{KeyFile, KeySource};
 use bunsin_store::AppStore;
@@ -334,6 +334,41 @@ enum Command {
         remote: Remote,
         profile: String,
         dir: PathBuf,
+    },
+    /// Show the permission table: one line per rule, and `off` for an approved tool without a rule.
+    Rules {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Set the rule of one tool. The other rules stay. A write or delete rule needs
+    /// --text or --no-text, so that a text without the AI marker is a choice, not a default.
+    RuleSet {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>
+        tool: String,
+        #[arg(long, value_parser = ["read", "write", "delete"])]
+        class: String,
+        /// How far a write goes. The default is approve. Not for a read rule.
+        #[arg(long, value_parser = ["observe", "draft", "approve", "autonomous"])]
+        tier: Option<String>,
+        /// A place of text for other people: an argument name, or a path such as
+        /// blocks.*.text, where `*` means every item of a list. Repeat it for more places.
+        #[arg(long = "text", conflicts_with = "no_text")]
+        texts: Vec<String>,
+        /// The tool sends no text to other people.
+        #[arg(long)]
+        no_text: bool,
+    },
+    /// Remove the rule of one tool. The agent cannot use the tool then.
+    RuleRemove {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>
+        tool: String,
     },
     /// Dismiss a pending item or a draft.
     Reject {
@@ -823,6 +858,31 @@ async fn run(cli: Cli) -> Result<(), String> {
                 preview.events.len()
             );
             println!("{}", json(&preview.events));
+        }
+        Command::Rules { remote, profile } => {
+            let permissions = connect(&remote)?.permissions(&profile).await.map_err(text)?;
+            for line in rules::table_lines(&permissions) {
+                println!("{line}");
+            }
+        }
+        Command::RuleSet {
+            remote,
+            profile,
+            tool,
+            class,
+            tier,
+            texts,
+            no_text,
+        } => {
+            // The options are checked before the server is asked.
+            let rule = rules::parse_rule(&class, tier.as_deref(), &texts, no_text)?;
+            rules::check_tool_id(&tool)?;
+            rules::save_rule(&connect(&remote)?, &profile, &tool, Some(rule)).await?;
+            println!("rule of {tool} in {profile} saved");
+        }
+        Command::RuleRemove { remote, profile, tool } => {
+            rules::save_rule(&connect(&remote)?, &profile, &tool, None).await?;
+            println!("rule of {tool} in {profile} removed");
         }
         Command::Reject {
             remote,
