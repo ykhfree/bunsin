@@ -1023,11 +1023,15 @@ name = "bunsin-connectors"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bunsin-core",
+ "hex",
+ "hmac 0.12.1",
  "reqwest",
  "rmcp",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
 ]

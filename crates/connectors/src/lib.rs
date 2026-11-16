@@ -1,6 +1,12 @@
 //! Connectors to external services. `McpConnector` is an MCP client.
+//! `ApiConnector` calls a REST API with fixed tools. `webhook` checks and reads inbound events.
 //!
 //! This crate does no permission checks. The engine checks the policy before it calls a tool.
+
+pub mod api;
+pub mod webhook;
+
+pub use api::{ApiAuth, ApiConnector, ApiService};
 
 use bunsin_core::ports::{BoxFuture, Connector, ConnectorError};
 use bunsin_core::tool::ToolSpec;
