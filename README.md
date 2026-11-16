@@ -324,7 +324,7 @@ Save sends the whole table, and the view lists each change before you save.
 
 - The buttons offer the text arguments at the top of a tool's input. If the text is
   inside another value, write the rule in the settings file. The view shows such a rule
-  as it is and does not change it.
+  as it is and keeps its argument as one of the choices.
 - A rule change also applies to items that already wait in the inbox: at approval the
   server adds the AI marker by the rule in force at that time.
 - A rule that a poll needs cannot be removed. The view shows the server's reason.

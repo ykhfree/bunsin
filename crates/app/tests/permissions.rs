@@ -157,7 +157,7 @@ fn a_click_changes_only_the_draft_and_save_stores_it(cx: &mut TestAppContext) {
         assert_eq!(label(window, "perm-slack/search-state"), READ);
         assert_eq!(
             label(window, "permissions-changes"),
-            "Not saved:\nslack/post: write, approve, text in `text` → write, draft, text in `text`\n\
+            "Not saved: 2 rules\nslack/post: write, approve, text in `text` → write, draft, text in `text`\n\
              slack/search: off → read"
         );
     });
@@ -173,6 +173,7 @@ fn a_click_changes_only_the_draft_and_save_stores_it(cx: &mut TestAppContext) {
     assert_eq!(stored["slack/search"], ToolRule::read());
     assert_eq!(stored["slack/post"], write(Tier::Draft, text_in("text")));
     assert_eq!(stored.len(), 2);
+    let_refreshes_pass(cx);
     on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "permissions-result"), "Saved");
         assert_eq!(label(window, "permissions-changes"), "");
@@ -225,7 +226,7 @@ fn a_write_rule_is_not_saved_until_the_text_choice_is_made(cx: &mut TestAppConte
         );
         assert_eq!(
             label(window, "permissions-changes"),
-            "Not saved:\nslack/remove: off → write, approve, text not chosen"
+            "Not saved: 1 rule\nslack/remove: off → write, approve, text not chosen"
         );
     });
 
@@ -330,6 +331,19 @@ fn stored_rules_that_the_buttons_cannot_make_are_shown_as_they_are(cx: &mut Test
         assert_eq!(label(window, "permissions-changes"), "");
     });
 
+    // After a click on another argument, the stored one is still offered.
+    clicks(cx, window, &["perm-slack/post-text-channel"]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "permissions-changes"),
+            "Not saved: 1 rule\nslack/post: write, approve, text in `blocks` → write, approve, text in `channel`"
+        );
+    });
+    clicks(cx, window, &["perm-slack/post-text-blocks"]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "permissions-changes"), "");
+    });
+
     // A save of another tool keeps all three as they are.
     clicks(cx, window, &["perm-slack/search-read"]);
     save(cx, window, &shell);
@@ -341,7 +355,7 @@ fn stored_rules_that_the_buttons_cannot_make_are_shown_as_they_are(cx: &mut Test
     on_screen(cx, window, |window, _| {
         assert_eq!(
             label(window, "permissions-changes"),
-            "Not saved:\njira/create: write, draft, text in `summary` → off"
+            "Not saved: 1 rule\njira/create: write, draft, text in `summary` → off"
         );
     });
     save(cx, window, &shell);
@@ -470,13 +484,15 @@ fn a_refused_save_shows_the_reason_and_keeps_the_draft(cx: &mut TestAppContext) 
     clicks(cx, window, &["perm-slack/search-off"]);
     save(cx, window, &shell);
     assert_eq!(rt.block_on(rules(&rig)), before);
+    // The reason stays on screen while the window refreshes.
+    let_refreshes_pass(cx);
     on_screen(cx, window, |window, _| {
         let result = label(window, "permissions-result");
         assert!(result.contains("has no permission rule"), "{result}");
         assert_eq!(label(window, "perm-slack/search-state"), OFF);
         assert_eq!(
             label(window, "permissions-changes"),
-            "Not saved:\nslack/search: read → off"
+            "Not saved: 1 rule\nslack/search: read → off"
         );
     });
 }
@@ -494,9 +510,15 @@ fn save_stays_on_screen_above_a_long_list_of_tools(cx: &mut TestAppContext) {
     // The list is longer than the window. The first tool and Save can be clicked without a scroll.
     clicks(cx, window, &["perm-slack/tool00-read"]);
     on_screen(cx, window, |window, _| {
+        // Save and the list of changes are not inside the list that scrolls.
+        let list = window.within("permissions-list");
+        assert!(list.try_find("perm-slack/tool29-read").is_some());
+        assert!(list.try_find("save-permissions").is_none());
+        assert!(list.try_find("permissions-changes").is_none());
+        assert!(window.try_find("save-permissions").is_some());
         assert_eq!(
             label(window, "permissions-changes"),
-            "Not saved:\nslack/tool00: off → read"
+            "Not saved: 1 rule\nslack/tool00: off → read"
         );
         // The rule of `slack/post` has no approved tool now. It is listed before the 30 tools.
         assert_eq!(
@@ -525,5 +547,43 @@ fn a_profile_without_approved_tools_says_what_to_do(cx: &mut TestAppContext) {
     on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "permissions-empty"), "no approved tool");
         assert!(window.try_find("save-permissions").is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn another_profile_shows_its_own_rules_and_drops_the_draft(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(approve(&rig, slack_tools()));
+    let kim = rt.block_on(rules(&rig));
+    let (window, shell) = open_permissions(cx, &rt, &rig);
+    clicks(cx, window, &["perm-slack/search-read", "profile-lee"]);
+    wait_until(cx, &shell, "lee's rules", |s| {
+        s.state.selected.as_deref() == Some("lee") && s.state.permissions.is_some()
+    });
+    on_screen(cx, window, |window, _| {
+        // Lee approved one tool, without typed arguments. Kim's tools and Kim's draft are not here.
+        assert_eq!(
+            label(window, "perm-slack/post-state"),
+            "Write: it runs after you approve. The AI marker goes into `text`."
+        );
+        assert!(window.try_find("perm-slack/search-state").is_none());
+        assert_eq!(label(window, "permissions-changes"), "");
+    });
+    // A save in lee's view reaches lee only.
+    clicks(cx, window, &["perm-slack/post-tier-draft"]);
+    save(cx, window, &shell);
+    assert_eq!(rt.block_on(rules(&rig)), kim);
+    let lee = rt.block_on(rig.engine.permissions("lee")).unwrap().rules;
+    assert_eq!(lee["slack/post"], write(Tier::Draft, text_in("text")));
+
+    // Back at kim, the draft from before is gone.
+    clicks(cx, window, &["profile-kim"]);
+    wait_until(cx, &shell, "kim's rules", |s| {
+        s.state.selected.as_deref() == Some("kim")
+    });
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "perm-slack/search-state"), OFF);
+        assert_eq!(label(window, "permissions-changes"), "");
     });
 }

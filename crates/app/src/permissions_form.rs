@@ -362,11 +362,15 @@ impl Shell {
             lines.push(row().child(quiet("Step", cx)).children(tiers).into_any_element());
 
             // The arguments the buttons can offer, and the stored one even if it is not among them.
+            // The server's one stays in the list after another click, so the owner can go back to it.
             let mut args = text_args(tool);
-            if let Some(OutgoingText::Arg(stored)) = &rule.text
-                && !args.contains(stored)
-            {
-                args.push(stored.clone());
+            let base = self.permissions.base.get(id).map(|rule| &rule.outgoing_text);
+            for stored in [rule.text.as_ref(), base].into_iter().flatten() {
+                if let OutgoingText::Arg(stored) = stored
+                    && !args.contains(stored)
+                {
+                    args.push(stored.clone());
+                }
             }
             let texts = args.into_iter().map(|arg| {
                 let (tool_id, value) = (id.to_owned(), OutgoingText::Arg(arg.clone()));
@@ -451,7 +455,9 @@ impl Shell {
         let changes_text = if changes.is_empty() {
             String::new()
         } else {
-            format!("Not saved:\n{}", changes.join("\n"))
+            // The count is in the first line: the box shows a few lines and scrolls for the others.
+            let rules = if changes.len() == 1 { "rule" } else { "rules" };
+            format!("Not saved: {} {rules}\n{}", changes.len(), changes.join("\n"))
         };
         let result = match &self.state.permissions_result {
             Some(Err(SaveError::Failed(error))) => Err(error.clone()),
@@ -493,8 +499,9 @@ impl Shell {
             // The changes are listed beside Save, so a wrong click far down the list is seen before saving.
             .child(
                 div()
+                    .id("permissions-changes-box")
                     .max_h(px(96.))
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .text_sm()
                     .text_color(colors.waiting)
                     .child(labelled("permissions-changes", changes_text)),

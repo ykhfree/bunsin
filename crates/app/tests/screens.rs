@@ -137,6 +137,8 @@ async fn fixture() -> (common::Rig, UiState) {
             json!({"channel": text, "ts": text}),
         ),
     ];
+    // The connector lists the same tools, so the check in the settings finds no difference.
+    rig.slack.set_tools(slack.clone());
     config.approved_tools.insert("slack".into(), slack);
     let rule = |class, tier, text| ToolRule {
         class,
@@ -317,6 +319,17 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     click(&mut cx, "tab-permissions");
     click(&mut cx, "perm-slack/post-tier-draft");
     shot(&mut cx, window, dir, &name("permissions"));
+    // More changes than the box beside Save shows at once.
+    for id in [
+        "perm-slack/post-text-channel",
+        "perm-slack/search-off",
+        "perm-slack/add_reaction-tier-approve",
+        "perm-slack/add_reaction-text-emoji",
+        "perm-slack/add_reaction-delete",
+    ] {
+        click(&mut cx, id);
+    }
+    shot(&mut cx, window, dir, &name("permissions-changes"));
 
     // The settings, with the result of a check of the connector.
     click(&mut cx, "tab-settings");
