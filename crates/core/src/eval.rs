@@ -1,7 +1,7 @@
 //! Replay evaluation: past cases, the scores of the agent's drafts for them, and the owner's pass mark.
 //!
-//! Every score here is computed without an LLM. An optional LLM judge exists, but its verdict is
-//! kept apart from these types, so it never changes a score or a pass.
+//! Every score here is computed without an LLM. An optional LLM judge exists. Its verdict is stored
+//! and shown only: no score, rate or pass mark takes it, so it never changes a decision.
 
 use crate::event::InboundEvent;
 use crate::policy::ToolClass;
@@ -261,6 +261,27 @@ pub struct EvalConfig {
     /// The owner's pass mark. `None`: a report shows the rates only.
     #[serde(default)]
     pub pass: Option<EvalPass>,
+    /// Ask the LLM to compare each reply draft with the real reply. It costs one LLM call per case.
+    #[serde(default)]
+    pub judge: bool,
+}
+
+/// How the LLM judge compares a draft with the real reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Same,
+    Partial,
+    Different,
+}
+
+/// The LLM judge's view of one draft. It is shown to the owner and feeds nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Judgment {
+    pub verdict: Verdict,
+    /// After the privacy filter.
+    pub reason: String,
 }
 
 /// A stored replay case. The event and the real reply passed the privacy filter before they were stored.
@@ -303,6 +324,10 @@ pub struct EvalResult {
     pub draft: String,
     /// Why the replay failed, after the privacy filter.
     pub error: Option<String>,
+    /// The LLM judge's view, if the owner turned the judge on and the case expects a reply that
+    /// the agent drafted. Only the report shows it.
+    #[serde(default)]
+    pub judge: Option<Judgment>,
 }
 
 #[cfg(test)]

@@ -254,6 +254,11 @@
     끝난 run은 실패한 사례가 없고 세 비율이 모두 기준 이상일 때만 통과한다. `None`인 비율은 기준을 넘지 못한다(경계 사례가 없는 세트는 통과하지 않는다).
   - API: `add_replay_cases`, `replay_cases`(200개), `delete_replay_case`, `start_eval`, `eval_report`(최신 run). 경로는 `POST .../<kebab-case 이름>`, 명령은 같은 이름의 `bunsind` 명령이다.
     `replay`(사례 하나를 바로 재현)는 결과에 `score`를 더한다.
+  - **LLM 심판**(설정 `eval.judge`, 기본 false): `reply` 사례이고 초안의 종류가 `reply`일 때만 사례마다 한 번 묻는다.
+    초안과 실제 답(둘 다 필터를 거친 글)을 `<data>`로 인용하고 `{verdict: same|partial|different, reason}`을 받는다. LLM 호출 로그의 purpose는 `judge`이다.
+    판정은 `eval_results.judge`(이유는 필터를 거친다)에만 저장하고 보고서에만 보인다. 호출이 실패하거나 답이 형식에 맞지 않으면 판정이 없고, 사례는 실패가 아니다.
+    비율과 통과 판정(`EvalSummary::of`)의 입력은 `(Expect, Option<CaseScore>)`이고, 정책과 `suggest`의 입력에도 판정이 없다. 타입으로 막는다.
+    테스트: 심판을 켜고 판정이 `same`, `different`, 형식 오류여도 비율, 통과, `autonomy()`, 결정 개수가 같다.
 - 비밀 값은 설정에 저장하지 않는다. 9절을 본다.
 
 ## 5. LLM 어댑터

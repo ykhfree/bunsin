@@ -22,6 +22,8 @@ pub(crate) enum Purpose {
     Replay,
     /// The owner's connection test.
     LlmTest,
+    /// The LLM judge of an evaluation run.
+    Judge,
 }
 
 impl Purpose {
@@ -30,6 +32,7 @@ impl Purpose {
             Purpose::Event => "event",
             Purpose::Replay => "replay",
             Purpose::LlmTest => "llm_test",
+            Purpose::Judge => "judge",
         }
     }
 }

@@ -646,6 +646,12 @@ A finished run passes only if every rate meets its mark and no case failed. A ra
 cases, for example with no `escalate` case, does not meet its mark. Without a pass mark,
 the report shows the rates only.
 
+An LLM judge is off by default. With `"eval": {"judge": true}` the server asks the LLM once
+for each `reply` case that the agent answered with a reply: is the draft the same as your
+reply, part of it, or different? Both texts reach the LLM as quoted data after the privacy
+filter. The report shows the verdict next to the scores. No rate, no pass mark and no
+suggestion of the Permissions view takes it.
+
 ## Desktop window (macOS)
 
 ```sh

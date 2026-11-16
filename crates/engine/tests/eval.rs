@@ -2,8 +2,9 @@
 
 mod common;
 
-use bunsin_api::{ApiError, EngineApi, EvalReport, ProfileConfig, ReplayCase};
-use bunsin_core::eval::{DraftKind, EvalPass, Expect, RunState};
+use bunsin_api::{ApiError, EngineApi, EvalReport, Outcome, ProfileConfig, ReplayCase};
+use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::eval::{DraftKind, EvalPass, Expect, Judgment, RunState, Verdict};
 use bunsin_core::llm::LlmError;
 use common::*;
 use serde_json::json;
@@ -232,4 +233,130 @@ async fn the_pass_mark_is_checked_and_old_settings_still_load() {
     old.as_object_mut().unwrap().remove("eval");
     let loaded: ProfileConfig = serde_json::from_value(old).unwrap();
     assert_eq!(loaded.eval.pass, None);
+}
+
+/// A judge reply whose reason holds personal data.
+fn verdict(verdict: &str) -> String {
+    json!({"verdict": verdict, "reason": format!("as {EMAIL} wrote")}).to_string()
+}
+
+async fn set_judge(rig: &Rig, on: bool) {
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.eval.judge = on;
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_judge_is_off_by_default_and_asks_once_per_reply_draft_when_on() {
+    let rig = rig().await;
+    let cases = vec![
+        case("c1", "when do we deploy?", "We deploy at 3 pm.", Expect::Reply),
+        // The agent escalates this one, so there is no reply draft to judge.
+        case("c2", "is the build green?", "Yes.", Expect::Reply),
+        // Not a reply case.
+        case("c3", "can I get a raise?", "", Expect::Escalate),
+    ];
+    rig.engine.add_replay_cases("kim", cases).await.unwrap();
+    let replies = |rig: &Rig| {
+        rig.llm
+            .reply(&post("We deploy at 3 pm."), 10)
+            .reply(&escalate(), 10)
+            .reply(&escalate(), 10);
+    };
+
+    replies(&rig);
+    rig.engine.start_eval("kim").await.unwrap();
+    let off = run_to_end(&rig, 3).await;
+    assert_eq!(rig.llm.requests().len(), 3);
+    assert!(off.results.iter().all(|result| result.judge.is_none()));
+
+    set_judge(&rig, true).await;
+    rig.llm
+        .reply(&post("We deploy at 3 pm."), 10)
+        .reply(&verdict("same"), 10)
+        .reply(&escalate(), 10)
+        .reply(&escalate(), 10);
+    rig.engine.start_eval("kim").await.unwrap();
+    let on = run_to_end(&rig, 3).await;
+    // One more call: the judge of the one reply draft.
+    let requests = rig.llm.requests();
+    assert_eq!(requests.len(), 7);
+    let judged = Judgment {
+        verdict: Verdict::Same,
+        reason: "as [REDACTED:EMAIL] wrote".into(),
+    };
+    let judges: Vec<_> = on.results.iter().map(|result| result.judge.clone()).collect();
+    assert_eq!(judges, [Some(judged), None, None]);
+    // The judge reads both texts as quoted data.
+    let asked = &requests[4].messages[0].content;
+    assert!(
+        asked.contains("<data source=\"draft\">\nWe deploy at 3 pm.\n</data>")
+            && asked.contains("<data source=\"real-reply\">\nWe deploy at 3 pm.\n</data>"),
+        "{asked}"
+    );
+    let usage = rig.engine.llm_usage("kim").await.unwrap();
+    let judge_calls: u64 = usage.iter().filter(|u| u.purpose == "judge").map(|u| u.calls).sum();
+    assert_eq!(judge_calls, 1);
+    assert!(!rig.stores(EMAIL));
+}
+
+#[tokio::test]
+async fn the_judges_verdict_changes_no_rate_no_pass_and_no_autonomy() {
+    let mut config = config();
+    config.autonomy = Some(AutonomyThresholds {
+        min_reviewed: 1,
+        min_unchanged_percent: 50,
+        window_days: 30,
+    });
+    config.eval.pass = Some(EvalPass {
+        kind_percent: 100,
+        overlap_percent: 50,
+        boundary_percent: 0,
+    });
+    let rig = rig_with(config).await;
+    // One reviewed call, so the tool has counts and a suggestion.
+    rig.llm.reply(&post("At 3 pm."), 10);
+    let Outcome::PendingApproval { inbox_id } = rig.engine.ingest("kim", event("e1", "lee", "when?")).await.unwrap()
+    else {
+        panic!("expected a pending item")
+    };
+    rig.engine.approve("kim", inbox_id, None).await.unwrap();
+    let autonomy = rig.engine.autonomy("kim").await.unwrap();
+    assert!(autonomy.tools.iter().any(|tool| tool.suggested), "{autonomy:?}");
+    let decisions = rig.kim_store().decision_counts(0).unwrap();
+
+    let cases = vec![
+        case("c1", "when do we deploy?", "We deploy at 3 pm.", Expect::Reply),
+        case("c2", "can I get a raise?", "", Expect::Escalate),
+    ];
+    rig.engine.add_replay_cases("kim", cases).await.unwrap();
+    let mut reports = Vec::new();
+    for judge in [
+        None,
+        Some(verdict("same")),
+        Some(verdict("different")),
+        Some("not json".to_owned()),
+    ] {
+        set_judge(&rig, judge.is_some()).await;
+        rig.llm.reply(&post("We deploy at 4 pm."), 10);
+        if let Some(reply) = &judge {
+            rig.llm.reply(reply, 10);
+        }
+        rig.llm.reply(&escalate(), 10);
+        rig.engine.start_eval("kim").await.unwrap();
+        let report = run_to_end(&rig, 3).await;
+        assert_eq!(rig.engine.autonomy("kim").await.unwrap(), autonomy);
+        assert_eq!(rig.kim_store().decision_counts(0).unwrap(), decisions);
+        reports.push(report);
+    }
+    let verdicts: Vec<_> = reports
+        .iter()
+        .map(|report| report.results[0].judge.as_ref().map(|judgment| judgment.verdict))
+        .collect();
+    assert_eq!(verdicts, [None, Some(Verdict::Same), Some(Verdict::Different), None]);
+    for report in &reports {
+        assert_eq!(report.summary, reports[0].summary);
+        assert_eq!(report.passed, reports[0].passed);
+    }
+    assert_eq!(reports[0].passed, Some(true), "{:?}", reports[0].summary);
 }

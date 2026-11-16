@@ -157,8 +157,8 @@ impl ProfileStore {
         let score = result.score.as_ref();
         self.db().execute(
             "INSERT OR IGNORE INTO eval_results
-                 (run_id, case_id, expect, kind, kind_ok, overlap_permille, draft, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (run_id, case_id, expect, kind, kind_ok, overlap_permille, draft, error, judge)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 run_id,
                 result.case_id,
@@ -168,6 +168,7 @@ impl ProfileStore {
                 score.and_then(|score| score.overlap_permille),
                 &result.draft,
                 &result.error,
+                result.judge.as_ref().map(serde_json::to_string).transpose()?,
             ),
         )?;
         Ok(())
@@ -177,10 +178,19 @@ impl ProfileStore {
     pub fn eval_results(&self, run_id: i64) -> Result<Vec<EvalResult>> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT case_id, expect, kind, kind_ok, overlap_permille, draft, error
+            "SELECT case_id, expect, kind, kind_ok, overlap_permille, draft, error, judge
              FROM eval_results WHERE run_id = ?1 ORDER BY case_id",
         )?;
-        type ResultRow = (i64, String, Option<String>, bool, Option<u32>, String, Option<String>);
+        type ResultRow = (
+            i64,
+            String,
+            Option<String>,
+            bool,
+            Option<u32>,
+            String,
+            Option<String>,
+            Option<String>,
+        );
         let rows = statement
             .query_map([run_id], |row| {
                 Ok((
@@ -191,27 +201,31 @@ impl ProfileStore {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<ResultRow>>>()?;
         rows.into_iter()
-            .map(|(case_id, expect, kind, kind_ok, overlap_permille, draft, error)| {
-                let score = match kind {
-                    Some(kind) => Some(CaseScore {
-                        kind: DraftKind::parse(&kind).ok_or_else(|| bad(kind))?,
-                        kind_ok,
-                        overlap_permille,
-                    }),
-                    None => None,
-                };
-                Ok(EvalResult {
-                    case_id,
-                    expect: Expect::parse(&expect).ok_or_else(|| bad(expect))?,
-                    score,
-                    draft,
-                    error,
-                })
-            })
+            .map(
+                |(case_id, expect, kind, kind_ok, overlap_permille, draft, error, judge)| {
+                    let score = match kind {
+                        Some(kind) => Some(CaseScore {
+                            kind: DraftKind::parse(&kind).ok_or_else(|| bad(kind))?,
+                            kind_ok,
+                            overlap_permille,
+                        }),
+                        None => None,
+                    };
+                    Ok(EvalResult {
+                        case_id,
+                        expect: Expect::parse(&expect).ok_or_else(|| bad(expect))?,
+                        score,
+                        draft,
+                        error,
+                        judge: judge.map(|text| serde_json::from_str(&text)).transpose()?,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -228,7 +242,7 @@ impl ProfileStore {
 #[cfg(test)]
 mod tests {
     use crate::AppStore;
-    use bunsin_core::eval::{CaseScore, DraftKind, EvalResult, Expect, RunState};
+    use bunsin_core::eval::{CaseScore, DraftKind, EvalResult, Expect, Judgment, RunState, Verdict};
     use bunsin_core::event::InboundEvent;
 
     fn event(text: &str) -> InboundEvent {
@@ -272,6 +286,10 @@ mod tests {
             }),
             draft: "At 3 pm.".into(),
             error: None,
+            judge: Some(Judgment {
+                verdict: Verdict::Partial,
+                reason: "a later time".into(),
+            }),
         };
         store.add_eval_result(run, &result).unwrap();
         // A second result of the same case is ignored.
@@ -292,6 +310,7 @@ mod tests {
             score: None,
             draft: String::new(),
             error: Some("the LLM cannot be used".into()),
+            judge: None,
         };
         store.add_eval_result(run, &failed).unwrap();
         assert!(store.unscored_cases(run, 10).unwrap().is_empty());
