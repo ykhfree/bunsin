@@ -329,6 +329,7 @@ async fn a_token_sealed_with_another_key_is_reported_and_not_used() {
     }
     // The server starts with another key file, as after a lost key.
     let other_key = dir.path().join("other.key");
+    std::fs::write(&other_key, [7u8; 32]).unwrap();
     let engine = Engine::open_with_key_file(dir.path(), &other_key, backends.clone(), Arc::new(|| 1_000)).unwrap();
     let _ = engine.connector_tools("kim", "slack").await;
     let errors = backends.errors.lock().unwrap().clone();

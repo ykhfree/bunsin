@@ -81,8 +81,11 @@ LLM과 MCP 서버가 없어도 됩니다. 아래처럼 시험용 폴더를 쓰�
 export BUNSIN_DATA_DIR=/tmp/bunsin-data        # 운영자 명령은 모두 이 폴더가 필요합니다
 bunsind profile-add kim --owner "Kim"          # 출력: created profile kim for Kim
 bunsind token-add kim --label "Kim's laptop"   # 접속 token을 한 번만 출력합니다: bsn_...
-bunsind serve --listen 127.0.0.1:8787          # 출력: listening on http://127.0.0.1:8787
+bunsind serve --listen 127.0.0.1:8787 --key-store file   # 출력: listening on http://127.0.0.1:8787
 ```
+
+`--key-store file`은 이 시험용 폴더의 키를 폴더 안에 둡니다. 이 옵션이 없으면 맥북의 서버는 Keychain에 항목을 만들고,
+그 항목은 폴더를 지워도 남습니다.
 
 token을 복사해 두십시오. 서버에는 해시만 저장되므로 token을 다시 볼 수 없습니다.
 서버는 Ctrl-C를 누를 때까지 실행됩니다.
@@ -137,9 +140,20 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **TLS.** 서버는 외부 주소에 TLS 없이 뜨지 않습니다. TLS 프록시 뒤에 둘 때는 `127.0.0.1`에 띄웁니다.
   한 컴퓨터에서 시험할 때는 `bunsind serve --listen 127.0.0.1:8787`로 띄우고 주소로 `http://127.0.0.1:8787`을 씁니다.
 - **LLM과 MCP 서버의 token.** 프로필 소유자가 창이나 명령줄에서 입력하고, 서버가 암호화해 그 프로필의 DB에 보관합니다.
-  키는 데이터 폴더의 `master.key` 파일(또는 `--master-key-file`)에 있습니다.
-  이 암호화는 DB만 복사되거나 백업이 유출된 경우를 막습니다. 그래서 키 파일은 데이터 폴더의 백업에 넣지 마십시오.
-  키 파일을 읽을 수 있는 사람은 막지 못합니다. 키 파일을 잃으면 소유자가 token을 다시 입력해야 합니다.
+  이 암호화는 DB만 복사되거나 백업이 유출된 경우를 막습니다. 키를 잃으면 소유자가 token을 다시 입력해야 합니다.
+- **키의 위치.** `--key-store`로 정합니다. 어느 쪽이든 저장된 token은 DB 안의 같은 암호문입니다.
+  - **macOS의 기본값은 `keychain`입니다.** 키는 로그인 Keychain의 항목 1개입니다(Keychain Access에 `Bunsin server`라는 이름으로 보입니다).
+    그러면 데이터 폴더를 복사해도 키가 들어 있지 않습니다. 항목의 계정은 데이터 폴더의 `keychain-id` 파일에 있는 ID입니다.
+  - **다른 시스템의 기본값은 `file`입니다.** 키는 데이터 폴더의 `master.key` 파일, 또는 `--master-key-file`로 지정한 파일입니다.
+    키 파일은 데이터 폴더의 백업에 넣지 마십시오. 키 파일을 읽을 수 있는 사람은 막지 못합니다.
+  - **키 파일은 자동으로 옮겨집니다.** 맥북의 서버가 `master.key`를 찾았고 Keychain 항목이 없으면, 키를 Keychain에 쓰고,
+    다시 읽어 확인한 뒤 파일을 지웁니다. 저장된 token은 그대로입니다.
+  - **Keychain은 로그인 세션이 필요합니다.** 로그인한 사용자 없이 SSH나 부팅 시에 띄운 서버는 Keychain을 읽지 못해 시작하지 않습니다.
+    그 경우 `--key-store file`을 쓰십시오. `bunsind`를 다시 빌드하면 프로그램이 바뀌었으므로 macOS가 접근 허용을 다시 물을 수 있습니다.
+  - **키는 데이터 폴더와 함께 이동하지 않습니다.** 다른 컴퓨터의 Keychain에는 그 항목이 없어서 서버가 시작하지 않습니다.
+    서버는 암호화된 token 위에 새 키를 만들지 않습니다. 키 파일로 시작하거나, 새 폴더에서 token을 다시 입력하십시오.
+  - 항목을 보거나 지우려면: `security find-generic-password -s "Bunsin server" -a "$(cat <데이터 폴더>/keychain-id)"`,
+    그리고 같은 옵션으로 `security delete-generic-password`. 항목을 지우면 저장된 token을 읽을 수 없게 됩니다.
 - **운영자가 넣는 token.** 프로필에 저장된 token이 없으면 서버는 환경 변수 `BUNSIN_SECRET_<프로필>__<KEY>`를 읽습니다
   (예: `BUNSIN_SECRET_KIM__LLM`). 한 프로필은 다른 프로필의 비밀 값을 가리킬 수 없습니다.
 - **접속 대상 주소.** LLM과 MCP 주소는 프로필 소유자가 정하고, 요청은 서버가 보냅니다.

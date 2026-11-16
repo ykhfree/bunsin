@@ -10,9 +10,11 @@ use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
 use bunsin_core::settings::Wire;
+use bunsin_daemon::keystore::KeyStore;
 use bunsin_daemon::server::{Poller, ServeConfig, serve};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::Engine;
+use bunsin_engine::{KeyFile, KeySource};
 use bunsin_store::AppStore;
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
@@ -98,9 +100,14 @@ enum Command {
         /// resolves to an internal address still passes. Give the list on a shared server.
         #[arg(long = "allow-upstream-host")]
         allow_upstream_hosts: Vec<String>,
-        /// The file with the key that encrypts tokens which owners store on the server.
-        /// It is created if it does not exist. The default is `master.key` in the data
-        /// directory. Keep this file out of backups of the data directory.
+        /// Where the key is kept that encrypts tokens which owners store on the server.
+        /// `keychain`: the login Keychain of this Mac. `file`: a key file.
+        /// The default is `keychain` on macOS and `file` on other systems. A server on a Mac
+        /// that starts without a login session needs `file`.
+        #[arg(long, env = "BUNSIN_KEY_STORE")]
+        key_store: Option<String>,
+        /// The key file of the file store. It is created if it does not exist. The default is
+        /// `master.key` in the data directory. Keep this file out of backups of the data directory.
         #[arg(long, env = "BUNSIN_MASTER_KEY_FILE")]
         master_key_file: Option<PathBuf>,
     },
@@ -382,22 +389,41 @@ fn connect(remote: &Remote) -> Result<RemoteEngine, String> {
     .map_err(|e| e.to_string())
 }
 
+/// The source of the master key for the chosen store.
+fn key_source(store: &KeyStore, data_dir: &std::path::Path) -> Result<Box<dyn KeySource>, String> {
+    match store {
+        KeyStore::File(file) => Ok(Box::new(KeyFile(file.clone()))),
+        #[cfg(target_os = "macos")]
+        KeyStore::Keychain => Ok(Box::new(bunsin_daemon::keystore::KeychainKey::new(
+            data_dir,
+            bunsin_daemon::keystore::MacKeychainItem::boxed,
+        ))),
+        // `key_store` gives this store only on macOS.
+        #[cfg(not(target_os = "macos"))]
+        KeyStore::Keychain => {
+            let _ = data_dir;
+            Err("--key-store keychain works on macOS only".to_owned())
+        }
+    }
+}
+
 async fn run_server(
     local: Local,
     listen: SocketAddr,
     tls: Option<(PathBuf, PathBuf)>,
     backends: RealBackends,
-    master_key_file: Option<PathBuf>,
+    store: KeyStore,
 ) -> Result<(), String> {
+    let config = ServeConfig { listen, tls };
+    // A start that is refused for its address must not read or move the key.
+    config.check().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
-    let key_file = master_key_file.unwrap_or_else(|| local.data_dir.join("master.key"));
+    let source = key_source(&store, &local.data_dir)?;
     let engine =
-        Engine::open_with_key_file(&local.data_dir, &key_file, backends, Arc::new(now)).map_err(|e| e.to_string())?;
+        Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let engine = Arc::new(engine);
-    let running = serve(engine.clone(), ServeConfig { listen, tls })
-        .await
-        .map_err(|e| e.to_string())?;
+    let running = serve(engine.clone(), config).await.map_err(|e| e.to_string())?;
     let poller = Poller::start(engine);
     // The handler is installed before the address is announced, so a stop request
     // that follows the announcement is never lost.
@@ -426,6 +452,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             tls_key,
             allow_stdio_connectors,
             allow_upstream_hosts,
+            key_store,
             master_key_file,
         } => {
             let allowed_hosts = allow_upstream_hosts
@@ -433,7 +460,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
             let backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
-            run_server(local, listen, tls_cert.zip(tls_key), backends, master_key_file).await?;
+            let store = bunsin_daemon::keystore::key_store(
+                std::env::consts::OS,
+                key_store.as_deref(),
+                master_key_file,
+                &local.data_dir,
+            )?;
+            run_server(local, listen, tls_cert.zip(tls_key), backends, store).await?;
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;

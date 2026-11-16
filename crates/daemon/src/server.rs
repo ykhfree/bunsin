@@ -389,10 +389,19 @@ impl Running {
 }
 
 /// Starts the server and returns when it is listening.
-pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, ServeError> {
-    if config.tls.is_none() && !config.listen.ip().is_loopback() {
-        return Err(ServeError::TlsRequired(config.listen));
+impl ServeConfig {
+    /// Refuses an address that other computers reach without TLS. A caller can ask this
+    /// before it opens the engine, so a refused start touches no key.
+    pub fn check(&self) -> Result<(), ServeError> {
+        if self.tls.is_none() && !self.listen.ip().is_loopback() {
+            return Err(ServeError::TlsRequired(self.listen));
+        }
+        Ok(())
     }
+}
+
+pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, ServeError> {
+    config.check()?;
     let app = router(engine).into_make_service();
     let handle = Handle::new();
     let tls = config.tls.is_some();

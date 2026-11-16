@@ -7,6 +7,7 @@
 //! A profile owner chooses the LLM and MCP addresses, and the server sends the requests.
 //! [`UpstreamPolicy`] stops an owner from pointing the server at its own internal network.
 
+pub mod keystore;
 pub mod server;
 
 use bunsin_api::ProfileConfig;

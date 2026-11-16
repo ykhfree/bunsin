@@ -8,6 +8,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use std::collections::BTreeMap;
 use std::io::Write;
+#[cfg(test)]
 use std::path::Path;
 
 const KEY_LEN: usize = 32;
@@ -33,37 +34,117 @@ impl std::fmt::Debug for StoredSecret {
 /// The stored secrets of one profile by key. An entry is an error if it cannot be decrypted.
 pub type ProfileSecrets = BTreeMap<String, Result<StoredSecret, String>>;
 
+/// The key that encrypts stored tokens. `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MasterKey([u8; KEY_LEN]);
+
+impl MasterKey {
+    /// A new random key.
+    pub fn generate() -> Result<Self, String> {
+        let mut key = [0u8; KEY_LEN];
+        getrandom::fill(&mut key).map_err(|e| format!("no random key can be made: {e}"))?;
+        Ok(Self(key))
+    }
+
+    /// The key in `bytes`. The error says only how long the bytes are.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let key: [u8; KEY_LEN] = bytes
+            .try_into()
+            .map_err(|_| format!("a key has {KEY_LEN} bytes, this has {}", bytes.len()))?;
+        Ok(Self(key))
+    }
+
+    /// The key as text, for a store that holds text.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// The key from the text of `to_hex`. The error does not repeat the text.
+    pub fn from_hex(text: &str) -> Result<Self, String> {
+        let invalid = || "the text is not a key".to_owned();
+        if text.len() != KEY_LEN * 2 || !text.is_ascii() {
+            return Err(invalid());
+        }
+        let mut key = [0u8; KEY_LEN];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| invalid())?;
+        }
+        Ok(Self(key))
+    }
+}
+
+impl std::fmt::Debug for MasterKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MasterKey([REDACTED])")
+    }
+}
+
+/// Where the engine gets its master key.
+pub trait KeySource {
+    /// The key. `may_create` is false if the data directory holds values that an earlier key
+    /// encrypted: a new key would make every one of them unreadable, so the source must fail
+    /// if it has no key.
+    fn key(&self, may_create: bool) -> Result<MasterKey, String>;
+}
+
+/// The master key in a file.
+pub struct KeyFile(pub std::path::PathBuf);
+
+impl KeyFile {
+    /// The key in the file, or None if the file does not exist.
+    pub fn read(&self) -> Result<Option<MasterKey>, String> {
+        match std::fs::read(&self.0) {
+            Ok(bytes) => MasterKey::from_bytes(&bytes)
+                .map(Some)
+                .map_err(|e| format!("the key file {} cannot be used: {e}", self.0.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("the key file {} cannot be read: {error}", self.0.display())),
+        }
+    }
+}
+
+impl KeySource for KeyFile {
+    fn key(&self, may_create: bool) -> Result<MasterKey, String> {
+        if let Some(key) = self.read()? {
+            return Ok(key);
+        }
+        if !may_create {
+            return Err(format!(
+                "this data directory holds encrypted values, but the key file {} does not exist. \
+                 A new key could not read them. The key may be in another file (--master-key-file) \
+                 or in the Keychain (--key-store keychain)",
+                self.0.display()
+            ));
+        }
+        let key = MasterKey::generate()?;
+        let mut options = std::fs::OpenOptions::new();
+        // `create_new` fails if another process made the file meanwhile, so a key is never replaced.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options
+            .open(&self.0)
+            .and_then(|mut file| file.write_all(&key.0))
+            .map_err(|e| format!("the key file {} cannot be written: {e}", self.0.display()))?;
+        Ok(key)
+    }
+}
+
 pub(crate) struct SecretBox {
     cipher: XChaCha20Poly1305,
 }
 
 impl SecretBox {
-    /// Reads the key file, or creates it with a new random key if it does not exist.
-    pub(crate) fn load_or_create(path: &Path) -> std::io::Result<Self> {
-        let key = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut key = [0u8; KEY_LEN];
-                getrandom::fill(&mut key).map_err(|e| std::io::Error::other(e.to_string()))?;
-                let mut options = std::fs::OpenOptions::new();
-                // `create_new` fails if another process made the file meanwhile, so a key is never replaced.
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-                options.open(path)?.write_all(&key)?;
-                key.to_vec()
-            }
-            Err(error) => return Err(error),
-        };
-        if key.len() != KEY_LEN {
-            return Err(std::io::Error::other(format!(
-                "the key file must hold {KEY_LEN} bytes, it holds {}",
-                key.len()
-            )));
+    pub(crate) fn new(key: &MasterKey) -> Self {
+        Self {
+            cipher: XChaCha20Poly1305::new_from_slice(&key.0).expect("a master key has the length of a cipher key"),
         }
-        Ok(Self {
-            cipher: XChaCha20Poly1305::new_from_slice(&key).expect("the key length was checked"),
-        })
+    }
+
+    /// Reads the key file, or creates it with a new random key if it does not exist.
+    #[cfg(test)]
+    pub(crate) fn load_or_create(path: &Path) -> Result<Self, String> {
+        Ok(Self::new(&KeyFile(path.to_owned()).key(true)?))
     }
 
     /// The data that binds a ciphertext to its place. A secret moved to another profile

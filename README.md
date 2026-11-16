@@ -88,8 +88,11 @@ need no LLM and no MCP server. Use a test folder, as shown, not your real data.
 export BUNSIN_DATA_DIR=/tmp/bunsin-data        # every operator command needs this folder
 bunsind profile-add kim --owner "Kim"          # prints: created profile kim for Kim
 bunsind token-add kim --label "Kim's laptop"   # prints the access token once: bsn_...
-bunsind serve --listen 127.0.0.1:8787          # prints: listening on http://127.0.0.1:8787
+bunsind serve --listen 127.0.0.1:8787 --key-store file   # prints: listening on http://127.0.0.1:8787
 ```
+
+`--key-store file` keeps the key of this test folder in the folder. Without it, a server
+on a Mac makes an item in your Keychain, which stays after you delete the folder.
 
 Copy the token. The server keeps only its hash, so it cannot show the token again.
 The server runs until you press Ctrl-C.
@@ -147,10 +150,31 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   `bunsind serve --listen 127.0.0.1:8787` and use `http://127.0.0.1:8787` as the address.
 - **Tokens of the LLM and of MCP servers.** Each profile owner enters them in the window
   or on the command line, and the server keeps them encrypted in that profile's database.
-  The key is in the file `master.key` in the data directory (or `--master-key-file`).
-  This protects a copied database or backup, so keep the key file out of backups of the
-  data directory. It does not protect against a person who can read the key file. If the
-  key file is lost, the owners enter their tokens again.
+  This protects a copied database or backup. If the key is lost, the owners enter their
+  tokens again.
+- **Where the key is.** `--key-store` chooses it. The stored tokens are the same
+  encrypted values in the database in both cases.
+  - **On macOS the default is `keychain`:** the key is one item of your login Keychain
+    (Keychain Access shows it with the name `Bunsin server`). A copy of the data
+    directory then holds no key. The account of the item is the ID in the file
+    `keychain-id` of the data directory.
+  - **On other systems the default is `file`:** the key is the file `master.key` in the
+    data directory, or the file that `--master-key-file` names. Keep the key file out of
+    backups of the data directory. It does not protect against a person who can read it.
+  - **A key file moves by itself.** If a server on a Mac finds `master.key` and no
+    Keychain item, it writes the key into the Keychain, reads it back, and then deletes
+    the file. The stored tokens stay as they are.
+  - **The Keychain needs your login session.** A server that starts over SSH or at boot,
+    without a logged-in user, cannot read the Keychain and does not start. Use
+    `--key-store file` there. macOS can ask for access again after `bunsind` is built
+    again, because the program changed.
+  - **The key does not travel with the data directory.** On another computer the
+    Keychain has no item for it, and the server does not start: it makes no new key over
+    encrypted tokens. Start with the key file, or enter the tokens again in a new folder.
+  - To look at the item or remove it:
+    `security find-generic-password -s "Bunsin server" -a "$(cat <data dir>/keychain-id)"`
+    and `security delete-generic-password` with the same options. Removing it makes the
+    stored tokens unreadable.
 - **Tokens from the operator.** If a profile has no stored token, the server reads the
   environment variable `BUNSIN_SECRET_<PROFILE>__<KEY>`, for example
   `BUNSIN_SECRET_KIM__LLM`. A profile cannot name another profile's secret.

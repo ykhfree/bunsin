@@ -24,7 +24,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+getrandom = "0.3"
 url = "2"
+
+# The Keychain holds the server's master key on macOS only. Linux servers need no keyring library.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = "4"
 
 [dev-dependencies]
 bunsin-testkit.workspace = true

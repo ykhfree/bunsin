@@ -7,7 +7,7 @@ mod notes;
 mod polling;
 mod secrets;
 
-pub use secrets::{ProfileSecrets, StoredSecret};
+pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
@@ -114,8 +114,8 @@ pub enum OpenError {
     Store(#[from] StoreError),
     #[error("the lock file cannot be opened: {0}")]
     Io(#[from] std::io::Error),
-    #[error("the master key file {0} cannot be used: {1}")]
-    Key(std::path::PathBuf, std::io::Error),
+    #[error("the key that encrypts stored tokens cannot be used: {0}")]
+    Key(String),
 }
 
 /// What the handling of one request needs from a profile.
@@ -198,6 +198,18 @@ impl Engine {
         backends: Arc<dyn Backends>,
         clock: Clock,
     ) -> Result<Self, OpenError> {
+        Self::open_with_key(data_dir, &KeyFile(key_file.to_owned()), backends, clock)
+    }
+
+    /// Opens the engine with the master key of `source`. The source is asked only after this
+    /// process holds the lock of the data directory, so a second instance never touches the key.
+    /// It may make a new key only if the data directory holds no encrypted value.
+    pub fn open_with_key(
+        data_dir: &Path,
+        source: &dyn KeySource,
+        backends: Arc<dyn Backends>,
+        clock: Clock,
+    ) -> Result<Self, OpenError> {
         let app = AppStore::open(data_dir)?;
         let lock = File::options()
             .create(true)
@@ -205,8 +217,14 @@ impl Engine {
             .write(true)
             .open(data_dir.join("engine.lock"))?;
         lock.try_lock().map_err(|_| OpenError::AlreadyRunning)?;
-        let secret_box =
-            secrets::SecretBox::load_or_create(key_file).map_err(|e| OpenError::Key(key_file.to_owned(), e))?;
+        let mut sealed = false;
+        for profile in app.list_profiles()? {
+            if !app.open_profile(&profile.id)?.secret_keys()?.is_empty() {
+                sealed = true;
+                break;
+            }
+        }
+        let secret_box = secrets::SecretBox::new(&source.key(!sealed).map_err(OpenError::Key)?);
         Ok(Self {
             app,
             backends,

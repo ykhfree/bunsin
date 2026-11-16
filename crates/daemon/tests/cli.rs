@@ -6,9 +6,18 @@ use std::process::{Child, Command, Output, Stdio};
 
 fn bunsind() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_bunsind"));
-    for name in ["BUNSIN_DATA_DIR", "BUNSIN_SERVER", "BUNSIN_TOKEN", "BUNSIN_CA_CERT"] {
+    for name in [
+        "BUNSIN_DATA_DIR",
+        "BUNSIN_SERVER",
+        "BUNSIN_TOKEN",
+        "BUNSIN_CA_CERT",
+        "BUNSIN_MASTER_KEY_FILE",
+    ] {
         command.env_remove(name);
     }
+    // No test may touch the real Keychain. On macOS the server would use it by default, and
+    // a question of the Keychain would hang a test run that nobody watches.
+    command.env("BUNSIN_KEY_STORE", "file");
     command
 }
 
@@ -351,4 +360,34 @@ fn llm_test_reports_why_the_endpoint_does_not_work() {
     // A token tests only its own profile.
     let error = stderr_of_failure(server.run(&kim, &["llm-test", "lee"]), "llm-test for another profile");
     assert!(error.contains("not authorized"), "{error}");
+}
+
+#[test]
+fn a_key_store_that_cannot_work_stops_the_start_before_any_key_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    // These are refused from the options alone. No key file is made and no Keychain is asked.
+    let unknown = operator(
+        dir.path(),
+        &["serve", "--listen", "127.0.0.1:0", "--key-store", "vault"],
+    );
+    assert!(stderr_of_failure(unknown, "an unknown key store").contains("not a key store"));
+    let key_file = dir.path().join("other.key");
+    let both = operator(
+        dir.path(),
+        &[
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--key-store",
+            "keychain",
+            "--master-key-file",
+            key_file.to_str().unwrap(),
+        ],
+    );
+    assert!(stderr_of_failure(both, "a key file with the keychain store").contains("--master-key-file"));
+    // A public address without TLS is refused before the key is made.
+    let public = operator(dir.path(), &["serve", "--listen", "0.0.0.0:0"]);
+    stderr_of_failure(public, "a public address without TLS");
+    assert!(!dir.path().join("master.key").exists() && !key_file.exists());
+    assert!(!dir.path().join("keychain-id").exists());
 }

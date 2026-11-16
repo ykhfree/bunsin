@@ -1058,6 +1058,8 @@ dependencies = [
  "bunsin-store",
  "bunsin-testkit",
  "clap",
+ "getrandom 0.3.4",
+ "keyring",
  "rcgen",
  "serde",
  "serde_json",
