@@ -112,7 +112,8 @@ impl KeySource for KeyFile {
             return Err(format!(
                 "this data directory holds encrypted values, but the key file {} does not exist. \
                  A new key could not read them. The key may be in another file (--master-key-file) \
-                 or in the Keychain (--key-store keychain)",
+                 or in the Keychain (--key-store keychain). If the key is lost, --accept-new-key starts \
+                 with a new key: the notes and the settings stay, and the owners enter their tokens again",
                 self.0.display()
             ));
         }

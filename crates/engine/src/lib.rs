@@ -217,13 +217,14 @@ impl Engine {
             .write(true)
             .open(data_dir.join("engine.lock"))?;
         lock.try_lock().map_err(|_| OpenError::AlreadyRunning)?;
-        let mut sealed = false;
-        for profile in app.list_profiles()? {
-            if !app.open_profile(&profile.id)?.secret_keys()?.is_empty() {
-                sealed = true;
-                break;
+        // A profile that cannot be read counts as one with encrypted values. It must not stop
+        // the other profiles: each profile is opened again, and reported, on its first use.
+        let sealed = app.list_profiles()?.iter().any(|profile| {
+            match app.open_profile(&profile.id).and_then(|store| store.secret_keys()) {
+                Ok(keys) => !keys.is_empty(),
+                Err(_) => true,
             }
-        }
+        });
         let secret_box = secrets::SecretBox::new(&source.key(!sealed).map_err(OpenError::Key)?);
         Ok(Self {
             app,

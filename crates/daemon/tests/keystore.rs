@@ -2,8 +2,11 @@
 //! No test reads or writes the real Keychain.
 
 use axum::http::{HeaderMap, StatusCode};
-use bunsin_api::{ConnectorUpdate, EngineApi, Expected, ProfileConfig, TokenChange};
-use bunsin_daemon::keystore::{KEY_FILE, KEYCHAIN_ID_FILE, KeyStore, KeychainItem, KeychainKey, key_store};
+use bunsin_api::{ConnectorUpdate, EngineApi, Expected, ProfileConfig, TokenChange, WikiPageUpdate};
+use bunsin_core::wiki::WikiText;
+use bunsin_daemon::keystore::{
+    AcceptNewKey, KEY_FILE, KEYCHAIN_ID_FILE, KeyStore, KeychainItem, KeychainKey, key_store,
+};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Engine, KeySource, MasterKey, OpenError};
 use std::path::{Path, PathBuf};
@@ -358,4 +361,125 @@ async fn a_second_instance_does_not_touch_the_key() {
     assert_eq!((keychain.gets, keychain.sets), (gets, sets));
     assert!(dir.path().join(KEY_FILE).exists());
     drop(first);
+}
+
+/// A folder with a token that the first key sealed, and a note. Returns the address of the recorder.
+async fn folder_with_a_token_and_a_note(dir: &Path) -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+    let (url, seen) = recorder().await;
+    let engine = Engine::open(dir, backends(), Arc::new(|| 1_000)).unwrap();
+    engine.create_profile("kim", ProfileConfig::new("Kim")).await.unwrap();
+    engine.create_profile("lee", ProfileConfig::new("Lee")).await.unwrap();
+    let update = ConnectorUpdate {
+        url: url.clone(),
+        token: TokenChange::Set(TOKEN.into()),
+        token_header: None,
+        expected: Expected::Unchecked,
+    };
+    engine.set_connector("kim", "wiki", update).await.unwrap();
+    let note = WikiPageUpdate {
+        text: WikiText {
+            title: "Team".into(),
+            summary: "Who does what".into(),
+            body: "Kim leads.".into(),
+        },
+        expected_revision: None,
+    };
+    engine.set_wiki_page("kim", "team", note).await.unwrap();
+    (url, seen)
+}
+
+#[tokio::test]
+async fn after_a_lost_key_the_operator_can_start_with_a_new_one_and_keeps_everything_but_the_tokens() {
+    for store in ["keychain", "file"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (_url, seen) = folder_with_a_token_and_a_note(dir.path()).await;
+        // The key is lost.
+        std::fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
+        let keychain = Arc::new(Mutex::new(Keychain::default()));
+        let chosen = || -> Box<dyn KeySource> {
+            match store {
+                "keychain" => Box::new(source(dir.path(), &keychain)),
+                _ => Box::new(bunsin_engine::KeyFile(dir.path().join(KEY_FILE))),
+            }
+        };
+        // Without the word of the operator the start stops, and the reason names the way out.
+        let refused = Engine::open_with_key(dir.path(), chosen().as_ref(), backends(), Arc::new(|| 1_000));
+        let reason = refused.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(reason.contains("--accept-new-key"), "{store}: {reason}");
+
+        let accepted = AcceptNewKey(chosen());
+        let engine = Engine::open_with_key(dir.path(), &accepted, backends(), Arc::new(|| 1_000)).unwrap();
+        // The notes and the settings are as they were.
+        assert_eq!(
+            engine.wiki_page("kim", "team").await.unwrap().text.body,
+            "Kim leads.",
+            "{store}"
+        );
+        assert!(engine.connections("kim").await.unwrap().connectors.contains_key("wiki"));
+        // The old token cannot be read, so it is reported and not sent.
+        let error = engine.connector_tools("kim", "wiki").await.unwrap_err().to_string();
+        assert!(
+            error.contains("cannot be read with this server's key"),
+            "{store}: {error}"
+        );
+        assert!(seen.lock().unwrap().iter().all(Option::is_none), "{store}");
+        drop(engine);
+        // The new key is kept: the next start needs no option.
+        Engine::open_with_key(dir.path(), chosen().as_ref(), backends(), Arc::new(|| 1_000)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_option_for_a_new_key_does_not_replace_a_key_that_exists_or_a_state_that_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_url, seen) = folder_with_a_token_and_a_note(dir.path()).await;
+    let keychain = Arc::new(Mutex::new(Keychain::default()));
+    // The key file exists. With the option, it moves as usual and the token still works.
+    let accepted = AcceptNewKey(Box::new(source(dir.path(), &keychain)));
+    let engine = Engine::open_with_key(dir.path(), &accepted, backends(), Arc::new(|| 1_000)).unwrap();
+    let _ = engine.connector_tools("kim", "wiki").await;
+    let expected = format!("Bearer {TOKEN}");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|auth| auth.as_deref() == Some(expected.as_str()))
+    );
+    drop(engine);
+    // The item and a key file differ. The option does not choose between them.
+    key_file(dir.path(), 9);
+    let accepted = AcceptNewKey(Box::new(source(dir.path(), &keychain)));
+    let refused = Engine::open_with_key(dir.path(), &accepted, backends(), Arc::new(|| 1_000));
+    let reason = refused.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(reason.contains("hold different keys"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_profile_that_cannot_be_read_does_not_stop_the_other_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    folder_with_a_token_and_a_note(dir.path()).await;
+    // The database of one profile is damaged.
+    std::fs::write(
+        dir.path().join("profiles").join("lee").join("agent.db"),
+        b"not a database",
+    )
+    .unwrap();
+    let engine = Engine::open(dir.path(), backends(), Arc::new(|| 1_000)).unwrap();
+    assert_eq!(engine.wiki_page("kim", "team").await.unwrap().text.body, "Kim leads.");
+    assert!(engine.snapshot("lee").await.is_err());
+    drop(engine);
+    // A damaged profile counts as one with encrypted values: without the key the start stops.
+    let fresh = tempfile::tempdir().unwrap();
+    {
+        let engine = Engine::open(fresh.path(), backends(), Arc::new(|| 1_000)).unwrap();
+        engine.create_profile("lee", ProfileConfig::new("Lee")).await.unwrap();
+    }
+    std::fs::write(
+        fresh.path().join("profiles").join("lee").join("agent.db"),
+        b"not a database",
+    )
+    .unwrap();
+    std::fs::remove_file(fresh.path().join(KEY_FILE)).unwrap();
+    let refused = Engine::open(fresh.path(), backends(), Arc::new(|| 1_000));
+    assert!(matches!(refused, Err(OpenError::Key(_))));
 }

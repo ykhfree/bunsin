@@ -106,6 +106,11 @@ enum Command {
         /// that starts without a login session needs `file`.
         #[arg(long, env = "BUNSIN_KEY_STORE")]
         key_store: Option<String>,
+        /// Start with a new key although the data directory holds encrypted tokens and their
+        /// key is lost. The notes and the settings stay. Every stored token becomes unreadable,
+        /// and its owner enters it again. A key that exists is used and is not replaced.
+        #[arg(long)]
+        accept_new_key: bool,
         /// The key file of the file store. It is created if it does not exist. The default is
         /// `master.key` in the data directory. Keep this file out of backups of the data directory.
         #[arg(long, env = "BUNSIN_MASTER_KEY_FILE")]
@@ -413,6 +418,7 @@ async fn run_server(
     tls: Option<(PathBuf, PathBuf)>,
     backends: RealBackends,
     store: KeyStore,
+    accept_new_key: bool,
 ) -> Result<(), String> {
     let config = ServeConfig { listen, tls };
     // A start that is refused for its address must not read or move the key.
@@ -420,6 +426,11 @@ async fn run_server(
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
     let source = key_source(&store, &local.data_dir)?;
+    let source: Box<dyn KeySource> = if accept_new_key {
+        Box::new(bunsin_daemon::keystore::AcceptNewKey(source))
+    } else {
+        source
+    };
     let engine =
         Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let engine = Arc::new(engine);
@@ -453,6 +464,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_stdio_connectors,
             allow_upstream_hosts,
             key_store,
+            accept_new_key,
             master_key_file,
         } => {
             let allowed_hosts = allow_upstream_hosts
@@ -466,7 +478,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 master_key_file,
                 &local.data_dir,
             )?;
-            run_server(local, listen, tls_cert.zip(tls_key), backends, store).await?;
+            run_server(local, listen, tls_cert.zip(tls_key), backends, store, accept_new_key).await?;
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;

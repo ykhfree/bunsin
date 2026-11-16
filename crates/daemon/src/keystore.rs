@@ -102,7 +102,7 @@ impl<F: Fn(&str) -> Box<dyn KeychainItem>> KeySource for KeychainKey<F> {
             // An item that is no key is never replaced: it may be the only copy of something.
             Some(text) => Some(MasterKey::from_hex(&text).map_err(|_| {
                 format!(
-                    "the Keychain item `{KEYCHAIN_SERVICE}` with the account {account} does not hold a key. \\
+                    "the Keychain item `{KEYCHAIN_SERVICE}` with the account {account} does not hold a key. \
                      Nothing was changed"
                 )
             })?),
@@ -116,7 +116,7 @@ impl<F: Fn(&str) -> Box<dyn KeychainItem>> KeySource for KeychainKey<F> {
                 Ok(key)
             }
             (Some(_), Some(_)) => Err(format!(
-                "the Keychain item and the key file {} hold different keys. Nothing was changed. \\
+                "the Keychain item and the key file {} hold different keys. Nothing was changed. \
                  Start with --key-store file to use the file, or move the file away to use the Keychain",
                 file.0.display()
             )),
@@ -136,11 +136,24 @@ impl<F: Fn(&str) -> Box<dyn KeychainItem>> KeySource for KeychainKey<F> {
                 Ok(key)
             }
             (None, None) => Err(format!(
-                "this data directory holds encrypted values, but the Keychain has no item \\
-                 `{KEYCHAIN_SERVICE}` with the account {account}. A new key could not read them. \\
-                 The key may be in a key file: start with --key-store file or --master-key-file"
+                "this data directory holds encrypted values, but the Keychain has no item \
+                 `{KEYCHAIN_SERVICE}` with the account {account}. A new key could not read them. \
+                 The key may be in a key file: start with --key-store file or --master-key-file. \
+                 If the key is lost, --accept-new-key starts with a new key: the notes and the settings \
+                 stay, and the owners enter their tokens again"
             )),
         }
+    }
+}
+
+/// A source that may make a new key although the data directory holds encrypted values.
+/// The operator asks for this after a key was lost. Only a missing key is replaced: a key that
+/// exists is used, and a state that the inner source refuses stays refused.
+pub struct AcceptNewKey(pub Box<dyn KeySource>);
+
+impl KeySource for AcceptNewKey {
+    fn key(&self, _may_create: bool) -> Result<MasterKey, String> {
+        self.0.key(true)
     }
 }
 
@@ -207,5 +220,27 @@ impl KeychainItem for MacKeychainItem {
 
     fn set(&self, value: &str) -> Result<(), String> {
         self.entry()?.set_password(value).map_err(|e| Self::error(&e))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::MacKeychainItem;
+
+    #[test]
+    fn no_error_text_holds_bytes_of_the_stored_key() {
+        // The stored value is the master key. These errors of the crate carry its bytes.
+        let key = b"0123456789abcdef-the-master-key!".to_vec();
+        let errors = [
+            keyring::Error::BadEncoding(key.clone()),
+            keyring::Error::BadStoreFormat(String::from_utf8(key).unwrap()),
+            keyring::Error::NoEntry,
+        ];
+        for error in &errors {
+            let text = MacKeychainItem::error(error);
+            assert!(!text.contains("the-master-key"), "{text}");
+            // Every text says what the operator can do.
+            assert!(text.contains("--key-store file"), "{text}");
+        }
     }
 }

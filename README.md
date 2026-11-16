@@ -150,14 +150,18 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   `bunsind serve --listen 127.0.0.1:8787` and use `http://127.0.0.1:8787` as the address.
 - **Tokens of the LLM and of MCP servers.** Each profile owner enters them in the window
   or on the command line, and the server keeps them encrypted in that profile's database.
-  This protects a copied database or backup. If the key is lost, the owners enter their
-  tokens again.
+  This protects a copied database or backup. If the key is lost, start the server once
+  with `--accept-new-key`: the notes and the settings stay, every stored token becomes
+  unreadable, and the owners enter their tokens again. Without that option the server
+  does not start over encrypted tokens whose key it cannot find.
 - **Where the key is.** `--key-store` chooses it. The stored tokens are the same
   encrypted values in the database in both cases.
   - **On macOS the default is `keychain`:** the key is one item of your login Keychain
     (Keychain Access shows it with the name `Bunsin server`). A copy of the data
     directory then holds no key. The account of the item is the ID in the file
-    `keychain-id` of the data directory.
+    `keychain-id` of the data directory. Keep this file: without it the server cannot
+    find its item. If the file is lost, write the account that Keychain Access shows
+    for the item back into it.
   - **On other systems the default is `file`:** the key is the file `master.key` in the
     data directory, or the file that `--master-key-file` names. Keep the key file out of
     backups of the data directory. It does not protect against a person who can read it.
@@ -170,7 +174,8 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     again, because the program changed.
   - **The key does not travel with the data directory.** On another computer the
     Keychain has no item for it, and the server does not start: it makes no new key over
-    encrypted tokens. Start with the key file, or enter the tokens again in a new folder.
+    encrypted tokens. Start with the key file, or start once with `--accept-new-key` and
+    enter the tokens again.
   - To look at the item or remove it:
     `security find-generic-password -s "Bunsin server" -a "$(cat <data dir>/keychain-id)"`
     and `security delete-generic-password` with the same options. Removing it makes the
