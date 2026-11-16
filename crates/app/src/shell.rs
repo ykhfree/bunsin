@@ -3,6 +3,7 @@
 use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
 use crate::notes_form::NotesForm;
+use crate::permissions_form::PermissionsForm;
 use crate::privacy::PrivacyForm;
 use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
 use bunsin_core::approval::ApprovalState;
@@ -24,6 +25,7 @@ pub struct Shell {
     pub(crate) privacy: PrivacyForm,
     pub(crate) connections: ConnectionsForm,
     pub(crate) notes: NotesForm,
+    pub(crate) permissions: PermissionsForm,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
     pub(crate) keychain: std::sync::Arc<dyn crate::connection::KeychainLookup>,
     /// The views never share the window, so no form can squeeze the inbox.
@@ -37,6 +39,8 @@ pub enum View {
     Inbox,
     /// The pages of the agent's notes.
     Notes,
+    /// What the agent may do with each approved tool.
+    Permissions,
     /// The connections and the privacy filter.
     Settings,
 }
@@ -55,6 +59,7 @@ impl Shell {
                     shell.privacy.receive(&state, window, cx);
                     shell.connections.receive(&state, window, cx);
                     shell.notes.receive(&state, window, cx);
+                    shell.permissions.receive(&state);
                     shell.state = state;
                     cx.notify();
                 });
@@ -71,6 +76,7 @@ impl Shell {
             privacy: PrivacyForm::new(window, cx),
             connections: ConnectionsForm::new(window, cx),
             notes: NotesForm::new(window, cx),
+            permissions: PermissionsForm::new(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
         }
@@ -451,6 +457,7 @@ impl Shell {
         let views = [
             ("tab-inbox", "Inbox", "inbox", View::Inbox, waiting),
             ("tab-notes", "Notes", "book-open", View::Notes, 0),
+            ("tab-permissions", "Permissions", "circle-check", View::Permissions, 0),
             ("tab-settings", "Settings", "settings", View::Settings, 0),
         ]
         .map(|(id, text, picture, view, count)| {
@@ -593,6 +600,7 @@ impl Shell {
         let title = match self.view {
             View::Inbox => "Inbox",
             View::Notes => "Notes",
+            View::Permissions => "Permissions",
             View::Settings => "Settings",
         };
         let switch = Button::new("kill-switch")
@@ -627,7 +635,9 @@ impl Render for Shell {
         let audit = snapshot.map(|s| s.audit.as_slice()).unwrap_or_default();
         let error = self.state.error.clone().unwrap_or_default();
 
-        let page = if let Some(notes) = notes {
+        let page = if self.view == View::Permissions {
+            self.permissions_section(cx)
+        } else if let Some(notes) = notes {
             notes
         } else if let Some((connections, privacy)) = forms {
             div()

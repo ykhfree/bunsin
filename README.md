@@ -29,7 +29,8 @@ Bunsin is in early development. Read this list before you use it.
 - **The privacy filter works on patterns.** It finds email addresses, phone numbers and
   the other listed forms. It does not find names or postal addresses.
 - **There is no setup wizard.** The window and the command line set the connections and
-  the privacy filter. Principles, permission rules and polls are edited as a JSON file.
+  the privacy filter. The window also sets the permission rules. Principles and polls are
+  edited as a JSON file.
 - **Not built yet:** full-text search of the notes, ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
@@ -313,6 +314,23 @@ bunsind connector-remove kim jira                # removes the connector and its
 
 ### Permission rules
 
+In the window, the **Permissions** view lists each approved tool and sets its rule with
+buttons: Off, Read, Write or Delete, then the step and the argument that holds the text
+for other people. Nothing is chosen for you from a tool's name or description. A write
+or delete rule cannot be saved until you say where its text is, or that it sends none.
+Save sends the whole table, and the view lists each change before you save.
+
+![The permissions view of the window](docs/screens/permissions-light.png)
+
+- The buttons offer the text arguments at the top of a tool's input. If the text is
+  inside another value, write the rule in the settings file. The view shows such a rule
+  as it is and does not change it.
+- A rule change also applies to items that already wait in the inbox: at approval the
+  server adds the AI marker by the rule in force at that time.
+- A rule that a poll needs cannot be removed. The view shows the server's reason.
+
+The same rules as a settings file:
+
 ```json
 {
   "approved_tools": {
@@ -493,9 +511,10 @@ macOS Keychain.
 
 ![The inbox of the window](docs/screens/inbox-light.png)
 
-The window has three views. **Inbox** shows the approval inbox with every argument of each
+The window has four views. **Inbox** shows the approval inbox with every argument of each
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
-you read, edit, make and delete a page. **Settings** has the connections (LLM endpoint,
+you read, edit, make and delete a page. **Permissions** sets what the agent may do with
+each approved tool (see [Permission rules](#permission-rules)). **Settings** has the connections (LLM endpoint,
 connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds. An edit before
 approval is available on the command line only.
 

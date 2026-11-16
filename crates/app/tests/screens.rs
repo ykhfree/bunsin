@@ -13,6 +13,7 @@ use bunsin_app::connect::{AppView, Source};
 use bunsin_app::connection::MemoryTokenStore;
 use bunsin_app::shell::Shell;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::settings::Wire;
 use bunsin_core::wiki::WikiText;
 use gpui_kit::assets::Assets;
@@ -106,6 +107,51 @@ async fn fixture() -> (common::Rig, UiState) {
         expected: Expected::Unchecked,
     };
     rig.engine.set_connector("kim", "slack", connector).await.unwrap();
+    // Tools with typed arguments, and one rule of each class, for the permissions view.
+    let text = json!({"type": "string"});
+    let spec = |name: &str, description: &str, properties: serde_json::Value| bunsin_core::tool::ToolSpec {
+        name: name.into(),
+        description: description.into(),
+        input_schema: json!({"type": "object", "properties": properties}),
+    };
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    let slack = vec![
+        spec(
+            "post",
+            "Post a message to a channel or a thread.",
+            json!({"channel": text, "text": text, "thread_ts": text}),
+        ),
+        spec(
+            "search",
+            "Search messages. Returns the newest matches first.",
+            json!({"query": text}),
+        ),
+        spec(
+            "add_reaction",
+            "Add an emoji reaction to a message.",
+            json!({"channel": text, "ts": text, "emoji": text}),
+        ),
+        spec(
+            "delete_message",
+            "Delete a message that you posted.",
+            json!({"channel": text, "ts": text}),
+        ),
+    ];
+    config.approved_tools.insert("slack".into(), slack);
+    let rule = |class, tier, text| ToolRule {
+        class,
+        tier,
+        outgoing_text: text,
+    };
+    config.policy.rules.insert(
+        "slack/add_reaction".into(),
+        rule(ToolClass::Write, Tier::Autonomous, OutgoingText::None),
+    );
+    config.policy.rules.insert(
+        "slack/delete_message".into(),
+        rule(ToolClass::Delete, Tier::Approve, OutgoingText::None),
+    );
+    rig.engine.set_profile_config("kim", config).await.unwrap();
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     (rig, state)
@@ -265,6 +311,12 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     };
     states.send(refused).unwrap();
     shot(&mut cx, window, dir, &name("notes-warnings"));
+
+    // The permissions, with one rule changed and one new rule that has no text choice yet.
+    states.send(state.clone()).unwrap();
+    click(&mut cx, "tab-permissions");
+    click(&mut cx, "perm-slack/post-tier-draft");
+    shot(&mut cx, window, dir, &name("permissions"));
 
     // The settings, with the result of a check of the connector.
     click(&mut cx, "tab-settings");

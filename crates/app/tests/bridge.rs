@@ -926,3 +926,50 @@ async fn a_save_opens_the_page_and_a_conflict_or_a_delete_does_not() {
     assert_eq!(state.open_note, None);
     assert_eq!(state.notes, Some(vec![]));
 }
+
+#[tokio::test]
+async fn a_permissions_save_reports_its_own_result_and_reloads_the_rules() {
+    use bunsin_api::PermissionsUpdate;
+    use bunsin_core::policy::ToolRule;
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let loaded = state.permissions.clone().unwrap();
+    assert_eq!(loaded, rig.engine.permissions("kim").await.unwrap());
+
+    let mut rules = loaded.rules.clone();
+    rules.insert("slack/search".into(), ToolRule::read());
+    let save = |profile: &str, expected| UiCommand::SavePermissions {
+        profile: profile.into(),
+        update: PermissionsUpdate {
+            rules: rules.clone(),
+            expected,
+        },
+    };
+    // A save for a profile that is not the selected one reaches no profile.
+    apply(&*rig.engine, &mut state, save("lee", Expected::Unchecked)).await;
+    assert!(failure(&state.permissions_result).contains("another profile is selected"));
+    assert_eq!(state.permission_saves, 1);
+    assert_eq!(rig.engine.permissions("lee").await.unwrap().rules, loaded.rules);
+
+    apply(
+        &*rig.engine,
+        &mut state,
+        save("kim", Expected::Value(loaded.rules.clone())),
+    )
+    .await;
+    assert_eq!(state.permissions_result, Some(Ok(())));
+    assert_eq!(state.permission_saves, 2);
+    assert_eq!(state.permissions.clone().unwrap().rules, rules);
+    assert_eq!(rig.engine.permissions("kim").await.unwrap().rules, rules);
+
+    // The same save again started from rules that the server no longer has.
+    apply(&*rig.engine, &mut state, save("kim", Expected::Value(loaded.rules))).await;
+    assert_eq!(state.permissions_result, Some(Err(SaveError::Conflict)));
+    assert_eq!(state.error, None);
+
+    // The result belongs to its command only.
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    assert_eq!(state.permissions_result, None);
+    assert_eq!(state.permission_saves, 3);
+}

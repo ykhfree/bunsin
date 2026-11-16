@@ -268,6 +268,12 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.delete_wiki_page(other, "team").await);
         refused(kim.wiki_history(other, "team").await.map(|_| ()));
         refused(kim.connections(other).await.map(|_| ()));
+        refused(kim.permissions(other).await.map(|_| ()));
+        let no_rules = bunsin_api::PermissionsUpdate {
+            rules: Default::default(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_permissions(other, no_rules).await);
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
             base_url: "https://attacker.example".into(),
@@ -743,4 +749,30 @@ async fn a_command_connector_goes_through_the_server_rules_of_its_own_profile() 
     for profile in ["kim", "lee"] {
         assert!(rig.engine.connections(profile).await.unwrap().connectors.is_empty());
     }
+}
+
+#[tokio::test]
+async fn the_permission_table_is_read_and_replaced_over_http() {
+    let rig = rig().await;
+    let lee = rig.client(&rig.lee_token);
+    let loaded = lee.permissions("lee").await.unwrap();
+    let config = lee.profile_config("lee").await.unwrap();
+    assert_eq!(loaded.rules, config.policy.rules);
+    assert_eq!(loaded.tools, config.approved_tools);
+
+    let mut rules = loaded.rules.clone();
+    rules.insert("slack/extra".into(), bunsin_core::policy::ToolRule::read());
+    let update = |expected| bunsin_api::PermissionsUpdate {
+        rules: rules.clone(),
+        expected,
+    };
+    lee.set_permissions("lee", update(bunsin_api::Expected::Value(loaded.rules.clone())))
+        .await
+        .unwrap();
+    assert_eq!(lee.permissions("lee").await.unwrap().rules, rules);
+    // A save that started from the earlier table is a conflict for the client, not a plain failure.
+    let stale = lee
+        .set_permissions("lee", update(bunsin_api::Expected::Value(loaded.rules)))
+        .await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
 }
