@@ -1,10 +1,12 @@
-//! The main window: profiles, kill switch, approval inbox, audit log, notes, privacy settings and connections.
+//! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
+//! privacy settings and connections.
 
 use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
 use crate::draft_editor::DraftEditor;
 use crate::notes_form::NotesForm;
 use crate::permissions_form::PermissionsForm;
+use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
 use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
 use bunsin_core::approval::ApprovalState;
@@ -27,6 +29,7 @@ pub struct Shell {
     pub(crate) connections: ConnectionsForm,
     pub(crate) notes: NotesForm,
     pub(crate) permissions: PermissionsForm,
+    pub(crate) principles: PrinciplesForm,
     /// The edit of a waiting call in the inbox, if one is open.
     pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
@@ -44,6 +47,8 @@ pub enum View {
     Notes,
     /// What the agent may do with each approved tool.
     Permissions,
+    /// How the agent works: the owner's principles.
+    Agent,
     /// The connections and the privacy filter.
     Settings,
 }
@@ -63,6 +68,7 @@ impl Shell {
                     shell.connections.receive(&state, window, cx);
                     shell.notes.receive(&state, window, cx);
                     shell.permissions.receive(&state);
+                    shell.principles.receive(&state, window, cx);
                     shell.draft_editor.receive(&state);
                     shell.state = state;
                     cx.notify();
@@ -81,6 +87,7 @@ impl Shell {
             connections: ConnectionsForm::new(window, cx),
             notes: NotesForm::new(window, cx),
             permissions: PermissionsForm::new(),
+            principles: PrinciplesForm::new(window, cx),
             draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
@@ -469,6 +476,7 @@ impl Shell {
             ("tab-inbox", "Inbox", "inbox", View::Inbox, waiting),
             ("tab-notes", "Notes", "book-open", View::Notes, 0),
             ("tab-permissions", "Permissions", "circle-check", View::Permissions, 0),
+            ("tab-agent", "Agent", "bot", View::Agent, 0),
             ("tab-settings", "Settings", "settings", View::Settings, 0),
         ]
         .map(|(id, text, picture, view, count)| {
@@ -612,6 +620,7 @@ impl Shell {
             View::Inbox => "Inbox",
             View::Notes => "Notes",
             View::Permissions => "Permissions",
+            View::Agent => "Agent",
             View::Settings => "Settings",
         };
         let switch = Button::new("kill-switch")
@@ -648,6 +657,19 @@ impl Render for Shell {
 
         let page = if self.view == View::Permissions {
             self.permissions_section(cx)
+        } else if self.view == View::Agent {
+            div()
+                .id("agent")
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .gap_5()
+                .overflow_y_scroll()
+                .child(self.principles_section(cx))
+                .into_any_element()
         } else if let Some(notes) = notes {
             notes
         } else if let Some((connections, privacy)) = forms {

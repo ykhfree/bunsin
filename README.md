@@ -30,7 +30,7 @@ Bunsin is in early development. Read this list before you use it.
   addresses, phone numbers and the other listed forms. It finds names and postal
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
-  the privacy filter. The window also sets the permission rules. Principles and polls are
+  the privacy filter. The window also sets the permission rules and the principles. Polls are
   edited as a JSON file.
 - **Not built yet:** full-text search of the notes, ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
@@ -314,6 +314,16 @@ bunsind connector-remove kim jira                # removes the connector and its
 `principles` go into every prompt as instructions. All other text the agent reads
 (messages, pages, tool descriptions) is quoted as data.
 
+In the window, the **Agent** view lists the principles. You add, change, move up or down,
+and remove them, then Save sends the list. If someone saved other principles meanwhile, the
+view warns and offers "Load the server's version" and "Save anyway".
+
+![The principles in the agent view](docs/screens/agent-light.png)
+
+- At most 50 principles, each 1 to 1,000 characters. The space around a principle is removed.
+- Principles are your own instructions, so the privacy filter does not change them.
+- The audit log records the counts of a change, not the text.
+
 ### Permission rules
 
 In the window, the **Permissions** view lists each approved tool and sets its rule with
@@ -540,10 +550,11 @@ macOS Keychain.
 
 ![The inbox of the window](docs/screens/inbox-light.png)
 
-The window has four views. **Inbox** shows the approval inbox with every argument of each
+The window has five views. **Inbox** shows the approval inbox with every argument of each
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
-each approved tool (see [Permission rules](#permission-rules)). **Settings** has the connections (LLM endpoint,
+each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
+principles (see [Principles](#principles)). **Settings** has the connections (LLM endpoint,
 connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds.
 
 **Edit before approval.** A waiting call whose rule names places of text has the button

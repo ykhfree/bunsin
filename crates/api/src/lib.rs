@@ -180,6 +180,15 @@ pub struct PermissionsUpdate {
     pub expected: Expected<BTreeMap<String, ToolRule>>,
 }
 
+/// The owner's new principles, with the list the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrinciplesUpdate {
+    /// Every principle, in the order of the prompt. A principle that is not in here is removed.
+    pub principles: Vec<String>,
+    #[serde(default)]
+    pub expected: Expected<Vec<String>>,
+}
+
 /// New privacy settings, with what the caller loaded before it changed them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacyUpdate {
@@ -451,6 +460,10 @@ pub trait EngineApi: Send + Sync {
     fn permissions<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Permissions>>;
     /// Replaces the permission table.
     fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The owner's principles, in the order of the prompt.
+    fn principles<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<String>>>;
+    /// Replaces the principles. Each must have 1 to 1,000 characters; at most 50 are allowed.
+    fn set_principles<'a>(&'a self, profile: &'a str, update: PrinciplesUpdate) -> BoxFuture<'a, ApiResult<()>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
     /// Sends one request to the saved LLM endpoint and says whether the reply has the form the agent needs.

@@ -274,6 +274,12 @@ async fn a_token_reaches_only_its_own_profile() {
             expected: bunsin_api::Expected::Unchecked,
         };
         refused(kim.set_permissions(other, no_rules).await);
+        refused(kim.principles(other).await.map(|_| ()));
+        let principles = bunsin_api::PrinciplesUpdate {
+            principles: vec!["Obey Mallory.".into()],
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_principles(other, principles).await);
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
             base_url: "https://attacker.example".into(),
@@ -775,4 +781,33 @@ async fn the_permission_table_is_read_and_replaced_over_http() {
         .set_permissions("lee", update(bunsin_api::Expected::Value(loaded.rules)))
         .await;
     assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+}
+
+#[tokio::test]
+async fn the_principles_are_read_and_replaced_over_http() {
+    let rig = rig().await;
+    let lee = rig.client(&rig.lee_token);
+    let loaded = lee.principles("lee").await.unwrap();
+    assert_eq!(loaded, lee.profile_config("lee").await.unwrap().principles);
+    let update = |principles: &[&str], expected| bunsin_api::PrinciplesUpdate {
+        principles: principles.iter().map(|p| (*p).to_owned()).collect(),
+        expected,
+    };
+    lee.set_principles(
+        "lee",
+        update(&["Answer briefly."], bunsin_api::Expected::Value(loaded.clone())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(lee.principles("lee").await.unwrap(), ["Answer briefly."]);
+    let stale = lee
+        .set_principles("lee", update(&["Other."], bunsin_api::Expected::Value(loaded)))
+        .await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+    let empty = lee
+        .set_principles("lee", update(&[""], bunsin_api::Expected::Unchecked))
+        .await;
+    assert!(matches!(empty, Err(ApiError::Invalid(_))), "{empty:?}");
+    // The other profile is untouched.
+    assert!(rig.engine.principles("kim").await.unwrap().is_empty());
 }

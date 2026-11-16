@@ -5,7 +5,8 @@
 
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, Permissions, PermissionsUpdate, PrivacyUpdate, ProfileSnapshot, ToolsReport, WikiPageUpdate,
+    Outcome, Permissions, PermissionsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot, ToolsReport,
+    WikiPageUpdate,
 };
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
@@ -36,6 +37,11 @@ pub enum UiCommand {
     SavePermissions {
         profile: String,
         update: PermissionsUpdate,
+    },
+    /// Replaces the owner's principles.
+    SavePrinciples {
+        profile: String,
+        update: PrinciplesUpdate,
     },
     /// Saves the LLM endpoint. A typed token travels only in this command.
     SaveLlm {
@@ -168,6 +174,12 @@ pub struct UiState {
     pub permissions_result: Option<Result<(), SaveError>>,
     /// How many `SavePermissions` commands the bridge has run.
     pub permission_saves: u64,
+    /// The principles of the selected profile, as the server has them.
+    pub principles: Option<Vec<String>>,
+    /// The result of the last command, if it was `SavePrinciples`. A failed save is shown here, not in `error`.
+    pub principles_result: Option<Result<(), SaveError>>,
+    /// How many `SavePrinciples` commands the bridge has run.
+    pub principle_saves: u64,
     /// The LLM endpoint and the connectors of the selected profile, as the server has them.
     pub connections: Option<Connections>,
     /// The result of the last command, if it was a connection command. A failure is shown here, not in `error`.
@@ -234,6 +246,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.error = None;
     state.privacy_result = None;
     state.permissions_result = None;
+    state.principles_result = None;
     state.connection_result = None;
     state.note_result = None;
     let selected = state.selected.clone();
@@ -248,6 +261,12 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             let result = save_for(selected, &profile, api.set_permissions(&profile, update)).await;
             state.permissions_result = Some(result);
             state.permission_saves += 1;
+            Ok(())
+        }
+        (UiCommand::SavePrinciples { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_principles(&profile, update)).await;
+            state.principles_result = Some(result);
+            state.principle_saves += 1;
             Ok(())
         }
         (UiCommand::SavePrivacy { profile, update }, _) => {
@@ -358,6 +377,7 @@ struct Loaded {
     snapshot: ProfileSnapshot,
     privacy: PrivacyConfig,
     permissions: Permissions,
+    principles: Vec<String>,
     connections: Connections,
     notes: Vec<WikiSummary>,
     /// The open page. None if no page is open or the server has no such page.
@@ -369,6 +389,7 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<&str>) ->
         snapshot: api.snapshot(profile).await?,
         privacy: api.privacy(profile).await?,
         permissions: api.permissions(profile).await?,
+        principles: api.principles(profile).await?,
         connections: api.connections(profile).await?,
         notes: api.wiki_index(profile).await?,
         page: match open {
@@ -387,6 +408,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.snapshot = None;
     state.privacy = None;
     state.permissions = None;
+    state.principles = None;
     state.connections = None;
     state.notes = None;
     state.connected = false;
@@ -415,6 +437,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.snapshot = Some(loaded.snapshot);
                 state.privacy = Some(loaded.privacy);
                 state.permissions = Some(loaded.permissions);
+                state.principles = Some(loaded.principles);
                 state.connections = Some(loaded.connections);
                 state.notes = Some(loaded.notes);
                 if let Some(open) = &mut state.open_note {

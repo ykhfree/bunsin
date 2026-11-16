@@ -6,7 +6,8 @@
 mod common;
 
 use bunsin_api::{
-    CommandConnectorUpdate, ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, WikiPageUpdate,
+    CommandConnectorUpdate, ConnectorUpdate, EngineApi, Expected, LlmUpdate, PrinciplesUpdate, TokenChange,
+    WikiPageUpdate,
 };
 use bunsin_app::bridge::{NoteResult, SaveError, UiCommand, UiState, apply};
 use bunsin_app::connect::{AppView, Source};
@@ -154,6 +155,16 @@ async fn fixture() -> (common::Rig, UiState) {
         rule(ToolClass::Delete, Tier::Approve, OutgoingText::None),
     );
     rig.engine.set_profile_config("kim", config).await.unwrap();
+    let principles = [
+        "Answer in two sentences.",
+        "Never promise a date without checking Jira.",
+        "If a question is about money or people, leave it to me.",
+    ];
+    let principles = PrinciplesUpdate {
+        principles: principles.map(str::to_owned).to_vec(),
+        expected: Expected::Unchecked,
+    };
+    rig.engine.set_principles("kim", principles).await.unwrap();
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     (rig, state)
@@ -366,6 +377,12 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
         click(&mut cx, id);
     }
     shot(&mut cx, window, dir, &name("permissions-changes"));
+
+    // The principles, with one being changed.
+    states.send(state.clone()).unwrap();
+    click(&mut cx, "tab-agent");
+    click(&mut cx, "principle-edit-1");
+    shot(&mut cx, window, dir, &name("agent"));
 
     // The settings, with the result of a check of the connector.
     click(&mut cx, "tab-settings");

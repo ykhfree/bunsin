@@ -5,14 +5,15 @@
 mod connections;
 mod notes;
 mod polling;
+mod principles;
 mod secrets;
 
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
-    ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -1260,6 +1261,14 @@ impl EngineApi for Engine {
 
     fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.replace_permissions(profile, update) })
+    }
+
+    fn principles<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<String>>> {
+        Box::pin(async move { self.read_principles(profile) })
+    }
+
+    fn set_principles<'a>(&'a self, profile: &'a str, update: PrinciplesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_principles(profile, update) })
     }
 
     fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>> {

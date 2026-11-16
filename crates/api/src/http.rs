@@ -20,6 +20,8 @@
 //! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyUpdate` | |
 //! | GET | `/v1/profiles/{p}/permissions` | | `Permissions` |
 //! | PUT | `/v1/profiles/{p}/permissions` | `PermissionsUpdate` | |
+//! | GET | `/v1/profiles/{p}/principles` | | `[String]` |
+//! | PUT | `/v1/profiles/{p}/principles` | `PrinciplesUpdate` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |

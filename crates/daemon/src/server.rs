@@ -13,8 +13,8 @@ use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, status_of};
 use bunsin_api::{
     ApiError, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
-    Permissions, PermissionsUpdate, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, ToolsReport, WikiPageUpdate,
+    Permissions, PermissionsUpdate, PollPreview, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
+    ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::privacy::PrivacyConfig;
@@ -200,6 +200,25 @@ async fn put_permissions(
     Ok(Json(engine.set_permissions(&profile, update).await?))
 }
 
+async fn get_principles(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<String>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.principles(&profile).await?))
+}
+
+async fn put_principles(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<PrinciplesUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_principles(&profile, update).await?))
+}
+
 async fn get_privacy(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -346,6 +365,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("connectors/{connector}/tools/approve"), post(approve_tools))
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("permissions"), get(get_permissions).put(put_permissions))
+        .route(&profile("principles"), get(get_principles).put(put_principles))
         .route(&profile("polls/{index}/test"), post(test_poll))
         .route(&profile("llm/test"), post(test_llm))
         .route(&profile("wiki"), get(wiki_index))
