@@ -2,6 +2,7 @@
 //!
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
+mod autonomy;
 mod connections;
 mod corrections;
 mod llm_log;
@@ -30,7 +31,7 @@ use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
-use bunsin_core::records::{CorrectionRecord, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
+use bunsin_core::records::{CorrectionRecord, DecisionKind, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
 use bunsin_core::wiki::{WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiPage, WikiSummary, WikiUpdate, is_notes_tool};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
@@ -727,6 +728,9 @@ impl Engine {
             ApprovalState::Draft => Ok(Outcome::Drafted { inbox_id: item.id }),
             ApprovalState::Pending => Ok(Outcome::PendingApproval { inbox_id: item.id }),
             _ => {
+                if let InboxBody::ToolCall { tool, .. } = &item.body {
+                    self.record_decision(store, &item, tool, DecisionKind::Autonomous)?;
+                }
                 // The event is closed before the call starts. If a step after the call fails,
                 // a later delivery of the event must not make the same write again.
                 store.finish_event(key).map_err(store_error)?;
@@ -879,6 +883,10 @@ impl Engine {
         let config = &ctx.config;
         let key = item.event_key.clone();
         let rule = config.policy.rules.get(&tool_id);
+        let kind = match edit {
+            Some(_) => DecisionKind::Edited,
+            None => DecisionKind::Approved,
+        };
 
         if let Some(Edit {
             args: mut edited,
@@ -963,26 +971,32 @@ impl Engine {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
         self.audit(&store, "approved", Some(&key), json!({"inbox_id": inbox_id}))?;
+        self.record_decision(&store, &item, &tool_id, kind)?;
         self.execute(&ctx, &item).await
     }
 
     fn reject_item(&self, profile: &str, inbox_id: i64, reason: &str) -> ApiResult<()> {
         let store = self.store(profile)?;
         let item = store.inbox_item(inbox_id).map_err(store_error)?;
-        let moved = [ApprovalState::Pending, ApprovalState::Draft].into_iter().any(|from| {
+        let moved_from = [ApprovalState::Pending, ApprovalState::Draft].into_iter().find(|from| {
             store
-                .move_inbox_state(inbox_id, from, ApprovalState::Rejected, self.now())
+                .move_inbox_state(inbox_id, *from, ApprovalState::Rejected, self.now())
                 .unwrap_or(false)
         });
-        if !moved {
+        let Some(from) = moved_from else {
             return Err(ApiError::NotAllowed(format!("the item is {}", item.state.as_str())));
-        }
+        };
         self.audit(
             &store,
             "rejected",
             Some(&item.event_key),
             json!({"inbox_id": inbox_id, "reason": reason}),
-        )
+        )?;
+        // Only a waiting call is a review. A draft never runs, and a note or an escalation is no call.
+        match (&item.body, from) {
+            (InboxBody::ToolCall { tool, .. }, ApprovalState::Pending) => self.record_rejection(&store, &item, tool),
+            _ => Ok(()),
+        }
     }
 
     async fn replay_case(&self, profile: &str, case: ReplayCase) -> ApiResult<ReplayResult> {

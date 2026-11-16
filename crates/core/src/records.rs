@@ -110,3 +110,64 @@ pub struct CorrectionRecord {
     /// Unix seconds. A retired correction stays stored, but no prompt gets it.
     pub retired_at: Option<i64>,
 }
+
+/// One decision about a call of a tool. The store keeps them in an append-only table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionKind {
+    /// The owner approved a waiting call without a change.
+    Approved,
+    /// The owner changed the text of a waiting call and approved it.
+    Edited,
+    /// The owner dismissed a waiting call.
+    Rejected,
+    /// The policy ran a call without the owner.
+    Autonomous,
+    /// The owner reported a problem with a call that ran without the owner.
+    Reported,
+    /// The tool is held at approval: its calls ask the owner whatever the step says.
+    Demoted,
+    /// The owner cleared the hold of the tool.
+    HoldCleared,
+}
+
+impl DecisionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionKind::Approved => "approved",
+            DecisionKind::Edited => "edited",
+            DecisionKind::Rejected => "rejected",
+            DecisionKind::Autonomous => "autonomous",
+            DecisionKind::Reported => "reported",
+            DecisionKind::Demoted => "demoted",
+            DecisionKind::HoldCleared => "hold_cleared",
+        }
+    }
+}
+
+/// The decisions about the calls of one tool, counted since its last hold began.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCounts {
+    /// Waiting calls that the owner approved without a change.
+    pub approved: u32,
+    /// Waiting calls that the owner changed and approved.
+    pub edited: u32,
+    /// Waiting calls that the owner dismissed.
+    pub rejected: u32,
+    /// Calls that ran without the owner.
+    pub autonomous: u32,
+    /// Of the calls that ran without the owner, the ones that failed.
+    pub autonomous_failed: u32,
+}
+
+impl DecisionCounts {
+    /// The waiting calls that the owner decided about.
+    pub fn reviewed(&self) -> u32 {
+        self.approved + self.edited + self.rejected
+    }
+
+    /// The share of reviewed calls approved without a change, rounded down. `None` without a review.
+    pub fn unchanged_percent(&self) -> Option<u32> {
+        let reviewed = self.reviewed();
+        (reviewed > 0).then(|| self.approved * 100 / reviewed)
+    }
+}

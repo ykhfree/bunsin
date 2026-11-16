@@ -207,6 +207,17 @@
     `retire_correction(id)`(`POST .../retire-correction`, `bunsind retire-correction`)는 `retired_at`을 적고 감사 `correction_retired`를 남긴다.
     폐기한 교정은 검색에서 빠지고 N에도 들지 않는다. 다시 폐기하면 거부한다.
   - LLM은 교정을 저장하거나 폐기하지 않는다. 저장은 엔진이, 폐기는 소유자가 한다.
+- **결정 기록과 보류(좁은 자율, PLAN 4.7과 6절의 3단계)**: 표 `decisions(id, at, inbox_id, tool, kind)`는 추가 전용이다(트리거가 UPDATE와 DELETE를 거부한다).
+  - kind: `approved`(소유자가 고치지 않고 승인), `edited`(고쳐서 승인), `rejected`(대기 중인 호출을 거부), `autonomous`(정책이 소유자 없이 실행),
+    `reported`, `demoted`(보류 시작), `hold_cleared`(보류 해제).
+  - 적지 않는 것: 초안의 거부(실행되지 않는다), notes 변경안, 넘김 항목. 사본(`retry_of`)의 승인, 수정, 거부도 적지 않는다.
+    사본은 앞 항목을 되풀이하고, 앞 항목의 결정이 이미 적혀 있기 때문이다.
+  - 보류: 그 도구의 `demoted`와 `hold_cleared` 중 마지막이 `demoted`이다. `demoted`는 보류가 아닐 때만 쓴다. 확인과 쓰기는 한 transaction이다.
+  - 보류는 설정 밖에 있다. 그래서 `config-set`이나 낡은 "Save anyway"가 보류를 조용히 풀지 못한다.
+  - 내리기: 소유자가 write·`autonomous` 규칙인 도구의 대기 중인 호출을 거부하면 엔진이 `demoted`와 감사 `autonomy_demoted`를 쓴다.
+    이미 보류 중이면 `demoted`를 다시 쓰지 않는다. 기각: config의 단계를 고쳐 내리기. 낡은 저장이 조용히 되올린다.
+  - 개수(도구별): 마지막 `demoted` 뒤의 `approved`, `edited`, `rejected`, `autonomous`를 센다. 그래서 보류가 개수를 처음부터 다시 센다.
+    자율 실행의 실패는 항목이 `failed`이고 사본이 없는 것이다. 사본이 있으면 시작이나 소유자가 호출을 실행하지 않은 것이기 때문이다.
 - 비밀 값은 설정에 저장하지 않는다. 9절을 본다.
 
 ## 5. LLM 어댑터

@@ -2,7 +2,9 @@ use crate::{Result, StoreError};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
 use bunsin_core::event::InboundEvent;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, CorrectionRecord, InboxBody, InboxItem, LlmUsage, ReadNote};
+use bunsin_core::records::{
+    ArtifactMeta, AuditEntry, CorrectionRecord, DecisionCounts, DecisionKind, InboxBody, InboxItem, LlmUsage, ReadNote,
+};
 use bunsin_core::search::{TermQuery, rank, term_query};
 use bunsin_core::sha256_hex;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiSource, WikiSummary, WikiText};
@@ -102,6 +104,18 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     latency_ms INTEGER NOT NULL,
     outcome TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    inbox_id INTEGER,
+    tool TEXT NOT NULL,
+    kind TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_tool ON decisions (tool, kind);
+CREATE TRIGGER IF NOT EXISTS decisions_no_update BEFORE UPDATE ON decisions
+BEGIN SELECT RAISE(ABORT, 'the decisions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS decisions_no_delete BEFORE DELETE ON decisions
+BEGIN SELECT RAISE(ABORT, 'the decisions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit
 BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit
@@ -140,6 +154,27 @@ INSERT INTO wiki_fts (slug, title, summary, body) SELECT slug, title, summary, b
 ";
 
 const KILL_SWITCH: &str = "kill_switch";
+
+fn insert_decision(db: &Connection, at: i64, inbox_id: Option<i64>, tool: &str, kind: DecisionKind) -> Result<()> {
+    db.execute(
+        "INSERT INTO decisions (at, inbox_id, tool, kind) VALUES (?1, ?2, ?3, ?4)",
+        (at, inbox_id, tool, kind.as_str()),
+    )?;
+    Ok(())
+}
+
+/// True if the last hold or clearing of the tool is a hold.
+fn is_held(db: &Connection, tool: &str) -> Result<bool> {
+    let last: Option<String> = db
+        .query_row(
+            "SELECT kind FROM decisions WHERE tool = ?1 AND kind IN ('demoted', 'hold_cleared')
+             ORDER BY id DESC LIMIT 1",
+            [tool],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(last.as_deref() == Some(DecisionKind::Demoted.as_str()))
+}
 
 /// Creates each full-text index that is missing and fills it from the rows that exist.
 /// One transaction holds the check and the fill, so an index is never half made.
@@ -943,6 +978,108 @@ impl ProfileStore {
             return Err(StoreError::NotFound("correction", id));
         }
         Ok(changed == 1)
+    }
+
+    // --- decisions ---
+
+    pub fn add_decision(&self, at: i64, inbox_id: Option<i64>, tool: &str, kind: DecisionKind) -> Result<()> {
+        insert_decision(&self.db(), at, inbox_id, tool, kind)
+    }
+
+    /// True if the tool is held at approval: its last hold was not cleared.
+    pub fn is_held(&self, tool: &str) -> Result<bool> {
+        is_held(&self.db(), tool)
+    }
+
+    /// The tools that are held at approval.
+    pub fn held_tools(&self) -> Result<BTreeSet<String>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT d.tool FROM decisions d WHERE d.kind = 'demoted' AND d.id = (
+                 SELECT MAX(h.id) FROM decisions h WHERE h.tool = d.tool AND h.kind IN ('demoted', 'hold_cleared'))",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Writes `kind` for the tool only if the tool's hold state is `held`, in one transaction.
+    /// Returns false if the state was not `held`, so of two callers only one writes.
+    fn decide_hold(&self, at: i64, inbox_id: Option<i64>, tool: &str, kind: DecisionKind, held: bool) -> Result<bool> {
+        let mut db = self.db();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if is_held(&tx, tool)? != held {
+            return Ok(false);
+        }
+        insert_decision(&tx, at, inbox_id, tool, kind)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Holds the tool at approval because of the item `inbox_id`. Returns false if it is held already.
+    pub fn demote(&self, at: i64, inbox_id: i64, tool: &str) -> Result<bool> {
+        self.decide_hold(at, Some(inbox_id), tool, DecisionKind::Demoted, false)
+    }
+
+    /// Clears the hold of the tool. Returns false if the tool is not held.
+    pub fn clear_hold(&self, at: i64, tool: &str) -> Result<bool> {
+        self.decide_hold(at, None, tool, DecisionKind::HoldCleared, true)
+    }
+
+    /// Records the owner's report of a problem with an item. Returns false if the item was reported before.
+    pub fn add_report(&self, at: i64, inbox_id: i64, tool: &str) -> Result<bool> {
+        let mut db = self.db();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let reported: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM decisions WHERE inbox_id = ?1 AND kind = 'reported')",
+            [inbox_id],
+            |row| row.get(0),
+        )?;
+        if reported {
+            return Ok(false);
+        }
+        insert_decision(&tx, at, Some(inbox_id), tool, DecisionKind::Reported)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The approvals, edits, rejections and autonomous runs of each tool from `since` (Unix seconds)
+    /// on. Only the decisions after the tool's last hold count: a hold starts the counts again.
+    /// An autonomous run failed if its item is `failed` and no copy of it was made. A copy means
+    /// that a start or the owner did not let the call run.
+    pub fn decision_counts(&self, since: i64) -> Result<BTreeMap<String, DecisionCounts>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT d.tool, d.kind, COUNT(*),
+                    COALESCE(SUM(i.state = 'failed' AND NOT EXISTS (SELECT 1 FROM inbox c WHERE c.retry_of = i.id)), 0)
+             FROM decisions d LEFT JOIN inbox i ON i.id = d.inbox_id
+             WHERE d.at >= ?1 AND d.kind IN ('approved', 'edited', 'rejected', 'autonomous')
+               AND d.id > (SELECT COALESCE(MAX(h.id), 0) FROM decisions h WHERE h.tool = d.tool AND h.kind = 'demoted')
+             GROUP BY d.tool, d.kind",
+        )?;
+        let rows = statement.query_map([since], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u32,
+                row.get::<_, i64>(3)? as u32,
+            ))
+        })?;
+        let mut counts: BTreeMap<String, DecisionCounts> = BTreeMap::new();
+        for row in rows {
+            let (tool, kind, count, failed) = row?;
+            let entry = counts.entry(tool).or_default();
+            match kind.as_str() {
+                "approved" => entry.approved = count,
+                "edited" => entry.edited = count,
+                "rejected" => entry.rejected = count,
+                // The query returns only the four kinds above, so this is `autonomous`.
+                _ => {
+                    entry.autonomous = count;
+                    entry.autonomous_failed = failed;
+                }
+            }
+        }
+        Ok(counts)
     }
 
     // --- LLM calls ---
@@ -1980,5 +2117,120 @@ mod tests {
             .revision,
             1
         );
+    }
+
+    #[test]
+    fn the_decisions_are_append_only() {
+        let (_dir, s) = store();
+        s.add_decision(1, Some(4), "slack/post", DecisionKind::Approved)
+            .unwrap();
+        assert!(s.db().execute("UPDATE decisions SET kind = 'rejected'", []).is_err());
+        assert!(s.db().execute("DELETE FROM decisions", []).is_err());
+        assert_eq!(s.decision_counts(0).unwrap()["slack/post"].approved, 1);
+    }
+
+    #[test]
+    fn a_hold_is_written_once_and_cleared_once() {
+        let (_dir, s) = store();
+        assert!(!s.clear_hold(1, "slack/post").unwrap());
+        assert!(s.demote(2, 7, "slack/post").unwrap());
+        // A second hold of a held tool writes nothing.
+        assert!(!s.demote(3, 8, "slack/post").unwrap());
+        assert!(s.is_held("slack/post").unwrap());
+        assert!(!s.is_held("slack/react").unwrap());
+        assert_eq!(s.held_tools().unwrap(), BTreeSet::from(["slack/post".to_owned()]));
+        // Other decisions after the hold do not end it.
+        s.add_decision(4, Some(9), "slack/post", DecisionKind::Approved)
+            .unwrap();
+        assert!(s.is_held("slack/post").unwrap());
+        assert!(s.clear_hold(5, "slack/post").unwrap());
+        assert!(!s.clear_hold(6, "slack/post").unwrap());
+        assert!(!s.is_held("slack/post").unwrap());
+        assert!(s.held_tools().unwrap().is_empty());
+        // A tool can be held again after its hold was cleared.
+        assert!(s.demote(7, 10, "slack/post").unwrap());
+        assert!(s.is_held("slack/post").unwrap());
+        let holds: i64 = s
+            .db()
+            .query_row("SELECT COUNT(*) FROM decisions WHERE kind = 'demoted'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(holds, 2);
+    }
+
+    #[test]
+    fn counts_start_after_the_last_hold_and_stay_in_the_window() {
+        let (_dir, s) = store();
+        let post = "slack/post";
+        s.add_decision(10, Some(1), post, DecisionKind::Approved).unwrap();
+        s.add_decision(11, Some(2), post, DecisionKind::Rejected).unwrap();
+        assert!(s.demote(12, 2, post).unwrap());
+        s.add_decision(20, Some(3), post, DecisionKind::Approved).unwrap();
+        s.add_decision(30, Some(4), post, DecisionKind::Approved).unwrap();
+        s.add_decision(31, Some(5), post, DecisionKind::Edited).unwrap();
+        s.add_decision(32, Some(6), post, DecisionKind::Rejected).unwrap();
+        // Reports and clearings are not reviews.
+        assert!(s.add_report(33, 6, post).unwrap());
+        assert!(s.clear_hold(34, post).unwrap());
+        s.add_decision(35, Some(7), "slack/react", DecisionKind::Approved)
+            .unwrap();
+        let counts = s.decision_counts(0).unwrap();
+        let expected = DecisionCounts {
+            approved: 2,
+            edited: 1,
+            rejected: 1,
+            ..Default::default()
+        };
+        assert_eq!(counts[post], expected);
+        assert_eq!(counts[post].reviewed(), 4);
+        assert_eq!(counts[post].unchanged_percent(), Some(50));
+        assert_eq!(counts["slack/react"].approved, 1);
+        // The window starts at `since`, also inside the time after the hold.
+        let counts = s.decision_counts(30).unwrap();
+        assert_eq!(counts[post].approved, 1);
+        assert_eq!(counts[post].reviewed(), 3);
+        assert!(s.decision_counts(36).unwrap().is_empty());
+        assert_eq!(DecisionCounts::default().unchanged_percent(), None);
+    }
+
+    #[test]
+    fn an_autonomous_run_fails_only_if_its_call_failed_without_a_copy() {
+        let (_dir, s) = store();
+        let auto = |key: &str| {
+            let item = s
+                .add_inbox_item(key, &tool_call("hi"), "asked", &[], ApprovalState::Approved, 1)
+                .unwrap();
+            s.add_decision(1, Some(item.id), "slack/post", DecisionKind::Autonomous)
+                .unwrap();
+            item.id
+        };
+        let ran = auto("k1");
+        let failed = auto("k2");
+        let not_run = auto("k3");
+        for (id, to) in [(ran, ApprovalState::Executed), (failed, ApprovalState::Failed)] {
+            assert!(
+                s.move_inbox_state(id, ApprovalState::Approved, ApprovalState::Executing, 2)
+                    .unwrap()
+            );
+            assert!(s.move_inbox_state(id, ApprovalState::Executing, to, 2).unwrap());
+        }
+        // A start did not let this call run: it failed with a pending copy.
+        assert!(
+            s.fail_with_pending_copy(not_run, ApprovalState::Approved, 3)
+                .unwrap()
+                .is_some()
+        );
+        let counts = s.decision_counts(0).unwrap()["slack/post"];
+        assert_eq!((counts.autonomous, counts.autonomous_failed), (3, 1));
+        assert_eq!(counts.reviewed(), 0);
+    }
+
+    #[test]
+    fn an_item_is_reported_once() {
+        let (_dir, s) = store();
+        assert!(s.add_report(1, 4, "slack/post").unwrap());
+        assert!(!s.add_report(2, 4, "slack/post").unwrap());
+        assert!(s.add_report(3, 5, "slack/post").unwrap());
     }
 }
