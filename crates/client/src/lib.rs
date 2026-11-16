@@ -3,8 +3,8 @@
 use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
-    WikiPageUpdate,
+    Outcome, Permissions, PermissionsUpdate, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
+    ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::ports::BoxFuture;
@@ -236,6 +236,20 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connectors/{connector}/tools/approve"));
             self.send_only(Method::POST, &path, Some(&ApproveToolsBody { shown }))
+                .await
+        })
+    }
+
+    fn permissions<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Permissions>> {
+        Box::pin(async move {
+            self.call(Method::GET, &profile_path(profile, "permissions"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::PUT, &profile_path(profile, "permissions"), Some(&update))
                 .await
         })
     }

@@ -3,7 +3,7 @@
 pub mod http;
 
 use bunsin_core::event::InboundEvent;
-use bunsin_core::policy::{DenyReason, Policy};
+use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
@@ -157,6 +157,24 @@ pub enum Expected<T> {
     Unchecked,
     /// Save only if the server still holds this value.
     Value(T),
+}
+
+/// The permission table of a profile, with the tools that a rule can be for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Permissions {
+    /// The tools the owner approved, by connector name, as each connector listed them then.
+    pub tools: BTreeMap<String, Vec<ToolSpec>>,
+    /// The rules by tool ID: `<connector>/<tool>`. A tool without a rule cannot be used.
+    pub rules: BTreeMap<String, ToolRule>,
+}
+
+/// A new permission table, with the table the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionsUpdate {
+    /// Every rule. A rule that is not in here is removed.
+    pub rules: BTreeMap<String, ToolRule>,
+    #[serde(default)]
+    pub expected: Expected<BTreeMap<String, ToolRule>>,
 }
 
 /// New privacy settings, with what the caller loaded before it changed them.
@@ -426,6 +444,10 @@ pub trait EngineApi: Send + Sync {
     /// Every stored revision of a page, oldest first. A deletion is `None`.
     /// To restore an old text, save it again with `set_wiki_page`.
     fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>>;
+    /// The permission table and the approved tools. It connects to nothing.
+    fn permissions<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Permissions>>;
+    /// Replaces the permission table.
+    fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
     /// Sends one request to the saved LLM endpoint and says whether the reply has the form the agent needs.

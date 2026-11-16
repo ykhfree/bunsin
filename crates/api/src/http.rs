@@ -18,6 +18,8 @@
 //! | POST | `/v1/profiles/{p}/connectors/{c}/tools/approve` | `ApproveToolsBody` | |
 //! | GET | `/v1/profiles/{p}/privacy` | | `PrivacyConfig` |
 //! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyUpdate` | |
+//! | GET | `/v1/profiles/{p}/permissions` | | `Permissions` |
+//! | PUT | `/v1/profiles/{p}/permissions` | `PermissionsUpdate` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |

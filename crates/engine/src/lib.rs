@@ -11,8 +11,8 @@ pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
-    LlmUpdate, Outcome, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
-    ToolsReport, WikiPageUpdate,
+    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
+    ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
@@ -921,6 +921,26 @@ impl Engine {
             item.body = body;
         }
 
+        // The rule may name another text argument than when the item was made. The AI marker
+        // follows the rule that is in force now, so a corrected rule also covers a waiting item.
+        if let (Some(text_arg), InboxBody::ToolCall { tool, args }) = (text_arg, &item.body) {
+            let mut marked = args.clone();
+            mark_args(&mut marked, text_arg, &config.ai_marker).map_err(|e| ApiError::Invalid(e.to_string()))?;
+            if marked != *args {
+                let body = InboxBody::ToolCall {
+                    tool: tool.clone(),
+                    args: marked,
+                };
+                if !store
+                    .replace_pending_body(inbox_id, &body, self.now())
+                    .map_err(store_error)?
+                {
+                    return Err(ApiError::NotAllowed("the item was already handled".into()));
+                }
+                item.body = body;
+            }
+        }
+
         // The rules may have changed since the item was created, so they are checked again.
         let decision = self.decide(&ctx, &tool_id).await?;
         if !matches!(decision, Decision::NeedsApproval | Decision::Execute) {
@@ -1073,6 +1093,34 @@ impl Engine {
         )
     }
 
+    /// Replaces the permission table. The audit entry names each tool whose rule changed,
+    /// with the rule before and after, so a change of what the agent may do can be traced.
+    fn replace_permissions(&self, profile: &str, update: PermissionsUpdate) -> ApiResult<()> {
+        let store = self.store(profile)?;
+        let (loaded, mut config) = Self::config_with_text(&store)?;
+        if let Expected::Value(expected) = &update.expected
+            && *expected != config.policy.rules
+        {
+            return Err(ApiError::Conflict(
+                "the permission rules are not the ones this form loaded".into(),
+            ));
+        }
+        let before = std::mem::replace(&mut config.policy.rules, update.rules);
+        let after = &config.policy.rules;
+        let changes: Vec<Value> = before
+            .keys()
+            .chain(after.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|tool| before.get(*tool) != after.get(*tool))
+            .map(|tool| json!({"tool": tool, "from": before.get(tool), "to": after.get(tool)}))
+            .collect();
+        // A poll needs a read rule for its tool. A change that takes it away is refused here.
+        Self::check_config(&config)?;
+        Self::save_config_from(&store, &loaded, &config)?;
+        self.audit(&store, "permissions_changed", None, json!({"changes": changes}))
+    }
+
     fn replace_privacy(&self, profile: &str, update: PrivacyUpdate) -> ApiResult<()> {
         let store = self.store(profile)?;
         let (loaded, mut config) = Self::config_with_text(&store)?;
@@ -1170,6 +1218,21 @@ impl EngineApi for Engine {
         shown: PinSet,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(self.approve_shown_tools(profile, connector, shown))
+    }
+
+    fn permissions<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Permissions>> {
+        Box::pin(async move {
+            // The stored settings only. A look at the rules must not start a connector.
+            let config = Self::config(&*self.store(profile)?)?;
+            Ok(Permissions {
+                tools: config.approved_tools,
+                rules: config.policy.rules,
+            })
+        })
+    }
+
+    fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_permissions(profile, update) })
     }
 
     fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>> {
