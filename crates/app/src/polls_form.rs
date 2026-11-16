@@ -665,6 +665,7 @@ mod tests {
             thread: thread.map(str::to_owned),
             author: "lee".into(),
             text: "When do we deploy?".into(),
+            channel: Default::default(),
         };
         let preview = PollPreview {
             items: 3,

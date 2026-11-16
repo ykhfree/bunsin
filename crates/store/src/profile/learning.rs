@@ -348,6 +348,7 @@ mod tests {
             thread: None,
             author: "lee".into(),
             text: text.into(),
+            channel: Default::default(),
         }
     }
 

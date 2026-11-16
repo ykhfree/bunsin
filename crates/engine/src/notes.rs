@@ -5,7 +5,7 @@ use crate::{Ctx, Engine, store_error};
 use bunsin_api::{ApiError, ApiResult, Outcome, WikiPageUpdate};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::ToolHint;
-use bunsin_core::event::InboundEvent;
+use bunsin_core::event::{Channel, InboundEvent};
 use bunsin_core::privacy::RedactionCounts;
 use bunsin_core::records::{InboxBody, InboxItem, ReadNote};
 use bunsin_core::search::query_terms;
@@ -132,6 +132,10 @@ impl Engine {
         );
 
         let page_count = store.wiki_index().map_err(store_error)?.len();
+        // An event from outside can be written to steer the agent, so its changes always wait for the owner.
+        let may_apply = ctx.config.notes.auto_apply
+            && event.channel == Channel::Owner
+            && !store.kill_switch().map_err(store_error)?;
         for update in updates {
             let existing = store.wiki_page(&update.slug).map_err(store_error)?;
             // An update replaces the whole page, so the agent must have seen what it replaces.
@@ -152,6 +156,8 @@ impl Engine {
                 dropped(&update.slug, &error)?;
                 continue;
             }
+            // The owner's own text is never replaced without the owner.
+            let apply = may_apply && existing.as_ref().is_none_or(|page| page.author == WikiAuthor::Agent);
             let body = InboxBody::WikiChange {
                 slug: update.slug.clone(),
                 text,
@@ -160,20 +166,27 @@ impl Engine {
                 previous: existing.map(|page| page.text),
             };
             let rationale = "a fact the agent read in this event and wants to keep in its notes";
-            store
+            let item = store
                 .add_inbox_item(key, &body, rationale, reads, ApprovalState::Pending, self.now())
                 .map_err(store_error)?;
             self.audit(store, "wiki_change_proposed", Some(key), json!({"slug": update.slug}))?;
+            // A change that cannot be stored now stays in the inbox for the owner.
+            if apply && let Err(error) = self.approve_wiki_change(store, &item, false, true) {
+                let detail = json!({"inbox_id": item.id, "error": error.to_string()});
+                self.audit(store, "wiki_change_auto_apply_failed", Some(key), detail)?;
+            }
         }
         Ok(())
     }
 
     /// Stores an approved page change. The page write and the inbox move are one step.
+    /// `auto` is true if the setting `notes.auto_apply` approves it, not the owner.
     pub(crate) fn approve_wiki_change(
         &self,
         store: &ProfileStore,
         item: &InboxItem,
         edited: bool,
+        auto: bool,
     ) -> ApiResult<Outcome> {
         let InboxBody::WikiChange {
             slug,
@@ -204,7 +217,7 @@ impl Engine {
             .map_err(store_error)?;
         match written {
             WikiWrite::Stored(page) => {
-                let detail = json!({"inbox_id": item.id, "slug": slug, "revision": page.revision});
+                let detail = json!({"inbox_id": item.id, "slug": slug, "revision": page.revision, "auto": auto});
                 self.audit(store, "wiki_change_applied", key, detail)?;
                 Ok(Outcome::Executed { inbox_id: item.id })
             }

@@ -182,6 +182,7 @@ fn slack_message_becomes_an_event_with_channel_and_ts() {
             thread: Some("C1:1355517523.000005".into()),
             author: "U1".into(),
             text: "배포 확인 부탁".into(),
+            channel: bunsin_core::event::Channel::Outside,
         }
     );
 
@@ -287,6 +288,7 @@ fn jira_comment_created_becomes_an_event_on_the_issue_thread() {
             thread: Some("PROJ-7".into()),
             author: "acc-editor".into(),
             text: "Please check *staging*".into(),
+            channel: bunsin_core::event::Channel::Outside,
         }
     );
 }

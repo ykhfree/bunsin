@@ -3,7 +3,7 @@
 //! Verify the signature over the raw body first. Parse the body only after that.
 //! The formats follow the Slack and Atlassian docs. Nobody ran this code against the real services.
 
-use bunsin_core::event::InboundEvent;
+use bunsin_core::event::{Channel, InboundEvent};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
@@ -134,6 +134,7 @@ pub fn parse_slack(source: &str, body: &[u8]) -> Result<SlackDelivery, WebhookEr
                 thread: Some(format!("{channel}:{parent}")),
                 author: author.to_owned(),
                 text: text.to_owned(),
+                channel: Channel::Outside,
             }))
         }
         _ => Ok(SlackDelivery::Ignored),
@@ -200,6 +201,7 @@ pub fn parse_jira(source: &str, body: &[u8]) -> Result<Option<InboundEvent>, Web
         thread: Some(key.to_owned()),
         author: author.to_owned(),
         text,
+        channel: Channel::Outside,
     }))
 }
 

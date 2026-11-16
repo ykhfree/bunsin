@@ -10,6 +10,21 @@ pub struct InboundEvent {
     pub thread: Option<String>,
     pub author: String,
     pub text: String,
+    /// Who could make the event happen. Not part of the dedupe key.
+    #[serde(default)]
+    pub channel: Channel,
+}
+
+/// The way an event reached the engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    /// The owner's own polls, or an event the owner handed in.
+    #[default]
+    Owner,
+    /// A channel that other people push into directly: a webhook or an inbound caller.
+    /// Such an event may be written to steer the agent, so nothing from it is stored without the owner.
+    Outside,
 }
 
 impl InboundEvent {
@@ -31,6 +46,7 @@ mod tests {
             thread: None,
             author: "someone".into(),
             text: text.into(),
+            channel: Default::default(),
         }
     }
 

@@ -172,6 +172,7 @@ mod tests {
             thread: Some("T1".into()),
             author: "mallory".into(),
             text: text.into(),
+            channel: Default::default(),
         }
     }
 
@@ -289,6 +290,7 @@ mod tests {
             thread: Some("PROJ-1".into()),
             author: "lee@example.com".into(),
             text: "call me at 010-1234-5678".into(),
+            channel: Default::default(),
         };
         let tools = [ToolHint {
             tool_id: "jira/add_comment".into(),

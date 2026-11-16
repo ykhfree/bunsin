@@ -626,7 +626,21 @@ bunsind dismiss-finding kim 3
 
 ![The notes view with the findings of a check](docs/screens/notes-light.png)
 
-Not built yet: applying changes without approval, and loading a Confluence space in advance.
+#### Changes without approval
+
+With `"notes": {"auto_apply": true}` (off by default) the server stores a page change of the
+agent at once, without your approval, but only if all of these hold:
+
+- the page is new, or the agent wrote it last. A page that you wrote or edited always waits for you;
+- the kill switch is off;
+- the event came through your own channel: your polls, or an event you handed in. An event
+  from a webhook or from an inbound caller is marked `"channel": "outside"`, and its changes
+  always wait for you, because other people can write such an event to steer the agent.
+
+The change still needs a source and still shows in the inbox, as done. The audit entry
+`wiki_change_applied` says `"auto": true`. A change that cannot be stored stays pending.
+
+Not built yet: loading a Confluence space in advance.
 
 ### Work with the agent
 

@@ -47,6 +47,7 @@ async fn handle(rig: &common::Rig, event_id: &str, text: &str, reply: serde_json
         thread: None,
         author: "lee".into(),
         text: text.into(),
+        channel: Default::default(),
     };
     rig.engine.ingest("kim", event).await.unwrap();
 }
@@ -342,6 +343,7 @@ async fn learning_fixture(rig: &common::Rig) -> UiState {
             thread: None,
             author: "lee".into(),
             text: text.into(),
+            channel: Default::default(),
         },
         actual_reply: reply.into(),
         expect,

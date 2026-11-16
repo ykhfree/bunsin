@@ -655,9 +655,20 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - API: `lint_notes`, `lint_findings`(`new`만, 찾은 순서), `dismiss_finding`(`POST .../lint-notes` 등, 같은 이름의 `bunsind` 명령).
   창의 Notes 화면은 오른쪽 **Checks** 카드에 결과, "Check now", 결과마다 "Dismiss"를 보인다.
 
+**자동 반영**
+
+- 설정 `notes.auto_apply`(기본 false)가 켜지면 `file_wiki_changes`가 변경안을 `pending`으로 넣은 뒤 같은 요청에서
+  `approve_wiki_change`를 부른다. 그래서 출처 규칙, 읽은 뒤에만 고치기, revision 비교, 한 번만 적용이 승인과 같다.
+- 조건: 정지 스위치가 꺼져 있다. 새 페이지이거나 마지막 작성 주체가 agent이다(owner 페이지는 덮어쓰지 않는다).
+  이벤트의 `channel`이 `owner`이다.
+- `InboundEvent.channel`(`serde(default)`, 기본 `owner`)은 이벤트가 온 길이다. poll과 소유자의 `ingest`는 `owner`이고,
+  webhook 해석기(`bunsin-connectors::webhook`)는 `outside`를 붙인다. 인바운드 호출자도 `outside`를 붙여야 한다.
+  다른 사람이 직접 넣는 이벤트는 agent를 조종하려고 쓸 수 있으므로, 그 변경안은 언제나 소유자를 기다린다. dedupe key에는 들지 않는다.
+- 감사 `wiki_change_applied`에 `auto`가 붙는다. 저장하지 못하면(예: 그 사이 소유자의 편집) 항목은 `pending`으로 남고 감사 `wiki_change_auto_apply_failed`가 남는다.
+- 결정 기록(4절)에는 들지 않는다. 기각: owner 페이지 덮어쓰기.
+
 **아직 없는 것**
 
-- 변경안을 승인 없이 자동 반영하는 단계.
 - 지정한 Confluence 스페이스나 Jira 프로젝트를 미리 읽어 넣는 기능.
 - 사용자가 출처 문서의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
 - 한계: 쪽수는 300으로 제한한다. 색인은 60줄까지만 프롬프트에 들어가고, 나머지는 검색으로 찾는다.
@@ -680,7 +691,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
-| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검) | 구현, 테스트 있음. 자동 반영은 없음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
+| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검, opt-in 자동 반영) | 구현, 테스트 있음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
 | 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 사례를 추가하지 않는다. |
 | 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령에만 있다. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |

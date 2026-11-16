@@ -123,6 +123,7 @@ fn event(id: &str) -> InboundEvent {
         thread: None,
         author: "lee".into(),
         text: "hi".into(),
+        channel: Default::default(),
     }
 }
 

@@ -142,6 +142,7 @@ fn an_evaluation_runs_from_the_view_and_a_case_is_deleted(cx: &mut TestAppContex
             thread: None,
             author: "lee".into(),
             text: text.into(),
+            channel: Default::default(),
         },
         actual_reply: reply.into(),
         expect,

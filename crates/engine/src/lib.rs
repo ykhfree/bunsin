@@ -884,7 +884,7 @@ impl Engine {
         let mut item = store.inbox_item(inbox_id).map_err(store_error)?;
         let (tool_id, args) = match item.body.clone() {
             InboxBody::ToolCall { tool, args } => (tool, args),
-            InboxBody::WikiChange { .. } => return self.approve_wiki_change(&store, &item, edit.is_some()),
+            InboxBody::WikiChange { .. } => return self.approve_wiki_change(&store, &item, edit.is_some(), false),
             InboxBody::Escalation { .. } => {
                 return Err(ApiError::NotAllowed("an escalation cannot be approved".into()));
             }

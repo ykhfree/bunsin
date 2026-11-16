@@ -110,6 +110,7 @@ fn event(id: &str, text: &str) -> InboundEvent {
         thread: Some("T1".into()),
         author: "lee".into(),
         text: text.into(),
+        channel: Default::default(),
     }
 }
 

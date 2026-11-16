@@ -934,6 +934,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 thread,
                 author,
                 text: body,
+                channel: bunsin_core::event::Channel::Owner,
             };
             let outcome = connect(&remote)?.ingest(&profile, event).await.map_err(text)?;
             // A handling that failed is an error for the caller, who may hand the event in again.

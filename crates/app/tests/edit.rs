@@ -147,6 +147,7 @@ async fn pending_post(rig: &common::Rig, text: OutgoingText, args: serde_json::V
         thread: None,
         author: "lee".into(),
         text: "the plan?".into(),
+        channel: Default::default(),
     };
     rig.engine.ingest("kim", event).await.unwrap();
     // Item 1 is out of the way, so item 2 is at the top of the inbox.

@@ -1583,6 +1583,7 @@ mod tests {
             thread: None,
             author: "lee".into(),
             text: "deploy?".into(),
+            channel: Default::default(),
         };
         s.begin_event("k1", &serde_json::to_value(&event).unwrap(), 1, 3)
             .unwrap();

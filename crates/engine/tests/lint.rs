@@ -15,6 +15,7 @@ const EMAIL: &str = "lee.park@corp.example.com";
 fn notes(stale_days: Option<u32>, lint_every_hours: Option<u32>, lint_conflicts: bool) -> ProfileConfig {
     let mut config = config();
     config.notes = NotesConfig {
+        auto_apply: false,
         stale_days,
         lint_every_hours,
         lint_conflicts,

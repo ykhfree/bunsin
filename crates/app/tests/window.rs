@@ -215,6 +215,7 @@ fn saved_settings_are_the_ones_the_server_uses(cx: &mut TestAppContext) {
         thread: None,
         author: "lee".into(),
         text: "Is PRJ-1234 done? Mail lee@example.com".into(),
+        channel: Default::default(),
     };
     rt.block_on(rig.engine.ingest("kim", event)).unwrap();
     let request = serde_json::to_string(rig.llm.requests().last().unwrap()).unwrap();
@@ -774,6 +775,7 @@ fn terms_are_added_removed_and_used_by_the_server(cx: &mut TestAppContext) {
         thread: None,
         author: "lee".into(),
         text: "park jiwon moved to 12 TEHERAN-RO".into(),
+        channel: Default::default(),
     };
     rt.block_on(rig.engine.ingest("kim", event)).unwrap();
     let request = serde_json::to_string(rig.llm.requests().last().unwrap()).unwrap();
@@ -961,6 +963,7 @@ fn a_call_that_ran_without_asking_can_be_reported_once(cx: &mut TestAppContext) 
         thread: None,
         author: "lee".into(),
         text: "is it done?".into(),
+        channel: Default::default(),
     };
     let bunsin_api::Outcome::Executed { inbox_id: ran } = rt.block_on(rig.engine.ingest("kim", event)).unwrap() else {
         panic!("expected an autonomous run")

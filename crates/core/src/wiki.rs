@@ -36,6 +36,10 @@ pub const MAX_PAGES: usize = 300;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NotesConfig {
+    /// Store a page change of the agent without the owner's approval, if the page is new or the agent wrote
+    /// it last, the kill switch is off, and the event came through the owner's own channel.
+    #[serde(default)]
+    pub auto_apply: bool,
     /// A check reports a page that nobody changed, or that is an orphan, for more than this many days.
     /// `None`: no page is reported as stale or as an orphan.
     #[serde(default)]
@@ -432,6 +436,7 @@ mod tests {
         assert!(!config.checks_anything());
         assert_eq!(config.check(), Ok(()));
         let with = |stale_days, lint_every_hours, lint_conflicts| NotesConfig {
+            auto_apply: false,
             stale_days,
             lint_every_hours,
             lint_conflicts,

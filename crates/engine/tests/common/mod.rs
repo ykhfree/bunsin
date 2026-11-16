@@ -177,6 +177,7 @@ pub fn event(id: &str, author: &str, text: &str) -> InboundEvent {
         thread: None,
         author: author.into(),
         text: text.into(),
+        channel: Default::default(),
     }
 }
 

@@ -712,6 +712,7 @@ async fn autonomous_post(rig: &Rig) -> i64 {
         thread: None,
         author: "lee".into(),
         text: "is it done?".into(),
+        channel: Default::default(),
     };
     match rig.engine.ingest("kim", event).await.unwrap() {
         bunsin_api::Outcome::Executed { inbox_id } => inbox_id,

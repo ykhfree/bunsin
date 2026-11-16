@@ -108,6 +108,7 @@ pub async fn rig_with(now: i64, allow_stdio: bool) -> Rig {
         thread: None,
         author: "lee".into(),
         text: "when do we deploy?".into(),
+        channel: Default::default(),
     };
     engine.ingest("kim", event).await.unwrap();
     Rig {
@@ -146,6 +147,7 @@ pub async fn ingest_event_with_a_read(rig: &Rig) {
         thread: None,
         author: "lee".into(),
         text: "when is the deploy now?".into(),
+        channel: Default::default(),
     };
     rig.engine.ingest("kim", event).await.unwrap();
 }
@@ -165,6 +167,7 @@ pub async fn ingest_second_event(rig: &Rig) {
         thread: None,
         author: "lee".into(),
         text: "is it still 3 pm?".into(),
+        channel: Default::default(),
     };
     rig.engine.ingest("kim", event).await.unwrap();
 }
@@ -207,6 +210,7 @@ pub async fn ingest_note(rig: &Rig, event_id: &str, reads_page: bool, body: &str
         thread: None,
         author: "lee".into(),
         text: "when is the deploy now?".into(),
+        channel: Default::default(),
     };
     rig.engine.ingest("kim", event).await.unwrap();
 }
