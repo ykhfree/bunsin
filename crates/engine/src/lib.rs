@@ -1253,6 +1253,7 @@ impl EngineApi for Engine {
             Ok(Permissions {
                 tools: config.approved_tools,
                 rules: config.policy.rules,
+                ai_marker: config.ai_marker,
             })
         })
     }

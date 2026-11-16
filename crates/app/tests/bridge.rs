@@ -94,6 +94,54 @@ async fn approve_runs_the_call_and_a_second_approve_reports_an_error() {
 }
 
 #[tokio::test]
+async fn an_edited_approval_is_only_for_the_selected_profile_and_reports_a_failed_call() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let edit = |text: &str| bunsin_api::Edit {
+        args: serde_json::json!({"channel": "C1", "text": text})
+            .as_object()
+            .unwrap()
+            .clone(),
+        reason: "shorter".into(),
+    };
+    let command = |profile: &str| UiCommand::ApproveEdited {
+        profile: profile.into(),
+        id: 1,
+        edit: edit("At 3."),
+    };
+    apply(&*rig.engine, &mut state, command("lee")).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("another profile is selected")),
+        "{:?}",
+        state.error
+    );
+    assert!(rig.slack.calls().is_empty());
+    assert_eq!(state.snapshot.as_ref().unwrap().inbox[0].state, ApprovalState::Pending);
+
+    rig.slack.fail_with("channel_not_found");
+    apply(&*rig.engine, &mut state, command("kim")).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("the call failed: ") && e.contains("channel_not_found")),
+        "{:?}",
+        state.error
+    );
+    // The edit reached the server before the call failed.
+    assert!(
+        rig.slack.calls()[0].1["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("At 3.\n\n")
+    );
+}
+
+#[tokio::test]
 async fn a_failed_call_is_shown_as_an_error() {
     let rig = common::rig().await;
     rig.slack.fail_with("channel_not_found");

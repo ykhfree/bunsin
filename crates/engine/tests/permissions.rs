@@ -2,7 +2,7 @@
 
 mod common;
 
-use bunsin_api::{ApiError, EngineApi, Expected, Outcome, PermissionsUpdate};
+use bunsin_api::{ApiError, EngineApi, Expected, Outcome, PermissionsUpdate, ProfileConfig};
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use common::*;
 use serde_json::json;
@@ -32,6 +32,8 @@ async fn the_table_is_read_with_the_approved_tools_and_replaced_as_a_whole() {
     assert_eq!(before.tools["slack"], slack_tools());
     assert_eq!(before.rules["slack/search"], ToolRule::read());
     assert_eq!(before.rules["slack/post"], write(text_in("text")));
+    // The window strips this marker from a text before the owner edits it.
+    assert_eq!(before.ai_marker, ProfileConfig::new("Kim").ai_marker);
     // Reading the table connects to nothing.
     assert!(rig.slack.calls().is_empty());
 

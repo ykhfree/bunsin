@@ -4,8 +4,8 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
-    Permissions, PermissionsUpdate, PrivacyUpdate, ProfileSnapshot, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
+    Outcome, Permissions, PermissionsUpdate, PrivacyUpdate, ProfileSnapshot, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::ProfileInfo;
@@ -20,6 +20,12 @@ pub enum UiCommand {
     Refresh,
     SelectProfile(String),
     Approve(i64),
+    /// Approves a pending tool call with the owner's change of its text, and runs it.
+    ApproveEdited {
+        profile: String,
+        id: i64,
+        edit: Edit,
+    },
     Reject(i64),
     SetKillSwitch(bool),
     SavePrivacy {
@@ -215,6 +221,14 @@ async fn save_for(
     })
 }
 
+/// The result of an approval. A call that ran and failed is a failure too.
+fn approved(result: Result<Outcome, String>) -> Result<(), String> {
+    match result? {
+        Outcome::ExecutionFailed { error, .. } => Err(format!("the call failed: {error}")),
+        _ => Ok(()),
+    }
+}
+
 /// Runs one command, then reloads the state from the engine.
 pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand) {
     state.error = None;
@@ -309,12 +323,13 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.note_result = Some(NoteResult::Deleted { slug, result });
             Ok(())
         }
+        (UiCommand::ApproveEdited { profile, id, edit }, _) => {
+            approved(for_profile(selected, &profile, api.approve(&profile, id, Some(edit))).await)
+        }
         (_, None) => Err("no profile is selected".to_owned()),
-        (UiCommand::Approve(id), Some(profile)) => match api.approve(profile, id, None).await {
-            Ok(Outcome::ExecutionFailed { error, .. }) => Err(format!("the call failed: {error}")),
-            Ok(_) => Ok(()),
-            Err(error) => Err(error.to_string()),
-        },
+        (UiCommand::Approve(id), Some(profile)) => {
+            approved(api.approve(profile, id, None).await.map_err(|e| e.to_string()))
+        }
         (UiCommand::Reject(id), Some(profile)) => api
             .reject(profile, id, "dismissed in the app")
             .await

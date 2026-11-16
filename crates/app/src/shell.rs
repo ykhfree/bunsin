@@ -2,6 +2,7 @@
 
 use crate::bridge::{UiCommand, UiState};
 use crate::connections_form::ConnectionsForm;
+use crate::draft_editor::DraftEditor;
 use crate::notes_form::NotesForm;
 use crate::permissions_form::PermissionsForm;
 use crate::privacy::PrivacyForm;
@@ -26,6 +27,8 @@ pub struct Shell {
     pub(crate) connections: ConnectionsForm,
     pub(crate) notes: NotesForm,
     pub(crate) permissions: PermissionsForm,
+    /// The edit of a waiting call in the inbox, if one is open.
+    pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
     pub(crate) keychain: std::sync::Arc<dyn crate::connection::KeychainLookup>,
     /// The views never share the window, so no form can squeeze the inbox.
@@ -60,6 +63,7 @@ impl Shell {
                     shell.connections.receive(&state, window, cx);
                     shell.notes.receive(&state, window, cx);
                     shell.permissions.receive(&state);
+                    shell.draft_editor.receive(&state);
                     shell.state = state;
                     cx.notify();
                 });
@@ -77,6 +81,7 @@ impl Shell {
             connections: ConnectionsForm::new(window, cx),
             notes: NotesForm::new(window, cx),
             permissions: PermissionsForm::new(),
+            draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
         }
@@ -412,18 +417,24 @@ impl Shell {
                         ),
                 )
             }));
+        // While the owner edits the text, the editor has its own buttons.
+        if let Some(editor) = self.draft_editor_section(id, cx) {
+            return row.child(editor);
+        }
         let mut buttons = div().flex().gap_2().pt_1();
         if item.state == ApprovalState::Pending {
-            buttons = buttons.child(
-                Button::new(SharedString::from(format!("approve-{id}")))
-                    .primary()
-                    // A note is stored. Nothing runs on another system.
-                    .label(match item.body {
-                        InboxBody::WikiChange { .. } => "Approve and keep",
-                        _ => "Approve and run",
-                    })
-                    .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
-            );
+            buttons = buttons
+                .child(
+                    Button::new(SharedString::from(format!("approve-{id}")))
+                        .primary()
+                        // A note is stored. Nothing runs on another system.
+                        .label(match item.body {
+                            InboxBody::WikiChange { .. } => "Approve and keep",
+                            _ => "Approve and run",
+                        })
+                        .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
+                )
+                .children(self.edit_button(item, cx));
         }
         if matches!(item.state, ApprovalState::Pending | ApprovalState::Draft) {
             buttons = buttons.child(

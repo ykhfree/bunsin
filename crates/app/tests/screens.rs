@@ -268,6 +268,42 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     .unwrap();
     shot(&mut cx, window, dir, &name("inbox-long"));
 
+    // The owner edits the text of the long waiting call before approval. Its card is on screen now.
+    let edited = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let id = (1..=20)
+                .find(|id| {
+                    window
+                        .try_find(format!("edit-{id}"))
+                        .is_some_and(|button| button.visible())
+                })
+                .expect("an Edit button is on screen");
+            window.click(format!("edit-{id}"), cx);
+            id
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // The scroll goes to the list through a part of the card that is on screen.
+        window.scroll(
+            format!("edit-place-{edited}-0"),
+            ScrollDelta::Pixels(point(px(0.), px(-430.))),
+            cx,
+        );
+        window.render_frame(cx);
+        window.click(format!("edit-reason-{edited}"), cx);
+        window.input("shorter, with the link", cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("inbox-edit"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("cancel-edit-{edited}"), cx);
+    })
+    .unwrap();
+
     // The kill switch is on, and a command failed.
     let mut stopped = on(UiCommand::SetKillSwitch(true));
     stopped.error = Some("the call failed: slack answered 503 Service Unavailable".into());

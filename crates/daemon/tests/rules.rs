@@ -402,6 +402,7 @@ fn the_table_lists_rules_then_approved_tools_without_a_rule() {
             "slack/post".to_owned(),
             ToolRule::write(ToolClass::Delete, OutgoingText::None),
         )]),
+        ai_marker: String::new(),
     };
     assert_eq!(
         table_lines(&permissions),

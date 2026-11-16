@@ -544,8 +544,17 @@ The window has four views. **Inbox** shows the approval inbox with every argumen
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
 each approved tool (see [Permission rules](#permission-rules)). **Settings** has the connections (LLM endpoint,
-connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds. An edit before
-approval is available on the command line only.
+connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds.
+
+**Edit before approval.** A waiting call whose rule names places of text has the button
+"Edit the text". It opens one text field for each place: one for `{ "arg": "text" }`, one for each
+item of a list for `blocks.*.text`. The other arguments stay as the card shows them.
+"Approve and run with this text" sends the new text with an optional reason, and the call runs.
+The server adds the AI marker after the edit, so the field shows the text without the marker,
+and the marker is fixed text below it. An unchanged text is a plain approval. A call whose rule
+sends no text has no Edit button.
+
+![The edit of a waiting call](docs/screens/inbox-edit-light.png)
 
 The window uses the light or the dark colors of the system. More pictures are in
 [`docs/screens`](docs/screens): the inbox in the dark mode, the notes and the settings.

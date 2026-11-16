@@ -166,6 +166,9 @@ pub struct Permissions {
     pub tools: BTreeMap<String, Vec<ToolSpec>>,
     /// The rules by tool ID: `<connector>/<tool>`. A tool without a rule cannot be used.
     pub rules: BTreeMap<String, ToolRule>,
+    /// The text that the server adds at each place of outgoing text that a rule names.
+    #[serde(default)]
+    pub ai_marker: String,
 }
 
 /// A new permission table, with the table the caller loaded before it changed it.
