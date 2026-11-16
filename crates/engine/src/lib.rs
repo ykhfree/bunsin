@@ -154,7 +154,7 @@ fn store_error(error: StoreError) -> ApiError {
     }
 }
 
-/// The text the user sees and edits: the outgoing-text argument, or all arguments.
+/// The text the user sees and edits: the one outgoing-text argument, or all arguments.
 fn draft_text(args: &Map<String, Value>, text_arg: Option<&str>) -> String {
     match text_arg.and_then(|name| args.get(name)).and_then(Value::as_str) {
         Some(text) => text.to_owned(),
@@ -291,6 +291,11 @@ impl Engine {
     /// Checks the parts of new settings that the engine itself relies on.
     fn check_config(config: &ProfileConfig) -> ApiResult<()> {
         Self::redactor(config)?;
+        for (tool_id, rule) in &config.policy.rules {
+            rule.outgoing_text
+                .check()
+                .map_err(|e| ApiError::Invalid(format!("the rule of `{tool_id}`: {e}")))?;
+        }
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -701,9 +706,9 @@ impl Engine {
             Decision::Execute => ApprovalState::Approved,
         };
         // The marker is added before the user sees the draft, so the inbox shows what will be sent.
-        let text_arg = config.policy.rules.get(&tool_id).and_then(|rule| rule.text_arg());
-        if let Some(text_arg) = text_arg
-            && let Err(error) = mark_args(&mut args, text_arg, &config.ai_marker)
+        let rule = config.policy.rules.get(&tool_id);
+        if let Some(rule) = rule
+            && let Err(error) = mark_args(&mut args, &rule.outgoing_text, &config.ai_marker)
         {
             self.audit(
                 store,
@@ -874,7 +879,8 @@ impl Engine {
         let ctx = self.ctx(profile).await?;
         let config = &ctx.config;
         let key = item.event_key.clone();
-        let text_arg = config.policy.rules.get(&tool_id).and_then(|rule| rule.text_arg());
+        let rule = config.policy.rules.get(&tool_id);
+        let text_arg = rule.and_then(|rule| rule.text_arg());
 
         if let Some(Edit {
             args: mut edited,
@@ -882,8 +888,9 @@ impl Engine {
         }) = edit
         {
             // The user may have removed the marker while editing. It is added again.
-            if let Some(text_arg) = text_arg {
-                mark_args(&mut edited, text_arg, &config.ai_marker).map_err(|e| ApiError::Invalid(e.to_string()))?;
+            if let Some(rule) = rule {
+                mark_args(&mut edited, &rule.outgoing_text, &config.ai_marker)
+                    .map_err(|e| ApiError::Invalid(e.to_string()))?;
             }
             let correction = Correction {
                 original: draft_text(&args, text_arg),
@@ -921,11 +928,12 @@ impl Engine {
             item.body = body;
         }
 
-        // The rule may name another text argument than when the item was made. The AI marker
+        // The rule may name other places of text than when the item was made. The AI marker
         // follows the rule that is in force now, so a corrected rule also covers a waiting item.
-        if let (Some(text_arg), InboxBody::ToolCall { tool, args }) = (text_arg, &item.body) {
+        if let (Some(rule), InboxBody::ToolCall { tool, args }) = (rule, &item.body) {
             let mut marked = args.clone();
-            mark_args(&mut marked, text_arg, &config.ai_marker).map_err(|e| ApiError::Invalid(e.to_string()))?;
+            mark_args(&mut marked, &rule.outgoing_text, &config.ai_marker)
+                .map_err(|e| ApiError::Invalid(e.to_string()))?;
             if marked != *args {
                 let body = InboxBody::ToolCall {
                     tool: tool.clone(),

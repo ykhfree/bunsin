@@ -16,10 +16,10 @@ use std::collections::BTreeMap;
 
 const HELP: &str = "The agent can use a tool only if it has a rule here. Read: the agent calls the tool without \
     asking, also while all changes are stopped. Give Read only to a tool that changes nothing and sends nothing out. \
-    Write and Delete: the step says how far the agent goes. For a tool that sends text to other people, choose the \
-    argument that holds the text: the server adds the AI marker to it.";
-const NESTED: &str = "The buttons list the text arguments at the top of a tool's input. \
-    If the text is inside another value, set the rule in the settings file.";
+    Write and Delete: the step says how far the agent goes. For a tool that sends text to other people, choose \
+    every argument that holds such text: the server adds the AI marker to each.";
+const NESTED: &str = "The buttons list the text arguments at the top of a tool's input. A click adds or removes one. \
+    If the text is inside another value, for example in the items of a list, set the rule in the settings file.";
 const PAGE_CONFLICT: &str = "The rules changed on the server since this view loaded them. Nothing was saved.";
 const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 
@@ -88,6 +88,39 @@ fn tier_word(tier: Tier) -> &'static str {
     }
 }
 
+/// The top-level arguments that a text choice names, or None if it names a place inside another value.
+fn top_level(text: &OutgoingText) -> Option<Vec<String>> {
+    match text {
+        OutgoingText::None => Some(Vec::new()),
+        OutgoingText::Arg(name) => Some(vec![name.clone()]),
+        OutgoingText::Paths(paths) => paths.iter().all(|path| !path.contains('.')).then(|| paths.clone()),
+    }
+}
+
+/// The text choice after a click on `arg`: the argument is added or removed. `offered` sets the order.
+/// The choice is empty again when the last argument is removed, so "no text" is never a default.
+fn toggle_arg(text: Option<&OutgoingText>, arg: &str, offered: &[String]) -> Option<OutgoingText> {
+    let mut chosen = text.and_then(top_level).unwrap_or_default();
+    if let Some(at) = chosen.iter().position(|name| name == arg) {
+        chosen.remove(at);
+    } else {
+        chosen.push(arg.to_owned());
+    }
+    let mut chosen: Vec<String> = offered.iter().filter(|name| chosen.contains(name)).cloned().collect();
+    match chosen.len() {
+        0 => None,
+        // One argument is stored in the form from before, so older clients can read the rule.
+        1 => chosen.pop().map(OutgoingText::Arg),
+        _ => Some(OutgoingText::Paths(chosen)),
+    }
+}
+
+/// The places of a text choice as a list, for example "`text`, `blocks.*.text`".
+fn places(text: &OutgoingText) -> String {
+    let names: Vec<String> = text.locations().iter().map(|place| format!("`{place}`")).collect();
+    names.join(", ")
+}
+
 /// A rule in a few words, for the list of changes.
 fn rule_words(rule: Option<&DraftRule>) -> String {
     match rule {
@@ -100,7 +133,7 @@ fn rule_words(rule: Option<&DraftRule>) -> String {
             match &rule.text {
                 None => "text not chosen".to_owned(),
                 Some(OutgoingText::None) => "no text".to_owned(),
-                Some(OutgoingText::Arg(arg)) => format!("text in `{arg}`"),
+                Some(text) => format!("text in {}", places(text)),
             }
         ),
     }
@@ -125,7 +158,7 @@ fn rule_sentence(rule: Option<&DraftRule>) -> String {
     let text = match &rule.text {
         None => "Choose where its text for other people is.".to_owned(),
         Some(OutgoingText::None) => "It sends no text to other people.".to_owned(),
-        Some(OutgoingText::Arg(arg)) => format!("The AI marker goes into `{arg}`."),
+        Some(text) => format!("The AI marker goes into {}.", places(text)),
     };
     let class = if rule.class == ToolClass::Write {
         "Write"
@@ -361,27 +394,48 @@ impl Shell {
                 });
             lines.push(row().child(quiet("Step", cx)).children(tiers).into_any_element());
 
-            // The arguments the buttons can offer, and the stored one even if it is not among them.
-            // The server's one stays in the list after another click, so the owner can go back to it.
+            // The arguments the buttons can offer, and the stored ones even if they are not among them.
+            // The server's ones stay in the list after another click, so the owner can go back to them.
             let mut args = text_args(tool);
             let base = self.permissions.base.get(id).map(|rule| &rule.outgoing_text);
-            for stored in [rule.text.as_ref(), base].into_iter().flatten() {
-                if let OutgoingText::Arg(stored) = stored
-                    && !args.contains(stored)
-                {
-                    args.push(stored.clone());
+            for stored in [rule.text.as_ref(), base].into_iter().flatten().filter_map(top_level) {
+                for name in stored {
+                    if !args.contains(&name) {
+                        args.push(name);
+                    }
                 }
             }
-            let texts = args.into_iter().map(|arg| {
-                let (tool_id, value) = (id.to_owned(), OutgoingText::Arg(arg.clone()));
-                let chosen = rule.text.as_ref() == Some(&value);
-                Self::choice(format!("perm-{id}-text-{arg}"), arg, chosen, cx, move |this| {
-                    if let Some(rule) = this.permissions.draft.get_mut(&tool_id) {
-                        rule.text = Some(value.clone());
-                    }
-                    this.permissions.message = None;
+            let chosen_args = rule.text.as_ref().and_then(top_level).unwrap_or_default();
+            let mut texts: Vec<AnyElement> = args
+                .iter()
+                .map(|arg| {
+                    let (tool_id, arg_name, offered) = (id.to_owned(), arg.clone(), args.clone());
+                    let chosen = chosen_args.contains(arg);
+                    Self::choice(format!("perm-{id}-text-{arg}"), arg.clone(), chosen, cx, move |this| {
+                        if let Some(rule) = this.permissions.draft.get_mut(&tool_id) {
+                            rule.text = toggle_arg(rule.text.as_ref(), &arg_name, &offered);
+                        }
+                        this.permissions.message = None;
+                    })
                 })
-            });
+                .collect();
+            // A stored choice with a place inside another value has one button. A click restores it whole.
+            if let Some(stored) = base.filter(|text| top_level(text).is_none()) {
+                let (tool_id, value) = (id.to_owned(), stored.clone());
+                let chosen = rule.text.as_ref() == Some(stored);
+                texts.push(Self::choice(
+                    format!("perm-{id}-text-stored"),
+                    places(stored),
+                    chosen,
+                    cx,
+                    move |this| {
+                        if let Some(rule) = this.permissions.draft.get_mut(&tool_id) {
+                            rule.text = Some(value.clone());
+                        }
+                        this.permissions.message = None;
+                    },
+                ));
+            }
             let tool_id = id.to_owned();
             let none = Self::choice(
                 format!("perm-{id}-text-none"),
@@ -689,5 +743,59 @@ mod tests {
         // The sentence says what the server does with a delete, not what the step says.
         assert!(rule_sentence(Some(&delete)).contains("A delete always asks."));
         assert_eq!(rule_sentence(None), "The agent cannot use this tool.");
+        let nested = DraftRule {
+            class: ToolClass::Write,
+            tier: Tier::Approve,
+            text: Some(OutgoingText::Paths(vec!["text".into(), "blocks.*.text".into()])),
+        };
+        assert_eq!(
+            rule_words(Some(&nested)),
+            "write, approve, text in `text`, `blocks.*.text`"
+        );
+        assert!(rule_sentence(Some(&nested)).ends_with("The AI marker goes into `text`, `blocks.*.text`."));
+    }
+
+    #[test]
+    fn a_click_adds_or_removes_one_argument() {
+        let offered: Vec<String> = ["channel", "text", "title"].map(String::from).to_vec();
+        let arg = |name: &str| OutgoingText::Arg(name.into());
+        let paths = |names: &[&str]| OutgoingText::Paths(names.iter().map(|n| (*n).to_owned()).collect());
+        // The first click makes the one-argument form from before.
+        assert_eq!(toggle_arg(None, "text", &offered), Some(arg("text")));
+        assert_eq!(
+            toggle_arg(Some(&OutgoingText::None), "text", &offered),
+            Some(arg("text"))
+        );
+        // A second argument makes a list in the order of the buttons, not of the clicks.
+        let two = toggle_arg(Some(&arg("title")), "channel", &offered);
+        assert_eq!(two, Some(paths(&["channel", "title"])));
+        let three = toggle_arg(two.as_ref(), "text", &offered);
+        assert_eq!(three, Some(paths(&["channel", "text", "title"])));
+        // A click on a chosen argument removes it. Without any, nothing is chosen: not "no text".
+        assert_eq!(
+            toggle_arg(Some(&paths(&["text", "title"])), "title", &offered),
+            Some(arg("text"))
+        );
+        assert_eq!(toggle_arg(Some(&arg("text")), "text", &offered), None);
+        // A click while a place inside another value is chosen starts a new choice of arguments.
+        assert_eq!(
+            toggle_arg(Some(&paths(&["text", "blocks.*.text"])), "title", &offered),
+            Some(arg("title"))
+        );
+    }
+
+    #[test]
+    fn only_choices_of_top_level_arguments_are_shown_as_buttons() {
+        let paths = |names: &[&str]| OutgoingText::Paths(names.iter().map(|n| (*n).to_owned()).collect());
+        assert_eq!(top_level(&OutgoingText::None), Some(vec![]));
+        assert_eq!(
+            top_level(&OutgoingText::Arg("a.b".into())),
+            Some(vec!["a.b".to_owned()])
+        );
+        assert_eq!(
+            top_level(&paths(&["text", "title"])),
+            Some(vec!["text".into(), "title".into()])
+        );
+        assert_eq!(top_level(&paths(&["text", "blocks.*.text"])), None);
     }
 }

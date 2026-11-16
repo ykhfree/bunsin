@@ -30,7 +30,43 @@ pub enum OutgoingText {
     /// The tool sends no text to other people.
     None,
     /// The named string argument holds the text. The AI marker is added to it.
+    /// The name is one argument at the top of the input, also if it contains a dot.
     Arg(String),
+    /// Each path names a place that holds text. The AI marker is added to every one.
+    /// A path is a list of argument names joined by `.`. The step `*` means every item of a list,
+    /// so `blocks.*.text` is the `text` of each item of `blocks`.
+    Paths(Vec<String>),
+}
+
+impl OutgoingText {
+    /// The places that get the AI marker, as the rule spells them.
+    pub fn locations(&self) -> Vec<&str> {
+        match self {
+            OutgoingText::None => Vec::new(),
+            OutgoingText::Arg(name) => vec![name],
+            OutgoingText::Paths(paths) => paths.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Refuses a choice that names no place or a path that cannot name a place.
+    pub fn check(&self) -> Result<(), String> {
+        let OutgoingText::Paths(paths) = self else {
+            return Ok(());
+        };
+        if paths.is_empty() {
+            return Err("`paths` names no place: use \"none\" for a tool that sends no text".into());
+        }
+        for path in paths {
+            let steps: Vec<&str> = path.split('.').collect();
+            if steps.iter().any(|step| step.is_empty()) || steps[0] == "*" {
+                return Err(format!(
+                    "the path `{path}` is invalid: join argument names with `.`, start with a name, \
+                     and use `*` for every item of a list"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One row of the permission table. Every field is required, so a rule cannot
@@ -61,11 +97,11 @@ impl ToolRule {
         }
     }
 
-    /// The argument that gets the AI marker, if the tool sends text.
+    /// The one argument that holds all the text, if the rule names it with `arg`.
     pub fn text_arg(&self) -> Option<&str> {
         match &self.outgoing_text {
-            OutgoingText::None => None,
             OutgoingText::Arg(name) => Some(name),
+            OutgoingText::None | OutgoingText::Paths(_) => None,
         }
     }
 }
@@ -217,5 +253,35 @@ mod tests {
             parse(r#"{"class": "write", "tier": "approve", "outgoing_text": "none", "text_args": "text"}"#).is_err()
         );
         assert!(parse(r#"{"class": "write", "tier": "approve", "outgoing_txt": {"arg": "text"}}"#).is_err());
+    }
+
+    #[test]
+    fn a_rule_can_name_several_places_of_text() {
+        let parse = |text: &str| serde_json::from_str::<OutgoingText>(text).unwrap();
+        // The stored forms from before keep their meaning.
+        assert_eq!(parse(r#""none""#).locations(), Vec::<&str>::new());
+        assert_eq!(parse(r#"{"arg": "text"}"#), OutgoingText::Arg("text".into()));
+        let both = parse(r#"{"paths": ["text", "blocks.*.text"]}"#);
+        assert_eq!(both.locations(), ["text", "blocks.*.text"]);
+        assert_eq!(both.check(), Ok(()));
+        let rule = ToolRule::write(ToolClass::Write, both);
+        // A rule with several places has no single text argument.
+        assert_eq!(rule.text_arg(), None);
+        assert_eq!(
+            serde_json::to_value(&rule.outgoing_text).unwrap(),
+            serde_json::json!({"paths": ["text", "blocks.*.text"]})
+        );
+    }
+
+    #[test]
+    fn paths_that_name_no_place_are_refused() {
+        let paths = |list: &[&str]| OutgoingText::Paths(list.iter().map(|p| (*p).to_owned()).collect());
+        assert!(paths(&[]).check().unwrap_err().contains("names no place"));
+        for bad in ["", "blocks..text", "blocks.", ".text", "*", "*.text"] {
+            assert!(paths(&["text", bad]).check().is_err(), "{bad:?}");
+        }
+        assert_eq!(paths(&["attachments.*.fields.*.value", "title"]).check(), Ok(()));
+        // An `arg` is one name at the top, so it needs no check.
+        assert_eq!(OutgoingText::Arg("a.b".into()).check(), Ok(()));
     }
 }

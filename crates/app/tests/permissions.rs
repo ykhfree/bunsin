@@ -331,15 +331,23 @@ fn stored_rules_that_the_buttons_cannot_make_are_shown_as_they_are(cx: &mut Test
         assert_eq!(label(window, "permissions-changes"), "");
     });
 
-    // After a click on another argument, the stored one is still offered.
-    clicks(cx, window, &["perm-slack/post-text-channel"]);
+    // After the stored argument is removed and another one chosen, the stored one is still offered.
+    clicks(
+        cx,
+        window,
+        &["perm-slack/post-text-blocks", "perm-slack/post-text-channel"],
+    );
     on_screen(cx, window, |window, _| {
         assert_eq!(
             label(window, "permissions-changes"),
             "Not saved: 1 rule\nslack/post: write, approve, text in `blocks` → write, approve, text in `channel`"
         );
     });
-    clicks(cx, window, &["perm-slack/post-text-blocks"]);
+    clicks(
+        cx,
+        window,
+        &["perm-slack/post-text-channel", "perm-slack/post-text-blocks"],
+    );
     on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "permissions-changes"), "");
     });
@@ -584,6 +592,96 @@ fn another_profile_shows_its_own_rules_and_drops_the_draft(cx: &mut TestAppConte
     });
     on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "perm-slack/search-state"), OFF);
+        assert_eq!(label(window, "permissions-changes"), "");
+    });
+}
+
+fn paths(list: &[&str]) -> OutgoingText {
+    OutgoingText::Paths(list.iter().map(|path| (*path).to_owned()).collect())
+}
+
+#[gpui_kit::test]
+fn the_owner_can_choose_several_text_arguments(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(approve(&rig, slack_tools()));
+    let (window, shell) = open_permissions(cx, &rt, &rig);
+    // `text` is chosen. A click on `channel` adds it.
+    clicks(cx, window, &["perm-slack/post-text-channel"]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "perm-slack/post-state"),
+            "Write: it runs after you approve. The AI marker goes into `channel`, `text`."
+        );
+    });
+    save(cx, window, &shell);
+    assert_eq!(
+        rt.block_on(rules(&rig))["slack/post"],
+        write(Tier::Approve, paths(&["channel", "text"]))
+    );
+
+    // Removing both leaves no choice. The rule is not saved until the owner makes one.
+    clicks(
+        cx,
+        window,
+        &["perm-slack/post-text-channel", "perm-slack/post-text-text"],
+    );
+    let sent = saves(cx, &shell);
+    clicks(cx, window, &["save-permissions"]);
+    let_refreshes_pass(cx);
+    assert_eq!(saves(cx, &shell), sent);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "permissions-message"),
+            "Choose where the text for other people is, for: slack/post."
+        );
+        assert_eq!(
+            label(window, "perm-slack/post-state"),
+            "Write: it runs after you approve. Choose where its text for other people is."
+        );
+    });
+    assert_eq!(
+        rt.block_on(rules(&rig))["slack/post"],
+        write(Tier::Approve, paths(&["channel", "text"]))
+    );
+}
+
+#[gpui_kit::test]
+fn a_stored_choice_with_a_place_inside_a_value_is_shown_and_kept(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(approve(&rig, slack_tools()));
+    let nested = write(Tier::Approve, paths(&["text", "blocks.*.text.text"]));
+    rt.block_on(store(&rig, |rules| {
+        rules.insert("slack/post".into(), nested.clone());
+    }));
+    let (window, shell) = open_permissions(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "perm-slack/post-state"),
+            "Write: it runs after you approve. The AI marker goes into `text`, `blocks.*.text.text`."
+        );
+        assert_eq!(
+            label(window, "perm-slack/post-text-stored"),
+            "`text`, `blocks.*.text.text`"
+        );
+    });
+    // A save of another tool keeps the stored choice as it is.
+    clicks(cx, window, &["perm-slack/search-read"]);
+    save(cx, window, &shell);
+    assert_eq!(rt.block_on(rules(&rig))["slack/post"], nested);
+
+    // A click on an argument replaces the stored choice. Its button brings it back whole.
+    clicks(cx, window, &["perm-slack/post-text-channel"]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "permissions-changes"),
+            "Not saved: 1 rule\nslack/post: write, approve, text in `text`, `blocks.*.text.text` → \
+             write, approve, text in `channel`"
+        );
+    });
+    clicks(cx, window, &["perm-slack/post-text-stored"]);
+    on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "permissions-changes"), "");
     });
 }

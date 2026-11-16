@@ -315,8 +315,8 @@ bunsind connector-remove kim jira                # removes the connector and its
 ### Permission rules
 
 In the window, the **Permissions** view lists each approved tool and sets its rule with
-buttons: Off, Read, Write or Delete, then the step and the argument that holds the text
-for other people. Nothing is chosen for you from a tool's name or description. A write
+buttons: Off, Read, Write or Delete, then the step and the arguments that hold the text
+for other people. A click on an argument adds or removes it, so you can choose several. Nothing is chosen for you from a tool's name or description. A write
 or delete rule cannot be saved until you say where its text is, or that it sends none.
 Save sends the whole table, and the view lists each change before you save.
 
@@ -324,7 +324,7 @@ Save sends the whole table, and the view lists each change before you save.
 
 - The buttons offer the text arguments at the top of a tool's input. If the text is
   inside another value, write the rule in the settings file. The view shows such a rule
-  as it is and keeps its argument as one of the choices.
+  as it is, keeps it on save, and keeps it as one of the choices.
 - A rule change also applies to items that already wait in the inbox: at approval the
   server adds the AI marker by the rule in force at that time.
 - A rule that a poll needs cannot be removed. The view shows the server's reason.
@@ -383,7 +383,12 @@ The same rules as a settings file:
 
 - **`outgoing_text`** is required in every rule. `{ "arg": "text" }` names the argument
   that other people will read; the server appends `ai_marker` to it. `"none"` means the
-  tool sends no text to other people. The marker covers one string argument only.
+  tool sends no text to other people.
+  `{ "paths": ["text", "blocks.*.text.text"] }` names several places. A path joins argument
+  names with `.`, and `*` means every item of a list. The server appends the marker to each place.
+  If a call lacks one of the places, or one item of a list lacks the rest of the path,
+  the server does not make the call. So a Slack message with a divider block is refused
+  by the rule above.
 
 ### Find events (polling)
 
