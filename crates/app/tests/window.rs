@@ -835,6 +835,11 @@ fn an_unknown_item_offers_done_drop_and_a_retry_that_warns(cx: &mut TestAppConte
         assert!(window.try_find("reject-1").is_none());
         window.click("retry-1", cx);
     });
+    // The first click only asks.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-1"), "Yes, run it again");
+        window.click("retry-1", cx);
+    });
 
     let copy = |s: &Shell| {
         s.state
@@ -872,4 +877,66 @@ fn marking_an_unknown_item_done_sends_nothing(cx: &mut TestAppContext) {
     let inbox = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
     assert_eq!(inbox.len(), 1);
     on_screen(cx, window, |window, _| assert!(window.try_find("done-1").is_none()));
+}
+
+#[gpui_kit::test]
+fn run_again_needs_a_second_click_on_the_same_item(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // A second call that a stop cut: item 2.
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let body = bunsin_core::records::InboxBody::ToolCall {
+        tool: "slack/post".into(),
+        args: serde_json::json!({"channel": "C2", "text": "Second."})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    let executing = bunsin_core::approval::ApprovalState::Executing;
+    assert_eq!(store.add_inbox_item("k2", &body, "r", &[], executing, 1).unwrap().id, 2);
+    cut_item_one(&rig);
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbox-2"), "unknown · slack/post");
+        window.click("retry-2", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-2"), "Yes, run it again");
+        assert_eq!(label(window, "retry-1"), "Run again");
+        // A click on another item asks again, for that item.
+        window.scroll("inbox-1", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("retry-1", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-1"), "Yes, run it again");
+        assert_eq!(label(window, "retry-2"), "Run again");
+        // A command after the clicks. When it is done, a command of the clicks would be done too.
+        window.click("drop-1", cx);
+    });
+    wait_until(cx, &shell, "item 1 dropped", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox.iter().any(|i| i.id == 1 && i.state.as_str() == "failed"))
+    });
+    let inbox = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    assert_eq!(inbox.len(), 2);
+    assert!(inbox.iter().any(|i| i.id == 2 && i.state.as_str() == "unknown"));
+    assert!(rig.slack.calls().is_empty());
+
+    // Two clicks on the same item run its call once.
+    on_screen(cx, window, |window, cx| window.click("retry-2", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-2"), "Yes, run it again");
+        window.click("retry-2", cx);
+    });
+    wait_until(cx, &shell, "the executed copy of item 2", |s| {
+        s.state.snapshot.as_ref().is_some_and(|snap| {
+            snap.inbox
+                .iter()
+                .any(|i| i.retry_of == Some(2) && i.state.as_str() == "executed")
+        })
+    });
+    assert_eq!(rig.slack.calls().len(), 1);
+    assert_eq!(rig.slack.calls()[0].1["channel"], "C2");
 }

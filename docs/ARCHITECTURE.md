@@ -113,6 +113,7 @@
 - 창은 Inbox, Notes, Permissions, Agent, Settings 다섯 화면 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
   승인함 테스트는 1280x800 창에서 실행한다.
   - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
+    retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
   - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
   - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.

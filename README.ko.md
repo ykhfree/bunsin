@@ -529,6 +529,7 @@ AI 표시는 서버가 수정 뒤에 붙입니다. 그래서 입력란에는 표
 
 **멈춤으로 끊긴 호출.** `unknown` 항목에는 버튼이 세 개 있습니다: "It ran: mark done", "It did not run: drop", "Run again".
 버튼 아래의 안내문은 다시 실행하면 호출이 두 번 갈 수 있다고 알립니다.
+"Run again"은 먼저 묻습니다. 한 번 누르면 버튼이 "Yes, run it again"으로 바뀌고, 같은 항목에서 한 번 더 눌러야 실행합니다.
 
 ![대기 호출의 수정](docs/screens/inbox-edit-light.png)
 

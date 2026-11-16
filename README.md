@@ -607,6 +607,8 @@ sends no text has no Edit button.
 
 **A call cut by a stop.** An `unknown` item has three buttons: "It ran: mark done", "It did not
 run: drop" and "Run again". A note under them says that a second run can send the call twice.
+"Run again" asks first: its label becomes "Yes, run it again", and a second click on the same
+item runs the call.
 
 ![The edit of a waiting call](docs/screens/inbox-edit-light.png)
 

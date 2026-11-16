@@ -39,6 +39,8 @@ pub struct Shell {
     pub(crate) keychain: std::sync::Arc<dyn crate::connection::KeychainLookup>,
     /// The views never share the window, so no form can squeeze the inbox.
     pub view: View,
+    /// The `unknown` item whose Run again button was clicked once. A second click on it runs the call.
+    retry_armed: Option<i64>,
 }
 
 /// What the main part of the window shows.
@@ -96,6 +98,7 @@ impl Shell {
             draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
+            retry_armed: None,
         }
     }
 
@@ -458,9 +461,9 @@ impl Shell {
                 ))
                 .child(
                     buttons
-                        .child(Self::resolve_button(id, Resolution::Done, "It ran: mark done", cx))
-                        .child(Self::resolve_button(id, Resolution::Drop, "It did not run: drop", cx))
-                        .child(Self::resolve_button(id, Resolution::Retry, "Run again", cx)),
+                        .child(self.resolve_button(id, Resolution::Done, "It ran: mark done", cx))
+                        .child(self.resolve_button(id, Resolution::Drop, "It did not run: drop", cx))
+                        .child(self.resolve_button(id, Resolution::Retry, "Run again", cx)),
                 )
                 .child(labelled(
                     format!("retry-warning-{id}"),
@@ -480,19 +483,38 @@ impl Shell {
     }
 
     /// A button that resolves an item whose call a stop cut.
-    fn resolve_button(id: i64, resolution: Resolution, text: &'static str, cx: &Context<Self>) -> Button {
+    fn resolve_button(&self, id: i64, resolution: Resolution, text: &'static str, cx: &Context<Self>) -> Button {
         let name = match resolution {
             Resolution::Done => "done",
             Resolution::Drop => "drop",
             Resolution::Retry => "retry",
         };
-        let button = Button::new(SharedString::from(format!("{name}-{id}"))).label(text);
-        // Only a retry can send something, maybe a second time. It looks like a risk.
-        let button = match resolution {
-            Resolution::Retry => button.danger(),
-            _ => button.outline(),
-        };
-        button.on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::ResolveUnknown(id, resolution))))
+        let button = Button::new(SharedString::from(format!("{name}-{id}")));
+        // Only a retry can send something, maybe a second time. It looks like a risk and needs a second click.
+        if resolution == Resolution::Retry {
+            let armed = self.retry_armed == Some(id);
+            return button
+                .danger()
+                .label(if armed { "Yes, run it again" } else { text })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.retry(id);
+                    cx.notify();
+                }));
+        }
+        button
+            .outline()
+            .label(text)
+            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::ResolveUnknown(id, resolution))))
+    }
+
+    /// The first click on Run again of an item asks. The second click on the same item runs the call.
+    fn retry(&mut self, id: i64) {
+        if self.retry_armed != Some(id) {
+            self.retry_armed = Some(id);
+            return;
+        }
+        self.retry_armed = None;
+        self.send(UiCommand::ResolveUnknown(id, Resolution::Retry));
     }
 
     /// The left column: the views, the profiles and the state of the connection.
