@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "identifier": "urn:air:acme.com:agent:assistant",
+      "displayName": "Corporate Assistant (A2A)",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://api.acme.com/agents/assistant.json",
+      "score": 95,
+      "source": "https://registry.acme.com/api/v1/"
+    },
+    {
+      "identifier": "urn:air:example.com:weather-server",
+      "displayName": "Global Weather Service",
+      "type": "application/mcp-server-card+json",
+      "url": "https://weather.example.com/mcp",
+      "capabilities": ["WeatherTool"],
+      "score": 88,
+      "source": "https://finder.external.org/api/"
+    }
+  ],
+  "referrals": [
+    {
+      "identifier": "urn:air:nlweb.ai:registry:public",
+      "displayName": "Public Agent Finder",
+      "type": "application/ai-registry+json",
+      "url": "https://finder.nlweb.ai/search"
+    }
+  ],
+  "pageToken": "eyJwYWdlIjogMn0="
+}
