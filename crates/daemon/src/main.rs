@@ -239,6 +239,12 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Show the LLM calls of the last 90 days, added up by UTC day and purpose.
+    LlmUsage {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
     /// Save the LLM endpoint. With --token-stdin, read its token from standard input.
     LlmSet {
         #[command(flatten)]
@@ -712,6 +718,21 @@ async fn run(cli: Cli) -> Result<(), String> {
                 return Err(format!("the endpoint does not work: {}", test.detail));
             }
             println!("works: {}", test.detail);
+        }
+        Command::LlmUsage { remote, profile } => {
+            println!("day\tpurpose\tcalls\tfailed\tinput tokens\toutput tokens\taverage ms");
+            for usage in connect(&remote)?.llm_usage(&profile).await.map_err(text)? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    usage.day,
+                    usage.purpose,
+                    usage.calls,
+                    usage.failed,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.latency_ms / usage.calls.max(1)
+                );
+            }
         }
         Command::LlmSet {
             remote,

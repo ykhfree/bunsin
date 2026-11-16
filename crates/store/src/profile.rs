@@ -1,7 +1,7 @@
 use crate::{Result, StoreError};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem, ReadNote};
+use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem, LlmUsage, ReadNote};
 use bunsin_core::sha256_hex;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiSource, WikiSummary, WikiText};
 use rusqlite::{Connection, OptionalExtension, Row};
@@ -80,6 +80,16 @@ CREATE TABLE IF NOT EXISTS audit (
     event_key TEXT,
     detail TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    job TEXT,
+    purpose TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    outcome TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit
 BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit
@@ -95,6 +105,21 @@ pub struct SealedSecret {
     pub ciphertext: Vec<u8>,
     /// The scheme, host and port the secret was entered for.
     pub origin: String,
+}
+
+/// One call to the LLM. It holds no text of the request or the reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmCall {
+    /// Unix seconds.
+    pub at: i64,
+    /// The work the call was for, for example the key of an event. `None` for a connection test.
+    pub job: Option<String>,
+    pub purpose: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub latency_ms: u64,
+    /// How the call ended: `end`, `max_tokens`, `refusal`, or the kind of error.
+    pub outcome: String,
 }
 
 /// What a change to a page did.
@@ -633,6 +658,68 @@ impl ProfileStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // --- LLM calls ---
+
+    pub fn record_llm_call(&self, call: &LlmCall) -> Result<()> {
+        self.db().execute(
+            "INSERT INTO llm_calls (at, job, purpose, input_tokens, output_tokens, latency_ms, outcome)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                call.at,
+                &call.job,
+                &call.purpose,
+                call.input_tokens as i64,
+                call.output_tokens as i64,
+                call.latency_ms as i64,
+                &call.outcome,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Newest first.
+    pub fn llm_calls(&self, limit: u32) -> Result<Vec<LlmCall>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT at, job, purpose, input_tokens, output_tokens, latency_ms, outcome
+             FROM llm_calls ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| {
+            Ok(LlmCall {
+                at: row.get(0)?,
+                job: row.get(1)?,
+                purpose: row.get(2)?,
+                input_tokens: row.get::<_, i64>(3)? as u64,
+                output_tokens: row.get::<_, i64>(4)? as u64,
+                latency_ms: row.get::<_, i64>(5)? as u64,
+                outcome: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The calls from `since` (Unix seconds) on, added up by UTC day and purpose. Newest day first.
+    pub fn llm_usage(&self, since: i64) -> Result<Vec<LlmUsage>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT date(at, 'unixepoch') AS day, purpose, COUNT(*), SUM(outcome <> 'end'),
+                    SUM(input_tokens), SUM(output_tokens), SUM(latency_ms)
+             FROM llm_calls WHERE at >= ?1 GROUP BY day, purpose ORDER BY day DESC, purpose",
+        )?;
+        let rows = statement.query_map([since], |row| {
+            Ok(LlmUsage {
+                day: row.get(0)?,
+                purpose: row.get(1)?,
+                calls: row.get::<_, i64>(2)? as u64,
+                failed: row.get::<_, i64>(3)? as u64,
+                input_tokens: row.get::<_, i64>(4)? as u64,
+                output_tokens: row.get::<_, i64>(5)? as u64,
+                latency_ms: row.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // --- artifacts ---
 
     fn artifact_path(&self, sha256: &str) -> PathBuf {
@@ -930,6 +1017,67 @@ mod tests {
         }
         let reasons: Vec<String> = s.recent_corrections(2).unwrap().into_iter().map(|c| c.reason).collect();
         assert_eq!(reasons, ["missing link", "wrong tone"]);
+    }
+
+    fn llm_call(at: i64, purpose: &str, tokens: u64, latency_ms: u64, outcome: &str) -> LlmCall {
+        LlmCall {
+            at,
+            job: Some("slack:1".into()),
+            purpose: purpose.into(),
+            input_tokens: tokens,
+            output_tokens: tokens / 10,
+            latency_ms,
+            outcome: outcome.into(),
+        }
+    }
+
+    #[test]
+    fn llm_calls_are_added_up_by_utc_day_and_purpose() {
+        let (_dir, s) = store();
+        // 2026-11-16 23:59:59 UTC, then two calls on 2026-11-17 UTC.
+        let day_one = 1_794_873_599;
+        s.record_llm_call(&llm_call(day_one, "event", 100, 900, "end")).unwrap();
+        s.record_llm_call(&llm_call(day_one + 1, "event", 200, 1_000, "end"))
+            .unwrap();
+        s.record_llm_call(&llm_call(day_one + 2, "event", 0, 50, "transport_error"))
+            .unwrap();
+        s.record_llm_call(&llm_call(day_one + 3, "replay", 300, 2_000, "max_tokens"))
+            .unwrap();
+        // Before `since`: not counted.
+        s.record_llm_call(&llm_call(10, "event", 999, 1, "end")).unwrap();
+
+        let usage = s.llm_usage(1_000).unwrap();
+        let rows: Vec<_> = usage
+            .iter()
+            .map(|u| {
+                (
+                    u.day.as_str(),
+                    u.purpose.as_str(),
+                    u.calls,
+                    u.failed,
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.latency_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("2026-11-17", "event", 2, 1, 200, 20, 1_050),
+                ("2026-11-17", "replay", 1, 1, 300, 30, 2_000),
+                ("2026-11-16", "event", 1, 0, 100, 10, 900),
+            ]
+        );
+        let calls = s.llm_calls(2).unwrap();
+        assert_eq!(
+            calls,
+            [
+                llm_call(10, "event", 999, 1, "end"),
+                llm_call(day_one + 3, "replay", 300, 2_000, "max_tokens")
+            ]
+        );
+        assert!(s.llm_usage(i64::MAX).unwrap().is_empty());
     }
 
     #[test]

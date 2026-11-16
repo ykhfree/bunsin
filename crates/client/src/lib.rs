@@ -10,7 +10,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::ProfileInfo;
+use bunsin_core::records::{LlmUsage, ProfileInfo};
 use bunsin_core::tool::PinSet;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -305,6 +305,13 @@ impl EngineApi for RemoteEngine {
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>> {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "llm/test"), NO_BODY)
+                .await
+        })
+    }
+
+    fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "llm-usage"), NO_BODY)
                 .await
         })
     }

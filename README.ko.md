@@ -199,6 +199,7 @@ bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # token이
 bunsind connector-set kim crm --url https://mcp.example.com/crm \
     --token-header X-API-Key --token-stdin       # token을 `X-API-Key: <token>`으로 보냅니다
 bunsind llm-test kim                             # 저장된 LLM endpoint로 테스트 요청 1건
+bunsind llm-usage kim                            # 지난 90일의 LLM 호출과 token
 bunsind connections kim                          # 주소와 각 token의 출처
 bunsind tools kim slack                          # 접속해서 도구 목록을 봅니다. 동작 확인 방법입니다
 bunsind connector-remove kim jira                # 커넥터와 그 token을 지웁니다
@@ -211,6 +212,9 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - `llm-test`와 창의 **Test**는 저장된 endpoint로 짧은 요청 1건을 보냅니다. 이 요청은 실제 요청과 같은 응답 형식과
   출력 한도를 쓰고, 프로필의 데이터는 담지 않습니다. endpoint에서 token 비용이 발생합니다.
   응답이 agent에게 필요한 형식이면 테스트가 통과합니다.
+- `llm-usage`는 지난 90일의 LLM 호출을 UTC 날짜와 용도(`event`, `replay`, `llm_test`)별로 합칩니다.
+  호출 수, 실패한 호출 수, 입력과 출력 token, 평균 시간을 보여 줍니다.
+  서버는 모든 호출의 시각, token, 끝난 방식을 기록합니다. 요청과 응답의 글, 오류 문구는 저장하지 않습니다.
 - 커넥터에는 token이 없어도 됩니다. token을 빼고 저장하면 됩니다. token은 `Authorization: Bearer <token>`으로 갑니다.
   MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
   그 커넥터에 `connector-set`을 실행할 때마다 `--token-header`를 주십시오. 빼면 `Authorization: Bearer`로 돌아갑니다.

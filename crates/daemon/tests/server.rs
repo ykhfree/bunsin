@@ -286,6 +286,7 @@ async fn a_token_reaches_only_its_own_profile() {
             expected: bunsin_api::Expected::Unchecked,
         };
         refused(kim.set_polls(other, polls).await);
+        refused(kim.llm_usage(other).await.map(|_| ()));
         let llm = LlmUpdate {
             wire: Wire::OpenAiChat,
             base_url: "https://attacker.example".into(),
@@ -852,4 +853,25 @@ async fn the_polls_are_read_and_replaced_over_http() {
     };
     lee.set_polls("lee", empty).await.unwrap();
     assert!(lee.polls("lee").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_llm_call_log_is_read_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    rig.llm.reply(&post("Deployed."), 12);
+    kim.ingest("kim", event("e1")).await.unwrap();
+    let usage = kim.llm_usage("kim").await.unwrap();
+    assert_eq!(usage.len(), 1, "{usage:?}");
+    assert_eq!(
+        (
+            usage[0].purpose.as_str(),
+            usage[0].calls,
+            usage[0].failed,
+            usage[0].input_tokens
+        ),
+        ("event", 1, 0, 12)
+    );
+    // The other profile made no call.
+    assert!(rig.client(&rig.lee_token).llm_usage("lee").await.unwrap().is_empty());
 }

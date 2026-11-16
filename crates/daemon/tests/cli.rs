@@ -140,6 +140,13 @@ fn an_owner_controls_only_the_own_profile_through_the_server() {
 
     let error = stderr_of_failure(server.run(&kim, &["stop", "lee", "on"]), "stop for another profile");
     assert!(error.contains("not authorized"), "{error}");
+    // A new profile has made no LLM call: the table has only its head line.
+    assert_eq!(
+        stdout_of(server.run(&kim, &["llm-usage", "kim"]), "llm-usage"),
+        "day\tpurpose\tcalls\tfailed\tinput tokens\toutput tokens\taverage ms\n"
+    );
+    let error = stderr_of_failure(server.run(&kim, &["llm-usage", "lee"]), "llm-usage for another profile");
+    assert!(error.contains("not authorized"), "{error}");
     assert!(stdout_of(server.run(&lee, &["status", "lee"]), "status").starts_with("kill switch: off\n"));
 }
 

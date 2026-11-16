@@ -74,3 +74,19 @@ pub struct ArtifactMeta {
     pub event_key: Option<String>,
     pub inbox_id: Option<i64>,
 }
+
+/// The LLM calls of one day and one purpose, added up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmUsage {
+    /// The UTC date, for example `2026-11-17`.
+    pub day: String,
+    /// What the calls were for, for example `event`, `replay` or `llm_test`.
+    pub purpose: String,
+    pub calls: u64,
+    /// Calls that did not end with a whole reply: errors, refusals and replies cut at the output limit.
+    pub failed: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The time of all calls together, in milliseconds.
+    pub latency_ms: u64,
+}

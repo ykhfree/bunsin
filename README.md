@@ -227,6 +227,7 @@ bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # an MCP s
 bunsind connector-set kim crm --url https://mcp.example.com/crm \
     --token-header X-API-Key --token-stdin       # the token goes as `X-API-Key: <token>`
 bunsind llm-test kim                             # one test request to the saved LLM endpoint
+bunsind llm-usage kim                            # LLM calls and tokens of the last 90 days
 bunsind connections kim                          # addresses and where each token comes from
 bunsind tools kim slack                          # connects and lists the tools: the check that it works
 bunsind connector-remove kim jira                # removes the connector and its token
@@ -241,6 +242,10 @@ bunsind connector-remove kim jira                # removes the connector and its
   request has the reply form and the output limit of a real request, and no data of your
   profile. It costs tokens at the endpoint. The test passes if the reply has the form the
   agent needs.
+- `llm-usage` adds up the LLM calls of the last 90 days by UTC day and purpose (`event`,
+  `replay`, `llm_test`): calls, failed calls, input and output tokens, and the average time.
+  The server records every call with its time, tokens and how it ended. It stores no text
+  of the request or the reply, and no error message.
 - A connector needs no token: leave the token out. A token goes as `Authorization: Bearer
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every

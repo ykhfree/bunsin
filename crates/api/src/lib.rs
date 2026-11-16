@@ -8,7 +8,7 @@ use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, ProfileInfo};
+use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, LlmUsage, ProfileInfo};
 use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use bunsin_core::wiki::{WikiPage, WikiSummary, WikiText};
@@ -482,4 +482,6 @@ pub trait EngineApi: Send + Sync {
     /// Sends one request to the saved LLM endpoint and says whether the reply has the form the agent needs.
     /// The request holds no data of the profile. It costs tokens at the endpoint.
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>>;
+    /// The LLM calls of the last 90 days, added up by UTC day and purpose. Newest day first.
+    fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>>;
 }

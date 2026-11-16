@@ -26,6 +26,7 @@
 //! | PUT | `/v1/profiles/{p}/polls` | `PollsUpdate` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
+//! | POST | `/v1/profiles/{p}/llm-usage` | | `[LlmUsage]` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -36,6 +37,9 @@
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
 //! | DELETE | `/v1/profiles/{p}/wiki/{slug}` | | |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}/history` | | `[WikiPage or null]` |
+//!
+//! The newer calls use `POST /v1/profiles/{p}/<method name in kebab case>`, with the arguments
+//! as a JSON body.
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 

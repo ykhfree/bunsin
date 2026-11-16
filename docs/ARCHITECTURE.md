@@ -173,6 +173,15 @@
   요청에는 프로필의 데이터가 없다. 정지 스위치가 켜져 있어도 실행된다(외부에 아무것도 쓰지 않는다).
   감사 로그에 `llm_tested`를 남긴다. 기다리는 시간은 LLM 설정의 timeout까지이고, 그동안 창의 다른 명령은 대기한다.
   창은 저장되지 않은 입력을 테스트하지 않는다.
+- **호출 로그**: 모든 LLM 호출은 `Engine::complete`(`engine/src/llm_log.rs`)를 지난다.
+  이 함수가 호출 1건마다 표 `llm_calls`에 1행을 쓴다: 시각, job, purpose, 입력·출력 token, 지연(ms, `Instant`로 잰다), 끝난 방식.
+  - job은 이벤트 처리와 재현에서 이벤트의 dedupe key이고, 연결 테스트에서는 없다. 수리 요청도 같은 job의 행이 된다.
+  - purpose는 `event`, `replay`, `llm_test`이다.
+  - 끝난 방식은 고정된 종류만 담는다: `end`, `max_tokens`, `refusal`, `rate_limited`, `http_error`, `transport_error`, `malformed`.
+    오류 문구는 저장하지 않는다. HTTP 오류의 본문은 필터를 지나지 않은 상대의 글이기 때문이다. 요청과 응답의 글도 담지 않는다.
+  - `llm_usage`(`POST .../llm-usage`, `bunsind llm-usage`)는 지난 90일의 행을 UTC 날짜와 purpose별로 합친다(SQLite `date(at,'unixepoch')`).
+    실패는 `end`가 아닌 호출이다. 프로필은 DB 파일이 나타내므로 표에 프로필 열은 없다.
+  - LLM client를 만들지 못해 보내지 않은 요청은 기록하지 않는다.
 - `llm-set` 명령과 창의 LLM 화면은 Claude API를 기본값으로 채운다: `https://api.anthropic.com`, `claude-opus-5-5`.
   출처는 Claude 문서의 API overview와 models overview이다(2026-11-15에 읽음). 기본값은 프로필에 미리 저장하지 않는다.
   운영자가 허용 목록을 쓰는 서버에서는 저장된 기본 주소가 다른 설정의 저장까지 막기 때문이다.
@@ -515,6 +524,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | webhook 방식의 이벤트 수신 | 없음 |
 | 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 구현, 테스트 있음. 업무지식의 색인과 순위는 없음. |
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
+| LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
 | agent의 notes(제안, 승인, 색인, 내장 읽기 도구, 사용자 편집, 내보내기) | 구현, 테스트 있음. 점검과 자동 반영은 없음. |
 | 원칙 후보 추출, 재현 평가의 채점 | 없음 |

@@ -19,7 +19,7 @@ use bunsin_api::{
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::ProfileInfo;
+use bunsin_core::records::{LlmUsage, ProfileInfo};
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use bunsin_engine::Engine;
 use std::net::SocketAddr;
@@ -248,6 +248,15 @@ async fn test_llm(
     Ok(Json(engine.test_llm(&profile).await?))
 }
 
+async fn llm_usage(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<LlmUsage>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.llm_usage(&profile).await?))
+}
+
 async fn get_polls(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -389,6 +398,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("polls"), get(get_polls).put(put_polls))
         .route(&profile("polls/{index}/test"), post(test_poll))
         .route(&profile("llm/test"), post(test_llm))
+        .route(&profile("llm-usage"), post(llm_usage))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

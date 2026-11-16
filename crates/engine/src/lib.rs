@@ -3,6 +3,7 @@
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
 mod connections;
+mod llm_log;
 mod notes;
 mod poll_settings;
 mod polling;
@@ -26,10 +27,11 @@ use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
-use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo, ReadNote};
+use bunsin_core::records::{InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
 use bunsin_core::wiki::{WIKI_READ_TOOL, WikiPage, WikiSummary, WikiUpdate, index_text, page_text};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
+use llm_log::Purpose;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -411,6 +413,7 @@ impl Engine {
         event: &InboundEvent,
         key: &str,
         allow_reads: bool,
+        purpose: Purpose,
     ) -> ApiResult<(Proposed, Vec<String>)> {
         let Ctx {
             store,
@@ -463,7 +466,10 @@ impl Engine {
                 Ok(llm) => llm,
                 Err(error) => return Ok((Proposed::Retry(format!("the LLM cannot be used: {error}")), replies)),
             };
-            let response = match llm.complete(request.clone()).await {
+            let response = match self
+                .complete(store, llm.as_ref(), Some(key), purpose, request.clone())
+                .await?
+            {
                 Ok(response) => response,
                 Err(error) => return Ok((Proposed::Retry(format!("LLM call failed: {error}")), replies)),
             };
@@ -799,7 +805,7 @@ impl Engine {
         event: &InboundEvent,
     ) -> ApiResult<Outcome> {
         let ctx = self.ctx(profile).await?;
-        let (proposed, replies) = self.propose(&ctx, event, key, true).await?;
+        let (proposed, replies) = self.propose(&ctx, event, key, true, Purpose::Event).await?;
         for reply in &replies {
             // The LLM can write personal data that it made up or was told in the owner's
             // principles. The stored copy of its reply passes the filter like other text.
@@ -1001,7 +1007,7 @@ impl Engine {
         let event = Self::redact_event(&ctx.redactor, case.event, &mut RedactionCounts::new());
         let key = event.dedupe_key();
         // Replay runs no tool. A search made today would find the real reply and spoil the comparison.
-        let (proposed, replies) = self.propose(&ctx, &event, &key, false).await?;
+        let (proposed, replies) = self.propose(&ctx, &event, &key, false, Purpose::Replay).await?;
         for reply in &replies {
             let stored = ctx.redactor.redact(reply, &mut RedactionCounts::new());
             store
@@ -1037,7 +1043,10 @@ impl Engine {
         let outcome = match &ctx.runtime.llm {
             Err(error) => Err(format!("the LLM cannot be used: {error}")),
             // The client of the endpoint ends the request at the timeout of the profile's settings.
-            Ok(llm) => match llm.complete(request).await {
+            Ok(llm) => match self
+                .complete(&ctx.store, llm.as_ref(), None, Purpose::LlmTest, request)
+                .await?
+            {
                 Err(error) => Err(format!("the request failed: {error}")),
                 Ok(response) => match (response.stop, parse_reply(&response.content)) {
                     (StopReason::End, Ok(_)) => Ok(format!(
@@ -1295,6 +1304,10 @@ impl EngineApi for Engine {
 
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>> {
         Box::pin(self.test_llm_endpoint(profile))
+    }
+
+    fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>> {
+        Box::pin(async move { self.read_llm_usage(profile) })
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {
