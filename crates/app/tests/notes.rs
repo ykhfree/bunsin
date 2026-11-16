@@ -1002,6 +1002,14 @@ fn the_owner_checks_the_notes_and_dismisses_a_finding(cx: &mut TestAppContext) {
             window.find(format!("finding-{}", ids[1])).label().unwrap_or_default(),
             "Not named: deploy · no other page names it, and the agent never read it"
         );
+        // The findings are below the pre-load card. The column scrolls.
+        window.scroll(
+            "preload-tools",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-600.))),
+            cx,
+        );
+    });
+    on_screen(cx, window, |window, cx| {
         window.click(format!("dismiss-finding-{}", ids[0]), cx);
     });
     wait_until(cx, &shell, "one finding", |s| {
@@ -1009,4 +1017,56 @@ fn the_owner_checks_the_notes_and_dismisses_a_finding(cx: &mut TestAppContext) {
     });
     // The check changed no page.
     assert_eq!(rt.block_on(rig.engine.wiki_page("kim", "deploy")).unwrap().revision, 1);
+}
+
+#[gpui_kit::test]
+fn the_owner_preloads_the_notes_from_one_read(cx: &mut TestAppContext) {
+    use bunsin_core::policy::ToolRule;
+    use bunsin_testkit::tool;
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let tools = vec![tool("post", "Post a message"), tool("search", "Search messages")];
+    rig.slack.set_tools(tools.clone());
+    rig.slack.set_result(
+        "search",
+        serde_json::json!({"messages": [{"text": "We release on Thursdays."}]}),
+    );
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config.approved_tools.insert("slack".into(), tools);
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+    let keep = serde_json::json!({"kind": "ignore", "rationale": "noted", "summary": null, "tool": null,
+        "args_json": null, "wiki_updates": [{"slug": "releases", "title": "Releases", "summary": "When",
+        "body": "Thursdays."}]});
+    rig.llm.reply(&keep.to_string(), 10);
+
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    // Arguments that are not a JSON object are not sent.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "preload-tools"), "Tools that read: slack/search");
+        window.click("preload-tool", cx);
+        window.input("slack/search", cx);
+        window.click("preload-args", cx);
+        window.input("query=release", cx);
+        window.click("preload-notes", cx);
+    });
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "preload-result").starts_with("The arguments are not a JSON object"));
+    });
+    assert!(rig.slack.calls().is_empty());
+
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "preload-args", "{\"query\": \"release\"}");
+        window.click("preload-notes", cx);
+    });
+    wait_until(cx, &shell, "the pre-load", |s| s.state.preload_result.is_some());
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "preload-result"), "1 page change waits in the inbox.");
+    });
+    assert_eq!(rig.slack.calls().len(), 1);
+    let pending = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    assert!(pending.iter().any(|item| matches!(
+        &item.body,
+        bunsin_core::records::InboxBody::WikiChange { slug, .. } if slug == "releases"
+    ) && item.state == bunsin_core::approval::ApprovalState::Pending));
 }

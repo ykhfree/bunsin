@@ -8,8 +8,8 @@ use bunsin_api::http::{
 use bunsin_api::{
     AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
     ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate,
-    PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
+    ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
@@ -450,6 +450,13 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let body = DismissPrincipleBody { id };
             self.send_only(Method::POST, &profile_path(profile, "dismiss-principle"), Some(&body))
+                .await
+        })
+    }
+
+    fn preload_notes<'a>(&'a self, profile: &'a str, request: PreloadNotes) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "preload-notes"), Some(&request))
                 .await
         })
     }

@@ -735,3 +735,23 @@ fn the_owner_checks_the_notes_and_dismisses_a_finding() {
     let left = stdout_of(server.run(&kim, &["lint-findings", "kim"]), "lint-findings");
     assert_eq!(left, format!("{}\n", lines[2]));
 }
+
+#[test]
+fn a_preload_needs_a_tool_with_a_read_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let error = stderr_of_failure(
+        server.run(
+            &kim,
+            &["preload-notes", "kim", "--tool", "slack/search", "--args", "[1]"],
+        ),
+        "args not an object",
+    );
+    assert!(error.contains("--args is not a JSON object"), "{error}");
+    let error = stderr_of_failure(
+        server.run(&kim, &["preload-notes", "kim", "--tool", "slack/search"]),
+        "no read rule",
+    );
+    assert!(error.contains("has no rule with the class `read`"), "{error}");
+}

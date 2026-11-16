@@ -24,8 +24,8 @@ Bunsin is in early development. Read this list before you use it.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
   tools with the class `read` (for example a search) up to five times, and read up to
   five pages of its notes, and use the results. Facts it keeps go into its notes, which you approve page by page (see
-  [Notes](#notes)). Nothing is loaded in advance: the notes fill only with what the
-  agent read while it handled events, and the search quality depends on your MCP servers.
+  [Notes](#notes)). The notes fill with what the agent read while it handled events, and
+  with reads that you start yourself. The search quality depends on your MCP servers.
 - **The privacy filter works on patterns and on your list of terms.** It finds email
   addresses, phone numbers and the other listed forms. It finds names and postal
   addresses only if you list them as terms.
@@ -641,7 +641,23 @@ agent at once, without your approval, but only if all of these hold:
 The change still needs a source and still shows in the inbox, as done. The audit entry
 `wiki_change_applied` says `"auto": true`. A change that cannot be stored stays pending.
 
-Not built yet: loading a Confluence space in advance.
+#### Read into the notes
+
+You can fill the notes from one read that you choose, for example a search of a Confluence space:
+
+```sh
+bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"}'
+```
+
+- The tool needs a rule with the class `read`, and its tool list must be the approved one, as for a poll.
+  Bunsin calls it once with your arguments.
+- The agent gets the result (after the privacy filter) and proposes pages. It may read more
+  tools and pages, with the usual limits. The changes go to the inbox like other page changes,
+  with the read as their source. With `notes.auto_apply`, they follow the rules above.
+- Whatever else the agent proposes (a reply, an escalation) is not run. The audit log records it.
+- In the window, the **Read into the notes** card of the Notes view does the same.
+
+Not built yet: a check of a page when you lose access to its source.
 
 ### Work with the agent
 

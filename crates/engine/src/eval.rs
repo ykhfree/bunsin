@@ -63,7 +63,9 @@ impl Engine {
         // Only the event goes to the LLM. The real reply is kept for the comparison.
         let event = Self::redact_event(&ctx.redactor, event, &mut RedactionCounts::new());
         let key = event.dedupe_key();
-        let (proposed, replies) = self.propose(ctx, &event, &key, false, Purpose::Replay).await?;
+        let (proposed, replies) = self
+            .propose(ctx, &event, &key, false, Vec::new(), Purpose::Replay)
+            .await?;
         for reply in &replies {
             ctx.store
                 .put_artifact("replay_reply", filter(reply).as_bytes(), self.now(), Some(&key), None)

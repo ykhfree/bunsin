@@ -309,6 +309,19 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Call one tool that reads and let the agent propose pages of its notes from the result.
+    /// The tool needs a read rule. The page changes go to the inbox; nothing else is run.
+    PreloadNotes {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>.
+        #[arg(long)]
+        tool: String,
+        /// The arguments of the tool as a JSON object.
+        #[arg(long)]
+        args: Option<String>,
+    },
     /// Show the findings of the last check of the notes that you have not dismissed.
     LintFindings {
         #[command(flatten)]
@@ -1120,6 +1133,23 @@ async fn run(cli: Cli) -> Result<(), String> {
             println!("{} finding(s)", found.len());
             for finding in &found {
                 println!("{}", finding_line(finding));
+            }
+        }
+        Command::PreloadNotes {
+            remote,
+            profile,
+            tool,
+            args,
+        } => {
+            let args = match args {
+                Some(text) => serde_json::from_str(&text).map_err(|e| format!("--args is not a JSON object: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            let request = bunsin_api::PreloadNotes { tool, args };
+            let filed = connect(&remote)?.preload_notes(&profile, request).await.map_err(text)?;
+            println!("{} page change(s) in the inbox", filed.len());
+            for id in filed {
+                println!("#{id}");
             }
         }
         Command::LintFindings { remote, profile } => {

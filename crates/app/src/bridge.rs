@@ -6,7 +6,7 @@
 use bunsin_api::{
     AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
     ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate,
-    PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot, Resolution, ToolsReport,
+    PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot, Resolution, ToolsReport,
     WikiPageUpdate,
 };
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
@@ -166,6 +166,11 @@ pub enum UiCommand {
         profile: String,
         id: i64,
     },
+    /// Calls one tool that reads. The agent proposes pages of the notes from the result.
+    PreloadNotes {
+        profile: String,
+        request: PreloadNotes,
+    },
 }
 
 /// The page of the notes that the window has open.
@@ -303,6 +308,8 @@ pub struct UiState {
     pub lint_findings: Option<Vec<LintFinding>>,
     /// How many findings the last `LintNotes` stored, or why it failed. Not an `error`.
     pub lint_result: Option<Result<usize, String>>,
+    /// How many page changes the last `PreloadNotes` put into the inbox, or why it failed. Not an `error`.
+    pub preload_result: Option<Result<usize, String>>,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -362,6 +369,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.extract_result = None;
     state.thresholds_result = None;
     state.lint_result = None;
+    state.preload_result = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
     let result = match (command, selected) {
@@ -494,6 +502,11 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         (UiCommand::LintNotes { profile }, _) => {
             let result = for_profile(selected, &profile, api.lint_notes(&profile)).await;
             state.lint_result = Some(result.map(|found| found.len()));
+            Ok(())
+        }
+        (UiCommand::PreloadNotes { profile, request }, _) => {
+            let result = for_profile(selected, &profile, api.preload_notes(&profile, request)).await;
+            state.preload_result = Some(result.map(|filed| filed.len()));
             Ok(())
         }
         (UiCommand::DismissFinding { profile, id }, _) => {

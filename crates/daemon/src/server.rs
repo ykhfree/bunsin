@@ -18,8 +18,8 @@ use bunsin_api::http::{
 use bunsin_api::{
     AdoptPrinciple, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections, ConnectorUpdate,
     EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
-    PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport,
-    WikiPageUpdate,
+    PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
+    ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
@@ -508,6 +508,16 @@ async fn dismiss_principle(
     Ok(Json(engine.dismiss_principle(&profile, body.id).await?))
 }
 
+async fn preload_notes(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(request): Json<PreloadNotes>,
+) -> Reply<Vec<i64>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.preload_notes(&profile, request).await?))
+}
+
 async fn lint_notes(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -620,6 +630,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("adopt-principle"), post(adopt_principle))
         .route(&profile("dismiss-principle"), post(dismiss_principle))
         .route(&profile("lint-notes"), post(lint_notes))
+        .route(&profile("preload-notes"), post(preload_notes))
         .route(&profile("lint-findings"), post(lint_findings))
         .route(&profile("dismiss-finding"), post(dismiss_finding))
         .route(&profile("wiki"), get(wiki_index))

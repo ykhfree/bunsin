@@ -28,6 +28,8 @@ pub(crate) enum Purpose {
     Principles,
     /// The conflict check of the notes.
     NotesCheck,
+    /// The owner's pre-load of the notes from one read.
+    Preload,
 }
 
 impl Purpose {
@@ -39,6 +41,7 @@ impl Purpose {
             Purpose::Judge => "judge",
             Purpose::Principles => "principles",
             Purpose::NotesCheck => "notes_check",
+            Purpose::Preload => "preload",
         }
     }
 }

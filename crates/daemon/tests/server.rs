@@ -321,6 +321,11 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.lint_notes(other).await.map(|_| ()));
         refused(kim.lint_findings(other).await.map(|_| ()));
         refused(kim.dismiss_finding(other, 1).await);
+        let preload = bunsin_api::PreloadNotes {
+            tool: "slack/search".into(),
+            args: serde_json::Map::new(),
+        };
+        refused(kim.preload_notes(other, preload).await.map(|_| ()));
         refused(
             kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
                 .await
@@ -1216,4 +1221,36 @@ async fn an_event_the_owner_hands_in_counts_as_the_owners_own() {
     kim.ingest("kim", event("owner-1")).await.unwrap();
     let page = kim.wiki_page("kim", "deploy").await.unwrap();
     assert_eq!(page.text.body, "Fridays.");
+}
+
+#[tokio::test]
+async fn the_notes_are_preloaded_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let tools = vec![tool("post", "Post a message"), tool("search", "Search messages")];
+    rig.slack.set_tools(tools.clone());
+    rig.slack
+        .set_result("search", json!({"messages": [{"text": "We release on Thursdays."}]}));
+    let mut config = kim.profile_config("kim").await.unwrap();
+    config.approved_tools.insert("slack".into(), tools);
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    kim.set_profile_config("kim", config).await.unwrap();
+    let keep = json!({"kind": "ignore", "rationale": "noted", "summary": null, "tool": null, "args_json": null,
+        "wiki_updates": [{"slug": "releases", "title": "Releases", "summary": "When", "body": "Thursdays."}]});
+    rig.llm.reply(&keep.to_string(), 10);
+    let request = bunsin_api::PreloadNotes {
+        tool: "slack/search".into(),
+        args: json!({"query": "release"}).as_object().unwrap().clone(),
+    };
+    let filed = kim.preload_notes("kim", request).await.unwrap();
+    assert_eq!(filed.len(), 1);
+    let snapshot = kim.snapshot("kim").await.unwrap();
+    let item = snapshot.inbox.iter().find(|item| item.id == filed[0]).unwrap();
+    assert_eq!(item.state, ApprovalState::Pending);
+    let post = bunsin_api::PreloadNotes {
+        tool: "slack/post".into(),
+        args: serde_json::Map::new(),
+    };
+    let refused = kim.preload_notes("kim", post).await;
+    assert!(matches!(refused, Err(ApiError::NotAllowed(_))), "{refused:?}");
 }

@@ -47,6 +47,7 @@
 //! | POST | `/v1/profiles/{p}/lint-notes` | | `[LintFinding]` |
 //! | POST | `/v1/profiles/{p}/lint-findings` | | `[LintFinding]` |
 //! | POST | `/v1/profiles/{p}/dismiss-finding` | `DismissFindingBody` | |
+//! | POST | `/v1/profiles/{p}/preload-notes` | `PreloadNotes` | `[i64]` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |

@@ -4,9 +4,10 @@
 use crate::bridge::{NoteResult, SaveError, UiCommand, UiState};
 use crate::shell::{Shell, labelled, labelled_as};
 use crate::theme::{card, code_block, field, icon, notice, palette, quiet, utc_minute};
-use bunsin_api::WikiPageUpdate;
+use bunsin_api::{PreloadNotes, WikiPageUpdate};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::lint::{FindingKind, LintFinding};
+use bunsin_core::policy::ToolClass;
 use bunsin_core::records::InboxBody;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiText};
 use gpui_kit::base::TestSupportExt;
@@ -29,6 +30,8 @@ const EMPTY: &str = "Select a page, or make a new one.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
 const OLD_LOADED: &str = "The old text is in the fields now. Save stores it as a new revision.";
 const OLD_BLOCKED: &str = "This page has changes that are not saved. Save or discard them first.";
+const PRELOAD_HELP: &str = "Bunsin calls one tool that reads, with the arguments you give. The agent proposes \
+    pages from the result. They wait in the inbox like other page changes; nothing else is run.";
 const CHECKS_HELP: &str = "A check reports old pages, pages that nothing names, and, if the settings turn it on, \
     pages that may say different things. It changes no page. The settings `notes` say what to check.";
 
@@ -82,6 +85,12 @@ pub struct NotesForm {
     blocked: Option<Nav>,
     /// The position in the history of the revision that the owner reads, if any.
     revision_shown: Option<usize>,
+    /// The tool ID of a pre-load.
+    preload_tool: Entity<InputState>,
+    /// The arguments of a pre-load, as a JSON object.
+    preload_args: Entity<InputState>,
+    /// Why the window did not send a pre-load.
+    preload_message: Option<String>,
 }
 
 impl NotesForm {
@@ -99,6 +108,9 @@ impl NotesForm {
             confirm_delete: false,
             blocked: None,
             revision_shown: None,
+            preload_tool: cx.new(|cx| InputState::new(window, cx).placeholder("connector/tool")),
+            preload_args: cx.new(|cx| InputState::new(window, cx).placeholder("{\"query\": \"...\"}")),
+            preload_message: None,
         }
     }
 
@@ -781,7 +793,7 @@ impl Shell {
         view.child(editor).child(self.notes_side(cx))
     }
 
-    /// The column beside the page: the checks of the notes.
+    /// The column beside the page: the pre-load and the checks of the notes.
     fn notes_side(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .id("notes-side")
@@ -791,7 +803,84 @@ impl Shell {
             .flex_col()
             .gap_4()
             .overflow_y_scroll()
+            .child(self.preload_card(cx))
             .child(self.checks_card(cx))
+    }
+
+    /// Sends a pre-load of the typed tool and arguments. Arguments that are not a JSON object are not sent.
+    fn preload_notes(&mut self, cx: &App) {
+        let form = &mut self.notes;
+        let Some(profile) = form.profile.clone() else {
+            return;
+        };
+        let tool = form.preload_tool.read(cx).value().trim().to_owned();
+        let args = form.preload_args.read(cx).value().trim().to_owned();
+        let args = match args.as_str() {
+            "" => Ok(serde_json::Map::new()),
+            text => serde_json::from_str(text).map_err(|e| format!("The arguments are not a JSON object: {e}")),
+        };
+        match args {
+            Ok(args) => {
+                form.preload_message = None;
+                let request = PreloadNotes { tool, args };
+                self.send(UiCommand::PreloadNotes { profile, request });
+            }
+            Err(error) => form.preload_message = Some(error),
+        }
+    }
+
+    /// One read that the agent turns into page changes, which go to the inbox.
+    fn preload_card(&self, cx: &Context<Self>) -> impl IntoElement {
+        let form = &self.notes;
+        let readers: Vec<&str> = self
+            .state
+            .permissions
+            .iter()
+            .flat_map(|permissions| &permissions.rules)
+            .filter(|(_, rule)| rule.class == ToolClass::Read)
+            .map(|(tool, _)| tool.as_str())
+            .collect();
+        let tools = match readers.is_empty() {
+            true => "No tool has a read rule yet.".to_owned(),
+            false => format!("Tools that read: {}", readers.join(", ")),
+        };
+        let result = match (&form.preload_message, &self.state.preload_result) {
+            (Some(message), _) => message.clone(),
+            (None, None) => String::new(),
+            (None, Some(Ok(0))) => "The agent kept no page.".to_owned(),
+            (None, Some(Ok(1))) => "1 page change waits in the inbox.".to_owned(),
+            (None, Some(Ok(count))) => format!("{count} page changes wait in the inbox."),
+            (None, Some(Err(error))) => error.clone(),
+        };
+        card(cx)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Read into the notes"))
+            .child(quiet(PRELOAD_HELP, cx))
+            .child(labelled_as("preload-tools", tools.clone(), quiet(tools, cx)))
+            .child(field(
+                "Tool",
+                Input::new(&form.preload_tool).id("preload-tool").aria_label("Tool"),
+                cx,
+            ))
+            .child(field(
+                "Arguments, a JSON object",
+                Input::new(&form.preload_args)
+                    .id("preload-args")
+                    .aria_label("Arguments"),
+                cx,
+            ))
+            .child(
+                div().flex().child(
+                    Button::new("preload-notes")
+                        .small()
+                        .outline()
+                        .label("Read")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.preload_notes(cx);
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().text_sm().child(labelled("preload-result", result)))
     }
 
     /// The findings of the last check, with a button to check now and one to dismiss each finding.

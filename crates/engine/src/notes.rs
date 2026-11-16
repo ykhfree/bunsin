@@ -81,8 +81,8 @@ impl Engine {
         }
     }
 
-    /// Puts the page changes of a reply into the inbox. Nothing is stored in the notes
-    /// before the owner approves an item.
+    /// Puts the page changes of a reply into the inbox and returns the IDs of the items. Nothing is stored
+    /// in the notes before the owner approves an item, or `notes.auto_apply` does.
     pub(crate) fn file_wiki_changes(
         &self,
         ctx: &Ctx,
@@ -91,9 +91,9 @@ impl Engine {
         reads: &[ReadNote],
         pages_read: &BTreeSet<String>,
         updates: Vec<WikiUpdate>,
-    ) -> ApiResult<()> {
+    ) -> ApiResult<Vec<i64>> {
         if updates.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let store = &ctx.store;
         let dropped = |slug: &str, reason: &str| {
@@ -121,7 +121,7 @@ impl Engine {
                     "no tool was read in this event, so the fact has no source",
                 )?;
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
         sources.insert(
             0,
@@ -132,6 +132,7 @@ impl Engine {
         );
 
         let page_count = store.wiki_index().map_err(store_error)?.len();
+        let mut filed = Vec::new();
         // An event from outside can be written to steer the agent, so its changes always wait for the owner.
         let may_apply = ctx.config.notes.auto_apply
             && event.channel == Channel::Owner
@@ -170,13 +171,14 @@ impl Engine {
                 .add_inbox_item(key, &body, rationale, reads, ApprovalState::Pending, self.now())
                 .map_err(store_error)?;
             self.audit(store, "wiki_change_proposed", Some(key), json!({"slug": update.slug}))?;
+            filed.push(item.id);
             // A change that cannot be stored now stays in the inbox for the owner.
             if apply && let Err(error) = self.approve_wiki_change(store, &item, false, true) {
                 let detail = json!({"inbox_id": item.id, "error": error.to_string()});
                 self.audit(store, "wiki_change_auto_apply_failed", Some(key), detail)?;
             }
         }
-        Ok(())
+        Ok(filed)
     }
 
     /// Stores an approved page change. The page write and the inbox move are one step.

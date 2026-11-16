@@ -115,7 +115,7 @@
   - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
     retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
     정책이 소유자 없이 실행한 항목(`executed`, `failed`)에는 "Report a problem" 버튼이 있다(`report_autonomous`). 도구가 보류 중이면 버튼을 감춘다.
-  - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제, 오른쪽의 점검 결과(15절).
+  - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제, 오른쪽 열의 미리 읽기와 점검 결과(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
   - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.
   - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
@@ -653,7 +653,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   그래서 실패한 점검도 다음 간격까지 다시 돌지 않는다. 점검은 밖에 아무것도 보내지 않으므로 정지 스위치와 상관없이 돈다.
 - 점검은 페이지를 고치지 않는다. 감사 `notes_checked`는 종류별 개수와 보낸 쌍의 수만 남긴다.
 - API: `lint_notes`, `lint_findings`(`new`만, 찾은 순서), `dismiss_finding`(`POST .../lint-notes` 등, 같은 이름의 `bunsind` 명령).
-  창의 Notes 화면은 오른쪽 **Checks** 카드에 결과, "Check now", 결과마다 "Dismiss"를 보인다.
+  창의 Notes 화면은 오른쪽 열의 **Checks** 카드에 결과, "Check now", 결과마다 "Dismiss"를 보인다. 열은 스크롤한다.
 
 **자동 반영**
 
@@ -671,9 +671,18 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - 감사 `wiki_change_applied`에 `auto`가 붙는다. 저장하지 못하면(예: 그 사이 소유자의 편집) 항목은 `pending`으로 남고 감사 `wiki_change_auto_apply_failed`가 남는다.
 - 결정 기록(4절)에는 들지 않는다. 기각: owner 페이지 덮어쓰기.
 
-**아직 없는 것**
+**미리 읽기**
 
-- 지정한 Confluence 스페이스나 Jira 프로젝트를 미리 읽어 넣는 기능.
+- `preload_notes{tool, args}`(`POST .../preload-notes`, `bunsind preload-notes`, 창의 "Read into the notes"): 소유자가 시작한다.
+  도구는 `read` 규칙이 있고 `decide`가 `Execute`여야 한다(poll의 `fetch`, 원칙 후보의 read 출처와 같은 `read_once`). 한 번 부른다.
+- 결과(필터를 거치고 20,000자로 자른 글)를 본문으로 하는 이벤트(source `bunsin.preload`, 작성자는 소유자, `channel` `owner`)를 만들고,
+  그 읽기를 첫 읽기로 넣은 채 `propose`를 돌린다(LLM 호출 로그의 purpose `preload`). 그래서 변경안의 출처 규칙이 그대로 지켜진다:
+  출처는 이벤트 줄과 그 도구의 인자이다. LLM은 평소의 한도 안에서 더 읽을 수 있다.
+- 변경안은 `file_wiki_changes`로 승인함에 간다(자동 반영 규칙 포함). `ignore`가 아닌 제안은 실행하지 않고 감사 `preload_proposal_skipped`(종류만)를 남긴다.
+  제안이 실패하면(수리 뒤에도 형식 오류, LLM 오류) 거부하고 아무것도 넣지 않는다. 감사 `notes_preloaded`는 도구와 변경안 수만 남긴다.
+- 실제 Confluence나 Jira 검색 도구로는 실행해 보지 않았다.
+
+**아직 없는 것**
 - 사용자가 출처 문서의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
 - 한계: 쪽수는 300으로 제한한다. 색인은 60줄까지만 프롬프트에 들어가고, 나머지는 검색으로 찾는다.
 
@@ -695,7 +704,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
-| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검, opt-in 자동 반영) | 구현, 테스트 있음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
+| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검, opt-in 자동 반영, 미리 읽기) | 구현, 테스트 있음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
 | 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 사례를 추가하지 않는다. |
 | 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령에만 있다. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |

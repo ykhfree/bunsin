@@ -46,7 +46,7 @@ impl Engine {
                 .rev()
                 .map(|case| case.actual_reply)
                 .collect(),
-            PrincipleSource::Read { tool, args } => vec![self.read_for_principles(ctx, tool, args).await?],
+            PrincipleSource::Read { tool, args } => vec![self.read_once(ctx, tool, args, "principles").await?],
         };
         // A stored text passed the filter when it was stored. The filter runs again, because the owner
         // may have added terms since.
@@ -57,12 +57,14 @@ impl Engine {
             .collect())
     }
 
-    /// Calls a tool that reads, with the checks of a poll: a `read` rule and a policy that allows it now.
-    async fn read_for_principles(
+    /// Calls a tool that reads, for the owner, with the checks of a poll: a `read` rule and a policy that
+    /// allows it now. Returns the result as filtered text. The audit entry names `purpose`.
+    pub(crate) async fn read_once(
         &self,
         ctx: &Ctx,
         tool: &str,
         args: &serde_json::Map<String, Value>,
+        purpose: &str,
     ) -> ApiResult<String> {
         let is_read = ctx
             .config
@@ -95,7 +97,7 @@ impl Engine {
                 let error = ctx.redactor.redact(&e.to_string(), &mut RedactionCounts::new());
                 ApiError::NotAllowed(format!("`{tool}` failed: {error}"))
             })?;
-        self.audit(&ctx.store, "read", None, json!({"tool": tool, "purpose": "principles"}))?;
+        self.audit(&ctx.store, "read", None, json!({"tool": tool, "purpose": purpose}))?;
         Ok(Self::result_text(&ctx.redactor, &result))
     }
 

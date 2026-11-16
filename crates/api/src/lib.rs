@@ -426,6 +426,15 @@ pub struct WikiPageUpdate {
     pub expected_revision: Option<u64>,
 }
 
+/// One call of a tool that reads, whose result the agent turns into page changes of its notes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreloadNotes {
+    /// `<connector>/<tool>`. It needs a `read` rule.
+    pub tool: String,
+    #[serde(default)]
+    pub args: Map<String, Value>,
+}
+
 /// The tools a connector lists now, compared with the approved ones.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolsReport {
@@ -639,4 +648,7 @@ pub trait EngineApi: Send + Sync {
     fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>>;
     /// Dismisses a finding. Later checks do not report the same kind for the same pages again.
     fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Calls one tool that reads, with the checks of a poll, and lets the agent propose pages from its result.
+    /// Returns the inbox IDs of the page changes. Nothing else the agent proposes is run.
+    fn preload_notes<'a>(&'a self, profile: &'a str, request: PreloadNotes) -> BoxFuture<'a, ApiResult<Vec<i64>>>;
 }
