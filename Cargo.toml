@@ -13,6 +13,7 @@ bunsin-core = { path = "crates/core" }
 bunsin-store = { path = "crates/store" }
 bunsin-llm = { path = "crates/llm" }
 bunsin-connectors = { path = "crates/connectors" }
+bunsin-ard = { path = "crates/ard" }
 bunsin-coding = { path = "crates/coding" }
 bunsin-engine = { path = "crates/engine" }
 bunsin-api = { path = "crates/api" }
