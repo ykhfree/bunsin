@@ -757,6 +757,7 @@ fn a_late_state_does_not_replace_a_new_page(cx: &mut TestAppContext) {
             profile: "kim".into(),
             slug: "team".into(),
             page: Some(page),
+            history: None,
         }),
         connected: true,
         ..UiState::default()
@@ -804,6 +805,7 @@ fn a_save_is_not_forgotten_if_the_reload_after_it_fails(cx: &mut TestAppContext)
             profile: "kim".into(),
             slug: "team".into(),
             page: Some(page),
+            history: None,
         }),
         connected: true,
         ..UiState::default()
@@ -848,5 +850,106 @@ fn a_save_is_not_forgotten_if_the_reload_after_it_fails(cx: &mut TestAppContext)
         );
         assert_eq!(label(window, "note-changes"), "");
         assert_eq!(label(window, "note-result"), "Saved");
+    });
+}
+
+fn history_len(shell: &Shell) -> Option<usize> {
+    shell.state.open_note.as_ref()?.history.as_ref().map(Vec::len)
+}
+
+#[gpui_kit::test]
+fn an_old_revision_is_read_and_saved_again_through_the_normal_save(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let later = text("Team", "Who does what", "Lee leads.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "team", later)).unwrap();
+    // The history is below the text area. This window is tall enough to click it without a scroll.
+    let (window, shell) = common::window::open_sized(cx, &rt, &rig, (1280., 1400.));
+    on_screen(cx, window, |window, cx| window.click("tab-notes", cx));
+    open_page(cx, window, &shell, "team");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "note-history"), "History");
+        assert!(window.try_find("note-rev-0").is_none());
+        window.click("note-history", cx);
+    });
+    wait_until(cx, &shell, "the history", |s| history_len(s) == Some(2));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "note-history"), "Hide the history");
+        let first = label(window, "note-rev-0");
+        assert!(first.starts_with("Revision 1 · by you · "), "{first}");
+        assert!(label(window, "note-rev-1").starts_with("Revision 2 · "));
+        // Nothing is chosen yet.
+        assert!(window.try_find("note-rev-text").is_none());
+        window.click("note-rev-0", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "note-rev-text"), "Team\nWho does what\n\nKim leads.");
+        // Typed text is not replaced by an old revision.
+        retype_body(window, cx, "Typed by me.");
+        window.click("note-rev-load", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "note-message"),
+            "This page has changes that are not saved. Save or discard them first."
+        );
+        assert_eq!(body(window), "Typed by me.");
+        retype_body(window, cx, "Lee leads.");
+        window.click("note-rev-load", cx);
+    });
+    let before = commands(cx, &shell);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(body(window), "Kim leads.");
+        assert_eq!(label(window, "note-changes"), "Not saved");
+        window.click("note-save", cx);
+    });
+    assert_eq!(
+        wait_for_result(cx, &shell, before),
+        NoteResult::Saved {
+            slug: "team".into(),
+            result: Ok(()),
+        }
+    );
+    let page = rt.block_on(rig.engine.wiki_page("kim", "team")).unwrap();
+    assert_eq!((page.revision, page.text.body.as_str()), (3, "Kim leads."));
+    // The history stays shown and gets the new revision.
+    wait_until(cx, &shell, "the new revision in the history", |s| {
+        history_len(s) == Some(3)
+    });
+    on_screen(cx, window, |window, cx| window.click("note-history", cx));
+    wait_until(cx, &shell, "the hidden history", |s| history_len(s).is_none());
+}
+
+#[gpui_kit::test]
+fn an_old_text_is_saved_with_the_revision_check(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let later = text("Team", "Who does what", "Lee leads.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "team", later)).unwrap();
+    let (window, shell) = common::window::open_sized(cx, &rt, &rig, (1280., 1400.));
+    on_screen(cx, window, |window, cx| window.click("tab-notes", cx));
+    open_page(cx, window, &shell, "team");
+    on_screen(cx, window, |window, cx| window.click("note-history", cx));
+    wait_until(cx, &shell, "the history", |s| history_len(s) == Some(2));
+    on_screen(cx, window, |window, cx| window.click("note-rev-0", cx));
+    on_screen(cx, window, |window, cx| window.click("note-rev-load", cx));
+    // Another client changes the page before the save.
+    let other = text("Team", "Who does what", "Park leads.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "team", other)).unwrap();
+    let before = commands(cx, &shell);
+    on_screen(cx, window, |window, cx| window.click("note-save", cx));
+    assert_eq!(
+        wait_for_result(cx, &shell, before),
+        NoteResult::Saved {
+            slug: "team".into(),
+            result: Err(SaveError::Conflict),
+        }
+    );
+    assert_eq!(rt.block_on(page_body(&rig, "team")), "Park leads.");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "note-conflict"), PAGE_CONFLICT);
+        assert_eq!(body(window), "Kim leads.");
     });
 }

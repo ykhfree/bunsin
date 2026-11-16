@@ -1021,3 +1021,59 @@ async fn a_permissions_save_reports_its_own_result_and_reloads_the_rules() {
     assert_eq!(state.permissions_result, None);
     assert_eq!(state.permission_saves, 3);
 }
+
+#[tokio::test]
+async fn the_history_of_the_open_page_is_loaded_while_it_is_shown() {
+    let rig = common::rig().await;
+    let page = |body: &str| WikiPageUpdate {
+        text: WikiText {
+            title: "Team".into(),
+            summary: "Who".into(),
+            body: body.into(),
+        },
+        expected_revision: None,
+    };
+    rig.engine
+        .set_wiki_page("kim", "team", page("Kim leads."))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let history = |profile: &str, show| UiCommand::NoteHistory {
+        profile: profile.into(),
+        show,
+    };
+    // Without an open page there is nothing to load.
+    apply(&*rig.engine, &mut state, history("kim", true)).await;
+    assert_eq!(state.open_note, None);
+    let open = UiCommand::OpenNote {
+        profile: "kim".into(),
+        slug: "team".into(),
+    };
+    apply(&*rig.engine, &mut state, open).await;
+    apply(&*rig.engine, &mut state, history("lee", true)).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("another profile is selected"))
+    );
+    assert_eq!(state.open_note.as_ref().unwrap().history, None);
+
+    apply(&*rig.engine, &mut state, history("kim", true)).await;
+    assert_eq!(state.open_note.as_ref().unwrap().history.as_ref().unwrap().len(), 1);
+    // A change on the server reaches the shown history with the next refresh.
+    rig.engine
+        .set_wiki_page("kim", "team", page("Lee leads."))
+        .await
+        .unwrap();
+    refresh(&*rig.engine, &mut state).await;
+    let revisions = state.open_note.as_ref().unwrap().history.clone().unwrap();
+    let bodies: Vec<_> = revisions
+        .iter()
+        .map(|r| r.as_ref().unwrap().text.body.as_str())
+        .collect();
+    assert_eq!(bodies, ["Kim leads.", "Lee leads."]);
+    apply(&*rig.engine, &mut state, history("kim", false)).await;
+    assert_eq!(state.open_note.as_ref().unwrap().history, None);
+}

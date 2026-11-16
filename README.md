@@ -514,6 +514,13 @@ and the sources of its facts. It works like a small wiki that the agent writes.
 - You can read, write and delete pages yourself. In the window, the **Notes** view lists
   the pages. Select a page to read and edit it, or make a new page. Save warns you if the
   page changed on the server meanwhile. Delete asks once before it deletes.
+- **History** lists the revisions of the open page, newest first. Choose one to read its
+  text; nothing in it can be edited. "Put this text into the fields" copies the old text
+  into the fields, and Save stores it as a new revision with the usual check. It does not
+  replace text that you typed and did not save.
+
+![The history of a page](docs/screens/notes-history-light.png)
+
 - The same on the command line:
 
 ```sh
@@ -526,8 +533,7 @@ bunsind wiki-export kim ./notes        # index.md and pages/*.md
 ```
 
 Not built yet: a periodic check for stale or conflicting pages, applying changes without
-approval, loading a Confluence space in advance, full-text search, and the page history
-in the window (use `wiki-history`).
+approval, loading a Confluence space in advance, and full-text search.
 
 ### Work with the agent
 

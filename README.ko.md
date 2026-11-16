@@ -445,6 +445,12 @@ agent가 쓰는 작은 wiki입니다.
 - 사용자가 직접 페이지를 읽고, 쓰고, 지울 수 있습니다. 창의 **Notes** 화면이 페이지 목록을 보여 줍니다.
   페이지를 선택하면 읽고 고칠 수 있고, 새 페이지를 만들 수 있습니다.
   그 사이에 서버의 페이지가 바뀌었으면 Save가 경고합니다. Delete는 삭제 전에 한 번 묻습니다.
+- **History**는 열린 페이지의 revision을 최신 것부터 보여 줍니다. 하나를 고르면 그 본문을 읽을 수 있고, 고칠 수는 없습니다.
+  "Put this text into the fields"는 옛 본문을 입력란에 넣습니다. Save는 그 본문을 평소처럼 revision을 확인하고 새 revision으로 저장합니다.
+  저장하지 않은 입력 내용이 있으면 덮어쓰지 않습니다.
+
+![페이지의 변경 이력](docs/screens/notes-history-light.png)
+
 - 명령줄에서도 같은 일을 할 수 있습니다.
 
 ```sh
@@ -456,7 +462,7 @@ bunsind wiki-history kim team          # 모든 변경. --revision N은 옛 본�
 bunsind wiki-export kim ./notes        # index.md와 pages/*.md
 ```
 
-아직 없는 것: 오래되거나 모순된 페이지의 주기적 점검, 승인 없는 자동 반영, Confluence 스페이스의 사전 수집, 전문 검색, 창의 변경 이력 화면(`wiki-history`를 쓰세요).
+아직 없는 것: 오래되거나 모순된 페이지의 주기적 점검, 승인 없는 자동 반영, Confluence 스페이스의 사전 수집, 전문 검색.
 
 ### agent와 일하기
 

@@ -97,6 +97,11 @@ pub enum UiCommand {
     },
     /// Stops loading the open page.
     CloseNote,
+    /// Loads the revisions of the open page with every refresh (`show`), or stops loading them.
+    NoteHistory {
+        profile: String,
+        show: bool,
+    },
     /// Stores the owner's text for a page. After a successful save that page is the open one.
     SaveNote {
         profile: String,
@@ -116,6 +121,8 @@ pub struct OpenNote {
     pub slug: String,
     /// None: the server has no page with this name.
     pub page: Option<WikiPage>,
+    /// Every stored revision of the page, oldest first, if the window shows them. A deletion is `None`.
+    pub history: Option<Vec<Option<WikiPage>>>,
 }
 
 /// What the last notes command did.
@@ -354,7 +361,14 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
                 profile,
                 slug,
                 page: None,
+                history: None,
             });
+        }),
+        (UiCommand::NoteHistory { profile, show }, _) => check_selected(selected, &profile).map(|()| {
+            if let Some(open) = &mut state.open_note {
+                // The reload fills the list.
+                open.history = show.then(Vec::new);
+            }
         }),
         (UiCommand::CloseNote, _) => {
             state.open_note = None;
@@ -364,10 +378,18 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             let call = async { api.set_wiki_page(&profile, &slug, update).await.map(|_| ()) };
             let result = save_for(selected, &profile, call).await;
             if result.is_ok() {
+                // A history that was shown for this page stays shown, with the new revision.
+                let history = state
+                    .open_note
+                    .as_ref()
+                    .filter(|open| open.slug == slug)
+                    .and_then(|open| open.history.as_ref())
+                    .map(|_| Vec::new());
                 state.open_note = Some(OpenNote {
                     profile,
                     slug: slug.clone(),
                     page: None,
+                    history,
                 });
             }
             state.note_result = Some(NoteResult::Saved { slug, result });
@@ -425,9 +447,12 @@ struct Loaded {
     notes: Vec<WikiSummary>,
     /// The open page. None if no page is open or the server has no such page.
     page: Option<WikiPage>,
+    /// The revisions of the open page, if the window shows them.
+    history: Option<Vec<Option<WikiPage>>>,
 }
 
-async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<&str>) -> ApiResult<Loaded> {
+/// `open` is the open page and whether its history is shown.
+async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bool)>) -> ApiResult<Loaded> {
     Ok(Loaded {
         snapshot: api.snapshot(profile).await?,
         privacy: api.privacy(profile).await?,
@@ -436,10 +461,14 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<&str>) ->
         polls: api.polls(profile).await?,
         connections: api.connections(profile).await?,
         notes: api.wiki_index(profile).await?,
+        history: match open {
+            Some((slug, true)) => Some(api.wiki_history(profile, slug).await?),
+            _ => None,
+        },
         page: match open {
             None => None,
             // A page that is gone is not a failure of the connection.
-            Some(slug) => match api.wiki_page(profile, slug).await {
+            Some((slug, _)) => match api.wiki_page(profile, slug).await {
                 Ok(page) => Some(page),
                 Err(ApiError::NotFound(_)) => None,
                 Err(error) => return Err(error),
@@ -474,10 +503,14 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     if state.open_note.as_ref().map(|open| &open.profile) != state.selected.as_ref() {
         state.open_note = None;
     }
-    let open = state.open_note.as_ref().map(|open| open.slug.clone());
+    let open = state
+        .open_note
+        .as_ref()
+        .map(|open| (open.slug.clone(), open.history.is_some()));
+    let open = open.as_ref().map(|(slug, history)| (slug.as_str(), *history));
     match &state.selected {
         // The window is connected only if every call succeeds.
-        Some(profile) => match load_profile(api, profile, open.as_deref()).await {
+        Some(profile) => match load_profile(api, profile, open).await {
             Ok(loaded) => {
                 state.snapshot = Some(loaded.snapshot);
                 state.privacy = Some(loaded.privacy);
@@ -488,6 +521,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.notes = Some(loaded.notes);
                 if let Some(open) = &mut state.open_note {
                     open.page = loaded.page;
+                    open.history = loaded.history;
                 }
                 state.connected = true;
             }

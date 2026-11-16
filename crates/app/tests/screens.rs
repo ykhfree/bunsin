@@ -91,6 +91,13 @@ async fn fixture() -> (common::Rig, UiState) {
     common::ingest_note(&rig, "n2", true, "The team deploys on Thursdays at 3 pm.").await;
 
     let team = "Kim leads the platform team.\nLee reviews releases.\nPark owns the billing service.";
+    // An earlier text of the page, for the history.
+    let first = page(
+        "Team",
+        "Who does what",
+        "Kim leads the platform team.\nLee owns the billing service.",
+    );
+    rig.engine.set_wiki_page("kim", "team", first).await.unwrap();
     rig.engine
         .set_wiki_page("kim", "team", page("Team", "Who does what", team))
         .await
@@ -377,10 +384,33 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
             result: Err(SaveError::Conflict),
         }),
         note_commands: 1,
-        ..with_page
+        ..with_page.clone()
     };
     states.send(refused).unwrap();
     shot(&mut cx, window, dir, &name("notes-warnings"));
+
+    // The history of a page that the owner wrote twice, with the first revision chosen.
+    click(&mut cx, "note-load");
+    let open = UiCommand::OpenNote {
+        profile: "kim".into(),
+        slug: "team".into(),
+    };
+    let history = UiCommand::NoteHistory {
+        profile: "kim".into(),
+        show: true,
+    };
+    let mut with_history = state.clone();
+    rt.block_on(apply(&*rig.engine, &mut with_history, open));
+    rt.block_on(apply(&*rig.engine, &mut with_history, history));
+    states.send(with_history).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("note-heading", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
+    })
+    .unwrap();
+    click(&mut cx, "note-rev-0");
+    shot(&mut cx, window, dir, &name("notes-history"));
 
     // The permissions, with one rule changed and one new rule that has no text choice yet.
     states.send(state.clone()).unwrap();

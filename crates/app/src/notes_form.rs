@@ -3,7 +3,7 @@
 
 use crate::bridge::{NoteResult, SaveError, UiCommand, UiState};
 use crate::shell::{Shell, labelled, labelled_as};
-use crate::theme::{card, code_block, field, icon, notice, palette, quiet};
+use crate::theme::{card, code_block, field, icon, notice, palette, quiet, utc_minute};
 use bunsin_api::WikiPageUpdate;
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::InboxBody;
@@ -26,6 +26,8 @@ const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 const AGENT_PAGE: &str = "If you save a change, the page counts as written by you. Its sources stay.";
 const EMPTY: &str = "Select a page, or make a new one.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
+const OLD_LOADED: &str = "The old text is in the fields now. Save stores it as a new revision.";
+const OLD_BLOCKED: &str = "This page has changes that are not saved. Save or discard them first.";
 
 /// What the fields hold.
 enum Draft {
@@ -65,6 +67,8 @@ pub struct NotesForm {
     confirm_delete: bool,
     /// Where the user wanted to go while the fields held unsaved text.
     blocked: Option<Nav>,
+    /// The position in the history of the revision that the owner reads, if any.
+    revision_shown: Option<usize>,
 }
 
 impl NotesForm {
@@ -81,6 +85,7 @@ impl NotesForm {
             conflict: false,
             confirm_delete: false,
             blocked: None,
+            revision_shown: None,
         }
     }
 
@@ -135,6 +140,7 @@ impl NotesForm {
     fn close(&mut self, window: &mut Window, cx: &mut App) {
         self.set_fields("", &WikiText::default(), window, cx);
         self.draft = None;
+        self.revision_shown = None;
     }
 
     /// Takes a new state from the server. Typed text stays. The form loads the server's page
@@ -274,6 +280,129 @@ impl Shell {
             Some(page) => self.notes.load(&page, window, cx),
             None => self.notes.close(window, cx),
         }
+    }
+
+    /// Shows or hides the revisions of the open page.
+    fn toggle_history(&mut self) {
+        let Some(open) = &self.state.open_note else {
+            return;
+        };
+        let command = UiCommand::NoteHistory {
+            profile: open.profile.clone(),
+            show: open.history.is_none(),
+        };
+        self.notes.revision_shown = None;
+        self.send(command);
+    }
+
+    /// Puts the text of an old revision into the fields. The base stays the loaded page,
+    /// so Save checks the revision as for any edit. Typed text is not replaced.
+    fn load_revision(&mut self, text: WikiText, window: &mut Window, cx: &mut Context<Self>) {
+        let form = &mut self.notes;
+        if form.changed(cx) {
+            form.message = Some(OLD_BLOCKED.to_owned());
+            return;
+        }
+        for (input, value) in [(&form.title, &text.title), (&form.summary, &text.summary)] {
+            input.update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+        }
+        form.body.update(cx, |body, cx| body.set_value(text.body, window, cx));
+        form.message = Some(OLD_LOADED.to_owned());
+    }
+
+    /// The revisions of the open page, newest first, and the text of the one the owner chose.
+    /// Nothing here can be edited.
+    fn note_history(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let history = self.state.open_note.as_ref()?.history.as_ref()?;
+        let shown = self.notes.revision_shown.filter(|at| *at < history.len());
+        let theme = cx.theme();
+        let (selected_bg, radius) = (theme.muted, theme.radius);
+        let rows = history.iter().enumerate().rev().map(|(at, revision)| {
+            let text = match revision {
+                Some(page) => {
+                    let author = match page.author {
+                        WikiAuthor::Agent => "the agent",
+                        WikiAuthor::Owner => "you",
+                    };
+                    format!(
+                        "Revision {} · by {author} · {} UTC",
+                        page.revision,
+                        utc_minute(page.updated_at)
+                    )
+                }
+                None => "Deleted".to_owned(),
+            };
+            let chosen = shown == Some(at);
+            div()
+                .id(SharedString::from(format!("note-rev-{at}")))
+                .test_support()
+                .aria_label(text.clone())
+                .px_2()
+                .py_1()
+                .rounded(radius)
+                .text_sm()
+                .cursor_pointer()
+                .when(chosen, |row| row.bg(selected_bg))
+                .when(!chosen, |row| row.hover(|row| row.bg(selected_bg)))
+                .child(SharedString::from(text))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.notes.revision_shown = Some(at);
+                    cx.notify();
+                }))
+        });
+        let old = shown.and_then(|at| history[at].clone()).map(|page| {
+            let label = format!("{}\n{}\n\n{}", page.text.title, page.text.summary, page.text.body);
+            let text = page.text.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .id("note-rev-box")
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .child(labelled_as(
+                            "note-rev-text",
+                            label,
+                            code_block(cx)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(page.text.title))
+                                .child(quiet(page.text.summary, cx))
+                                .child(div().child(page.text.body)),
+                        )),
+                )
+                .child(
+                    Button::new("note-rev-load")
+                        .small()
+                        .outline()
+                        .self_start()
+                        .label("Put this text into the fields")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.load_revision(text.clone(), window, cx);
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(quiet("Revisions, newest first. Choose one to read it.", cx))
+                .child(
+                    div()
+                        .id("note-revisions")
+                        .max_h(px(160.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .children(rows),
+                )
+                .children(old),
+        )
     }
 
     /// The first click asks. The second click deletes the page.
@@ -494,6 +623,16 @@ impl Shell {
                         })),
                 );
         if page.is_some() {
+            let shown = self.state.open_note.as_ref().is_some_and(|open| open.history.is_some());
+            buttons = buttons.child(
+                Button::new("note-history")
+                    .ghost()
+                    .label(if shown { "Hide the history" } else { "History" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_history();
+                        cx.notify();
+                    })),
+            );
             let delete = Button::new("note-delete")
                 .label(if form.confirm_delete {
                     "Yes, delete the page"
@@ -620,6 +759,7 @@ impl Shell {
             ))
             .child(buttons)
             .child(message)
+            .children(self.note_history(cx))
             .children(sources);
         view.child(editor)
     }
