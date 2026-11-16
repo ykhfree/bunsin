@@ -1076,8 +1076,26 @@ impl Engine {
         let live = self.tools_report(profile, connector).await?.tools;
         // The owner approves what was on screen. A list that changed meanwhile is not approved.
         if pin(&live) != shown {
+            // The names tell the owner whether the server changed one tool or lists differently each time.
+            let diff = diff_pins(&shown, &live);
+            let part = |label: &str, names: &[String]| {
+                let more = names.len().saturating_sub(5);
+                let more = if more == 0 {
+                    String::new()
+                } else {
+                    format!(" and {more} more")
+                };
+                let names = names.iter().take(5).map(|name| format!("`{name}`")).collect::<Vec<_>>();
+                (!names.is_empty()).then(|| format!("{label}: {}{more}", names.join(", ")))
+            };
+            let parts = [
+                part("new", &diff.added),
+                part("gone", &diff.removed),
+                part("changed", &diff.changed),
+            ];
+            let parts = parts.into_iter().flatten().collect::<Vec<_>>().join("; ");
             return Err(ApiError::NotAllowed(format!(
-                "connector `{connector}` lists other tools now than the ones shown; list them again"
+                "connector `{connector}` lists other tools now than the ones shown ({parts}); list them again"
             )));
         }
         let store = self.store(profile)?;

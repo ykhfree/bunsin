@@ -13,9 +13,23 @@ pub struct ToolSpec {
 impl ToolSpec {
     /// Changes when the name, the description or the input schema changes.
     pub fn fingerprint(&self) -> String {
-        // serde_json keeps object keys sorted, so equal schemas give equal text.
-        let schema = serde_json::to_string(&self.input_schema).expect("a JSON value always serializes");
+        // The keys are sorted here. serde_json sorts them only in a build without its
+        // `preserve_order` feature, and a server may list the keys in another order each time.
+        let schema = serde_json::to_string(&sorted(&self.input_schema)).expect("a JSON value always serializes");
         crate::sha256_hex(format!("{}\0{}\0{}", self.name, self.description, schema).as_bytes())
+    }
+}
+
+/// A copy of `value` with the keys of every object in sorted order.
+fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(keys.into_iter().map(|key| (key.clone(), sorted(&map[key]))).collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
     }
 }
 
@@ -73,6 +87,34 @@ mod tests {
             description: description.into(),
             input_schema: json!({"type": "object"}),
         }
+    }
+
+    /// This test can fail only in a build where serde_json keeps the order of keys
+    /// (the feature `preserve_order`, which the window's libraries turn on).
+    #[test]
+    fn the_order_of_schema_keys_does_not_change_the_fingerprint() {
+        let with = |schema: &str| ToolSpec {
+            input_schema: serde_json::from_str(schema).unwrap(),
+            ..spec("search", "Search messages")
+        };
+        let one = with(
+            r#"{"type":"object","properties":{"query":{"type":"string","description":"q"},"limit":{"type":"integer"}},"required":["query"]}"#,
+        );
+        let other = with(
+            r#"{"required":["query"],"properties":{"limit":{"type":"integer"},"query":{"description":"q","type":"string"}},"type":"object"}"#,
+        );
+        assert_eq!(one.fingerprint(), other.fingerprint());
+        assert!(diff_pins(&pin(std::slice::from_ref(&one)), &[other]).is_clean());
+        // The order inside a list has a meaning, and a changed value is a change.
+        let reordered_list = with(r#"{"type":"object","enum":["b","a"]}"#);
+        assert_ne!(
+            with(r#"{"type":"object","enum":["a","b"]}"#).fingerprint(),
+            reordered_list.fingerprint()
+        );
+        let changed = with(
+            r#"{"type":"object","properties":{"query":{"type":"string","description":"q"},"limit":{"type":"string"}},"required":["query"]}"#,
+        );
+        assert_ne!(one.fingerprint(), changed.fingerprint());
     }
 
     #[test]
