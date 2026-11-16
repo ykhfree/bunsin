@@ -4,6 +4,7 @@
 
 mod autonomy;
 mod candidates;
+mod coding;
 mod connections;
 mod corrections;
 mod eval;
@@ -30,6 +31,7 @@ use bunsin_api::{
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::coding::is_coding_tool;
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
@@ -38,7 +40,7 @@ use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::poll::PollConfig;
-use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
 use bunsin_core::records::{CorrectionRecord, DecisionKind, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
@@ -119,6 +121,11 @@ pub trait Backends: Send + Sync {
     fn has_server_secret(&self, _profile: &str, _key: &str) -> bool {
         false
     }
+
+    /// The runner of coding jobs. Only a server whose operator allows coding has one.
+    fn coder(&self) -> Result<Arc<dyn Coder>, String> {
+        Err("this server does not run coding jobs: its operator did not start it with --allow-coding".into())
+    }
 }
 
 /// Returns the current time in Unix seconds.
@@ -138,6 +145,7 @@ pub enum OpenError {
 
 /// What the handling of one request needs from a profile.
 struct Ctx {
+    profile: String,
     store: Arc<ProfileStore>,
     config: ProfileConfig,
     runtime: Arc<Runtime>,
@@ -313,6 +321,7 @@ impl Engine {
             pass.check().map_err(ApiError::Invalid)?;
         }
         config.notes.check().map_err(ApiError::Invalid)?;
+        Self::check_coding_rules(config)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -367,6 +376,7 @@ impl Engine {
         let redactor = Self::redactor(&config)?;
         let runtime = self.runtime(profile, &config).await?;
         Ok(Ctx {
+            profile: profile.to_owned(),
             store,
             config,
             runtime,
@@ -399,6 +409,7 @@ impl Engine {
                     input_schema: spec.input_schema.clone(),
                 })
             })
+            .chain(Self::coding_hint(config))
             .collect()
     }
 
@@ -435,6 +446,7 @@ impl Engine {
             config,
             runtime,
             redactor,
+            ..
         } = ctx;
         let mut tools = Self::tool_hints(config);
         // Replay gets no notes and no corrections: they hold facts from after the replayed event,
@@ -639,6 +651,8 @@ impl Engine {
         let held = store.is_held(tool_id).map_err(store_error)?;
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
+            // The specification of a built-in coding tool is in the code, so it cannot change.
+            Some(_) if is_coding_tool(tool_id) => true,
             Some((connector, tool)) if config.policy.rules.contains_key(tool_id) => {
                 match (config.approved_tools.get(connector), runtime.connector(connector)) {
                     (Some(approved), Ok(live)) => match live.list_tools().await {
@@ -673,6 +687,13 @@ impl Engine {
             key,
             json!({"inbox_id": item.id, "tool": tool_id}),
         )?;
+        // A coding job runs on the server in the background. Its end is recorded later.
+        if is_coding_tool(tool_id) {
+            return match self.start_coding(ctx, item, args) {
+                Ok(()) => Ok(Outcome::Started { inbox_id: item.id }),
+                Err(error) => self.execution_failed(ctx, item, tool_id, error),
+            };
+        }
         let result = match split_tool_id(tool_id) {
             Some((connector, tool)) => match runtime.connector(connector) {
                 Ok(connector) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),
@@ -692,22 +713,25 @@ impl Engine {
                 self.audit(store, "executed", key, json!({"inbox_id": item.id, "tool": tool_id}))?;
                 Ok(Outcome::Executed { inbox_id: item.id })
             }
-            Err(error) => {
-                store
-                    .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
-                    .map_err(store_error)?;
-                self.audit(
-                    store,
-                    "execution_failed",
-                    key,
-                    json!({"inbox_id": item.id, "tool": tool_id, "error": error}),
-                )?;
-                Ok(Outcome::ExecutionFailed {
-                    inbox_id: item.id,
-                    error,
-                })
-            }
+            Err(error) => self.execution_failed(ctx, item, tool_id, error),
         }
+    }
+
+    /// Ends an item whose call failed.
+    fn execution_failed(&self, ctx: &Ctx, item: &InboxItem, tool_id: &str, error: String) -> ApiResult<Outcome> {
+        ctx.store
+            .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
+            .map_err(store_error)?;
+        self.audit(
+            &ctx.store,
+            "execution_failed",
+            Some(&item.event_key),
+            json!({"inbox_id": item.id, "tool": tool_id, "error": error}),
+        )?;
+        Ok(Outcome::ExecutionFailed {
+            inbox_id: item.id,
+            error,
+        })
     }
 
     async fn handle_tool_call(

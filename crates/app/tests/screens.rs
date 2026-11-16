@@ -790,6 +790,65 @@ fn draw(
     })
     .unwrap();
     shot(&mut cx, window, dir, &name("settings-secrets"));
+
+    // A coding call that waits for the owner, and the result of a job that ended. It comes last,
+    // because its rows would change the inbox of the other pictures.
+    let coding = rt.block_on(coding_state(rig));
+    states.send(coding).unwrap();
+    click(&mut cx, "tab-inbox");
+    shot(&mut cx, window, dir, &name("inbox-coding"));
+}
+
+/// Writes a waiting coding call and the draft of an ended job beside the engine, once, and loads the state.
+async fn coding_state(rig: &common::Rig) -> UiState {
+    use bunsin_core::approval::ApprovalState;
+    use bunsin_core::coding::{CodingOutcome, TestOutcome, report_text};
+    use bunsin_core::records::InboxBody;
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let written = store
+        .list_inbox(200)
+        .unwrap()
+        .iter()
+        .any(|item| matches!(&item.body, InboxBody::ToolCall { tool, .. } if tool == "bunsin.coding/start"));
+    if !written {
+        let outcome = CodingOutcome {
+            branch: "agent/b31-kim".into(),
+            base_commit: "4f2a9c81d7e3b6a0c5d9e8f7a6b5c4d3e2f1a0b9".into(),
+            head_commit: "9b8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0c".into(),
+            diff_stat: " src/login.rs       | 12 ++++++++----\n tests/login.rs     | 18 ++++++++++++++++++\n 2 files changed, 26 insertions(+), 4 deletions(-)".into(),
+            test: Some(TestOutcome {
+                command: vec!["/usr/bin/make".into(), "test".into()],
+                exit_code: Some(0),
+                timed_out: false,
+                output: "ok".into(),
+            }),
+            exit_code: Some(0),
+            signal: None,
+            timed_out: false,
+            summary: None,
+            transcript: String::new(),
+        };
+        let done = InboxBody::Escalation {
+            summary: report_text("b31-kim", "web-app", &Ok(outcome)),
+        };
+        let rationale = "a coding job ended; review its branch and merge it yourself";
+        store
+            .add_inbox_item("code-1", &done, rationale, &[], ApprovalState::Draft, 1_794_821_000)
+            .unwrap();
+        let args = json!({"repo": "web-app", "base_ref": "main",
+            "instructions": "The login page shows no error when the password is wrong. Show the server's message under the field and add a test."});
+        let call = InboxBody::ToolCall {
+            tool: "bunsin.coding/start".into(),
+            args: args.as_object().unwrap().clone(),
+        };
+        let why = "Lee reported that a wrong password gives no message";
+        store
+            .add_inbox_item("code-2", &call, why, &[], ApprovalState::Pending, 1_794_821_300)
+            .unwrap();
+    }
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    state
 }
 
 fn main() {

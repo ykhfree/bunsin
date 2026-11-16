@@ -10,9 +10,10 @@ use crate::permissions_form::PermissionsForm;
 use crate::polls_form::PollsForm;
 use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
-use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
+use crate::theme::{card, code_block, icon, notice, palette, quiet, state_mark, utc_minute};
 use bunsin_api::{Autonomy, Resolution};
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::coding::is_coding_tool;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::ActiveTheme;
@@ -148,6 +149,21 @@ pub fn reportable(item: &InboxItem, autonomy: Option<&Autonomy>) -> bool {
 
 /// What the user must read before deciding. A tool call shows every argument,
 /// so the user approves exactly what will run, not only its message text.
+/// What the owner must know about a coding call: what an approval starts, or that its job runs.
+pub fn coding_note(item: &InboxItem) -> Option<&'static str> {
+    match &item.body {
+        InboxBody::ToolCall { tool, .. } if is_coding_tool(tool) => match item.state {
+            ApprovalState::Pending => Some(
+                "Approving starts a coding job on the server. It works on a new branch of the repository. \
+                 You review the branch and merge it yourself; Bunsin never merges.",
+            ),
+            ApprovalState::Executing => Some("The coding job runs on the server. Its result comes as a new item."),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn inbox_detail(item: &InboxItem) -> String {
     match &item.body {
         InboxBody::ToolCall { args, .. } => {
@@ -449,6 +465,13 @@ impl Shell {
                                 .children(lines),
                         ),
                 )
+            }))
+            .children(coding_note(item).map(|note| {
+                let text = div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(labelled(format!("coding-note-{id}"), note));
+                notice(palette(cx).waiting, cx).child(text)
             }));
         // While the owner edits the text, the editor has its own buttons.
         if let Some(editor) = self.draft_editor_section(id, cx) {
@@ -461,8 +484,9 @@ impl Shell {
                     Button::new(SharedString::from(format!("approve-{id}")))
                         .primary()
                         // A note is stored. Nothing runs on another system.
-                        .label(match item.body {
+                        .label(match &item.body {
                             InboxBody::WikiChange { .. } => "Approve and keep",
+                            InboxBody::ToolCall { tool, .. } if is_coding_tool(tool) => "Approve and start the job",
                             _ => "Approve and run",
                         })
                         .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
@@ -1030,6 +1054,24 @@ mod tests {
             inbox_basis(&with_reads).as_deref(),
             Some("Read: slack/search {\"query\":\"deploy date\"}\nRead: jira/get_issue {\"key\":\"PRJ-1\"}")
         );
+    }
+
+    #[test]
+    fn a_coding_call_says_what_an_approval_starts_and_that_it_never_merges() {
+        let mut job = item(InboxBody::ToolCall {
+            tool: "bunsin.coding/start".into(),
+            args: serde_json::Map::new(),
+        });
+        assert!(coding_note(&job).unwrap().contains("never merges"));
+        job.state = ApprovalState::Executing;
+        assert!(coding_note(&job).unwrap().contains("runs on the server"));
+        job.state = ApprovalState::Executed;
+        assert_eq!(coding_note(&job), None);
+        let post = item(InboxBody::ToolCall {
+            tool: "slack/post".into(),
+            args: serde_json::Map::new(),
+        });
+        assert_eq!(coding_note(&post), None);
     }
 
     #[test]

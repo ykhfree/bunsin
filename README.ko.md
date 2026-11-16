@@ -576,6 +576,36 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 
 아직 없는 것: 출처의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
 
+### 코딩 위임
+
+agent는 코드 변경을 코딩 agent CLI(Claude Code, Codex, 사용자가 지정한 명령)에 맡길 수 있습니다.
+agent는 코드를 직접 쓰지 않고, 병합하지 않습니다. 설정 파일에서 켭니다.
+
+```json
+"coding": {
+  "backend": "claude_code",
+  "program": "/opt/homebrew/bin/claude",
+  "timeout_secs": 1800,
+  "repos": {"web-app": {"path": "/srv/code/web-app", "test_command": ["/usr/bin/make", "test"]}}
+},
+"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
+```
+
+- `backend`는 `claude_code`, `codex`, `command` 중 하나입니다. `args`는 `command`만 받습니다.
+  프로그램 경로는 절대 경로여야 합니다. 지시문은 stdin으로 프로그램에 갑니다.
+- agent는 이 설정과 규칙이 모두 있을 때만 내장 도구 `bunsin.coding/start`를 봅니다.
+  agent는 고정된 설명과 저장소 이름만 보고, 경로, 프로그램, 테스트 명령은 보지 않습니다.
+  agent는 저장소, base(기본값 `HEAD`), 지시문을 고릅니다.
+- **모든 작업은 사용자를 기다립니다.** delete처럼 단계가 `autonomous`여도 그렇습니다.
+  규칙은 `"outgoing_text": "none"`인 `write`여야 합니다. 승인함 카드는 "Approve and start the job"을 보여 줍니다.
+- 승인하면 서버가 작업을 백그라운드에서 실행합니다. git worktree와 브랜치 `agent/b<항목>-<프로필>`을 만들고,
+  코딩 agent를 실행한 뒤 테스트 명령을 실행합니다. 변경 요약, 테스트 출력, 기록 파일은 개인정보 필터를 거쳐 산출물로 남습니다.
+- 작업이 끝나면 호출은 완료(코딩 agent가 종료 코드 0으로 끝남)나 실패가 됩니다.
+  승인함의 새 항목이 브랜치, 변경, 테스트 결과를 알려 줍니다. **브랜치를 검토하고 직접 병합하세요.**
+- 작업 중에 서버가 멈추면 호출은 다른 끊긴 호출처럼 `unknown`이 됩니다.
+
+![승인함의 코딩 호출과 작업 결과](docs/screens/inbox-coding-light.png)
+
 ### agent와 일하기
 
 ```sh

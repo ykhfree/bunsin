@@ -4,6 +4,7 @@ pub mod http;
 
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::coding::CodingConfig;
 use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::lint::LintFinding;
@@ -56,6 +57,9 @@ pub struct ProfileConfig {
     /// The checks of the agent's notes. Everything is off by default.
     #[serde(default)]
     pub notes: NotesConfig,
+    /// Coding delegation. `None`: the agent cannot start a coding job.
+    #[serde(default)]
+    pub coding: Option<CodingConfig>,
 }
 
 impl ProfileConfig {
@@ -77,6 +81,7 @@ impl ProfileConfig {
             autonomy: None,
             eval: EvalConfig::default(),
             notes: NotesConfig::default(),
+            coding: None,
         }
     }
 }
@@ -100,6 +105,10 @@ pub enum Outcome {
         inbox_id: i64,
     },
     Executed {
+        inbox_id: i64,
+    },
+    /// A coding job started on the server. Its result comes later as a draft in the inbox.
+    Started {
         inbox_id: i64,
     },
     /// The tool call ran and failed.

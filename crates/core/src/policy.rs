@@ -148,8 +148,9 @@ impl Policy {
             (Tier::Observe, _) => Decision::RecordOnly,
             (Tier::Draft, _) => Decision::DraftOnly,
             (Tier::Approve, _) => Decision::NeedsApproval,
-            // A delete is never autonomous.
+            // A delete is never autonomous, and neither is a coding job.
             (Tier::Autonomous, ToolClass::Delete) => Decision::NeedsApproval,
+            (Tier::Autonomous, _) if crate::coding::is_coding_tool(tool_id) => Decision::NeedsApproval,
             (Tier::Autonomous, _) if held => Decision::NeedsApproval,
             (Tier::Autonomous, _) => Decision::Execute,
         }
@@ -240,6 +241,22 @@ mod tests {
                 "{class:?} {tier:?} pin={pin_holds} kill={kill_switch} held={held}"
             );
         }
+    }
+
+    #[test]
+    fn a_coding_job_always_asks_the_owner() {
+        let p = policy(&[("bunsin.coding/start", ToolClass::Write, Tier::Autonomous)]);
+        assert_eq!(
+            p.decide("bunsin.coding/start", true, false, false),
+            Decision::NeedsApproval
+        );
+        assert_eq!(
+            p.decide("bunsin.coding/start", true, true, false),
+            Decision::Deny(DenyReason::KillSwitch)
+        );
+        // The same tool name under a connector is no coding tool.
+        let p = policy(&[("ci/start", ToolClass::Write, Tier::Autonomous)]);
+        assert_eq!(p.decide("ci/start", true, false, false), Decision::Execute);
     }
 
     #[test]

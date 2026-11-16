@@ -990,3 +990,62 @@ fn a_call_that_ran_without_asking_can_be_reported_once(cx: &mut TestAppContext) 
     });
     assert!(rt.block_on(rig.engine.autonomy("kim")).unwrap().tools[0].held);
 }
+
+#[gpui_kit::test]
+fn a_coding_call_and_the_result_of_its_job_show_in_the_inbox(cx: &mut TestAppContext) {
+    use bunsin_core::approval::ApprovalState;
+    use bunsin_core::records::InboxBody;
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // The rows are written beside the engine: the test server runs no coding job.
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let args = serde_json::json!({"repo": "app", "instructions": "Fix the login bug."});
+    let call = InboxBody::ToolCall {
+        tool: "bunsin.coding/start".into(),
+        args: args.as_object().unwrap().clone(),
+    };
+    let pending = store
+        .add_inbox_item(
+            "k-code",
+            &call,
+            "Lee reported a bug",
+            &[],
+            ApprovalState::Pending,
+            1_000,
+        )
+        .unwrap()
+        .id;
+    let summary = "The coding job b7-kim in `app` ended with exit code 0. Branch `agent/b7-kim`: base aaa, head bbb.\n\
+                   Review the branch and merge it yourself. Bunsin never merges.";
+    let result = InboxBody::Escalation {
+        summary: summary.into(),
+    };
+    let rationale = "a coding job ended; review its branch and merge it yourself";
+    let draft = store
+        .add_inbox_item("k-code", &result, rationale, &[], ApprovalState::Draft, 1_001)
+        .unwrap()
+        .id;
+    let (window, _shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        let note = window
+            .find(format!("coding-note-{pending}"))
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            note.contains("starts a coding job") && note.contains("never merges"),
+            "{note}"
+        );
+        let detail = window
+            .find(format!("detail-{draft}"))
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            detail.contains("Branch `agent/b7-kim`") && detail.contains("merge it yourself"),
+            "{detail}"
+        );
+        // A post has no coding note.
+        assert!(window.try_find("coding-note-1").is_none());
+    });
+}

@@ -1,11 +1,9 @@
 //! When to suggest that a tool run without asking. The owner raises the step; the engine never does.
 
+use crate::coding::is_coding_tool;
 use crate::policy::{Tier, ToolClass, ToolRule};
 use crate::records::DecisionCounts;
 use serde::{Deserialize, Serialize};
-
-/// The tool IDs of the built-in coding tools start with this. A coding job always asks the owner.
-pub const CODING_TOOL_PREFIX: &str = "bunsin.coding/";
 
 /// The owner's thresholds for a suggestion. Without them, no tool is suggested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +45,7 @@ pub fn suggest(
     };
     rule.class == ToolClass::Write
         && rule.tier == Tier::Approve
-        && !tool_id.starts_with(CODING_TOOL_PREFIX)
+        && !is_coding_tool(tool_id)
         && !held
         && counts.reviewed() >= thresholds.min_reviewed
         && counts

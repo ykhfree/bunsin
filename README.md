@@ -386,7 +386,7 @@ The Permissions view shows the counts under each tool.
   A write tool at `approve` with at least `min_reviewed` decisions in the last `window_days`
   days, of which at least `min_unchanged_percent` % were approved unchanged, gets the badge
   "Suggested: Autonomous". The server never raises a step. You raise it and press Save.
-  A delete tool is never suggested, and a coding tool will not be either.
+  A delete tool and the coding tool are never suggested.
 - **Holds.** If you dismiss a waiting call of a tool at `autonomous`, or press "Report a problem"
   on a call that ran without asking, the server holds the tool at approval: each of its calls
   waits for you, whatever its step says. A call that the server approved by itself but did
@@ -659,6 +659,38 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 - In the window, the **Read into the notes** card of the Notes view does the same.
 
 Not built yet: a check of a page when you lose access to its source.
+
+### Delegate coding
+
+The agent can hand a code change to a coding agent CLI (Claude Code, Codex, or a command you
+name). It never writes code itself and never merges. Set it up in the settings file:
+
+```json
+"coding": {
+  "backend": "claude_code",
+  "program": "/opt/homebrew/bin/claude",
+  "timeout_secs": 1800,
+  "repos": {"web-app": {"path": "/srv/code/web-app", "test_command": ["/usr/bin/make", "test"]}}
+},
+"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
+```
+
+- `backend` is `claude_code`, `codex` or `command`. Only `command` takes `args`. The program
+  path must be absolute. The instructions go to the program on stdin.
+- The agent sees the built-in tool `bunsin.coding/start` only with these settings and the rule.
+  It sees a fixed description and the repository names, never a path, the program or the test
+  command. It chooses the repository, a base (default `HEAD`) and the instructions.
+- **Every job waits for you**, also with the tier `autonomous`, like a delete. The rule must be
+  a `write` with `"outgoing_text": "none"`. The inbox card says "Approve and start the job".
+- After approval the server runs the job in the background. It makes a git worktree and the
+  branch `agent/b<item>-<profile>`, runs the coding agent and then the test command, and keeps
+  the diff summary, the test output and the transcript as artifacts, after the privacy filter.
+- When the job ends, the call becomes done (the coding agent ended with exit code 0) or failed,
+  and a new item in the inbox names the branch, the changes and the test result. **Review the
+  branch and merge it yourself.**
+- If the server stops while a job runs, the call becomes `unknown`, like any cut call.
+
+![A coding call and the result of a job in the inbox](docs/screens/inbox-coding-light.png)
 
 ### Work with the agent
 

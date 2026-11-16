@@ -1,5 +1,6 @@
 //! Interfaces that the engine calls. Implementations live in other crates.
 
+use crate::coding::{CodingJobSpec, CodingReport};
 use crate::llm::{CompletionRequest, CompletionResponse, LlmError};
 use crate::tool::ToolSpec;
 use serde_json::{Map, Value};
@@ -28,4 +29,12 @@ pub trait Connector: Send + Sync {
     fn name(&self) -> &str;
     fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolSpec>, ConnectorError>>;
     fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>>;
+}
+
+/// Runs coding jobs on the server. A job runs in the background: `start` returns at once.
+pub trait Coder: Send + Sync {
+    /// Starts a job. The error says why it did not start.
+    fn start(&self, spec: CodingJobSpec) -> Result<(), String>;
+    /// The reports of the jobs that ended since the last call. Each report is given once.
+    fn finished(&self) -> Vec<CodingReport>;
 }
