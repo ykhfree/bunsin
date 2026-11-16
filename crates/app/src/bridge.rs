@@ -4,8 +4,8 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
+    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest,
+    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
     ProfileSnapshot, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::poll::PollConfig;
@@ -31,6 +31,13 @@ pub enum UiCommand {
     Reject(i64),
     /// Resolves an item whose call a stop cut. A retry runs a copy of the call.
     ResolveUnknown(i64, Resolution),
+    /// Reports a problem with a call that ran without asking. Its tool is then held at approval.
+    ReportAutonomous(i64),
+    /// Clears the hold of a tool.
+    ClearAutonomyHold {
+        profile: String,
+        tool: String,
+    },
     SetKillSwitch(bool),
     SavePrivacy {
         profile: String,
@@ -205,6 +212,8 @@ pub struct UiState {
     pub permissions_result: Option<Result<(), SaveError>>,
     /// How many `SavePermissions` commands the bridge has run.
     pub permission_saves: u64,
+    /// The decisions about each write or delete tool, its hold and its suggestion, as the server has them.
+    pub autonomy: Option<Autonomy>,
     /// The principles of the selected profile, as the server has them.
     pub principles: Option<Vec<String>>,
     /// The result of the last command, if it was `SavePrinciples`. A failed save is shown here, not in `error`.
@@ -405,6 +414,9 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.note_result = Some(NoteResult::Deleted { slug, result });
             Ok(())
         }
+        (UiCommand::ClearAutonomyHold { profile, tool }, _) => {
+            for_profile(selected, &profile, api.clear_autonomy_hold(&profile, &tool)).await
+        }
         (UiCommand::ApproveEdited { profile, id, edit }, _) => {
             approved(for_profile(selected, &profile, api.approve(&profile, id, Some(edit))).await)
         }
@@ -422,6 +434,9 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
                 Ok(None) => Ok(()),
                 Err(error) => Err(error.to_string()),
             }
+        }
+        (UiCommand::ReportAutonomous(id), Some(profile)) => {
+            api.report_autonomous(profile, id).await.map_err(|e| e.to_string())
         }
         (UiCommand::SetKillSwitch(on), Some(profile)) => api
             .set_kill_switch(profile, on)
@@ -450,6 +465,7 @@ struct Loaded {
     snapshot: ProfileSnapshot,
     privacy: PrivacyConfig,
     permissions: Permissions,
+    autonomy: Autonomy,
     principles: Vec<String>,
     polls: Vec<PollConfig>,
     connections: Connections,
@@ -466,6 +482,7 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bo
         snapshot: api.snapshot(profile).await?,
         privacy: api.privacy(profile).await?,
         permissions: api.permissions(profile).await?,
+        autonomy: api.autonomy(profile).await?,
         principles: api.principles(profile).await?,
         polls: api.polls(profile).await?,
         connections: api.connections(profile).await?,
@@ -490,6 +507,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.snapshot = None;
     state.privacy = None;
     state.permissions = None;
+    state.autonomy = None;
     state.principles = None;
     state.polls = None;
     state.connections = None;
@@ -524,6 +542,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.snapshot = Some(loaded.snapshot);
                 state.privacy = Some(loaded.privacy);
                 state.permissions = Some(loaded.permissions);
+                state.autonomy = Some(loaded.autonomy);
                 state.principles = Some(loaded.principles);
                 state.polls = Some(loaded.polls);
                 state.connections = Some(loaded.connections);

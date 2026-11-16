@@ -30,6 +30,9 @@
 //! | POST | `/v1/profiles/{p}/resolve-unknown` | `ResolveUnknownBody` | `Outcome or null` |
 //! | POST | `/v1/profiles/{p}/corrections` | | `[CorrectionRecord]` |
 //! | POST | `/v1/profiles/{p}/retire-correction` | `RetireCorrectionBody` | |
+//! | POST | `/v1/profiles/{p}/autonomy` | | `Autonomy` |
+//! | POST | `/v1/profiles/{p}/report-autonomous` | `ReportAutonomousBody` | |
+//! | POST | `/v1/profiles/{p}/clear-autonomy-hold` | `ClearAutonomyHoldBody` | |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
@@ -80,6 +83,17 @@ pub struct ResolveUnknownBody {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetireCorrectionBody {
     pub id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportAutonomousBody {
+    pub inbox_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearAutonomyHoldBody {
+    /// `<connector>/<tool>`.
+    pub tool: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

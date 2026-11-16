@@ -294,6 +294,33 @@ Save는 표 전체를 보내고, 화면은 저장 전에 바뀌는 규칙을 하
 - 규칙을 바꾸면 승인함에서 이미 기다리는 항목에도 적용됩니다. 서버는 승인하는 시점의 규칙에 따라 AI 표시를 붙입니다.
 - poll이 쓰는 규칙은 지울 수 없습니다. 화면이 서버의 거부 이유를 보여 줍니다.
 
+#### 근거를 보고 단계를 올리고, 문제가 난 도구는 보류하기
+
+서버는 write와 delete 도구마다 사용자의 결정을 셉니다. 고치지 않고 승인한 호출, 고쳐서 승인한 호출, 거부한 호출,
+묻지 않고 실행된 호출(그중 실패한 호출)입니다. Permissions 화면은 도구마다 그 개수를 보여 줍니다.
+
+- **제안.** 설정 파일에 기준을 적으십시오. 기준이 없으면 아무것도 제안하지 않습니다.
+
+  ```json
+  { "autonomy": { "min_reviewed": 20, "min_unchanged_percent": 90, "window_days": 30 } }
+  ```
+
+  `approve` 단계의 write 도구가 최근 `window_days`일 동안 결정을 `min_reviewed`개 이상 받고,
+  그중 `min_unchanged_percent`% 이상을 고치지 않고 승인받았으면 "Suggested: Autonomous" 표시가 붙습니다.
+  서버는 단계를 올리지 않습니다. 사용자가 단계를 올리고 Save를 누릅니다.
+  delete 도구는 제안하지 않습니다. 코딩 도구도 제안하지 않습니다.
+- **보류.** `autonomous` 단계 도구의 대기 호출을 거부하거나, 묻지 않고 실행된 호출에서 "Report a problem"을 누르면
+  서버가 그 도구를 승인 단계로 보류합니다. 그러면 단계와 상관없이 그 도구의 호출마다 사용자를 기다립니다.
+  서버가 스스로 승인했지만 멈추기 전에 실행하지 못한 호출도 기다립니다.
+  보류는 설정과 따로 저장됩니다. 그래서 설정 파일이나 "Save anyway"로는 풀리지 않습니다.
+  Permissions 화면의 "Clear the hold"나 `bunsind clear-autonomy-hold`만 보류를 풉니다. 보류가 시작되면 그 도구의 개수를 처음부터 다시 셉니다.
+
+```sh
+bunsind autonomy kim                          # 도구마다 한 줄: 개수, 보류, 제안
+bunsind report-autonomous kim 42              # 묻지 않고 실행된 승인함 항목 42를 신고
+bunsind clear-autonomy-hold kim slack/post_message
+```
+
 명령줄에서는 규칙을 하나씩 바꿉니다.
 
 ```sh
@@ -526,6 +553,8 @@ token을 macOS Keychain에 저장합니다.
 "Approve and run with this text"는 새 글과 선택 사항인 이유를 보내고, 호출이 실행됩니다.
 AI 표시는 서버가 수정 뒤에 붙입니다. 그래서 입력란에는 표시 없는 글이 있고, 표시는 입력란 아래에 고정된 글로 보입니다.
 글을 바꾸지 않으면 그냥 승인합니다. 글을 보내지 않는 규칙의 호출에는 Edit 버튼이 없습니다.
+
+**묻지 않고 실행된 호출**에는 "Report a problem" 버튼이 있습니다. 신고하면 그 도구가 승인 단계로 보류됩니다([권한 규칙](#권한-규칙)).
 
 **멈춤으로 끊긴 호출.** `unknown` 항목에는 버튼이 세 개 있습니다: "It ran: mark done", "It did not run: drop", "Run again".
 버튼 아래의 안내문은 다시 실행하면 호출이 두 번 갈 수 있다고 알립니다.

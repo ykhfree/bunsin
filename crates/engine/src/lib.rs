@@ -17,9 +17,9 @@ pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected,
+    LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
@@ -295,6 +295,9 @@ impl Engine {
             rule.outgoing_text
                 .check()
                 .map_err(|e| ApiError::Invalid(format!("the rule of `{tool_id}`: {e}")))?;
+        }
+        if let Some(thresholds) = &config.autonomy {
+            thresholds.check().map_err(ApiError::Invalid)?;
         }
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
@@ -608,6 +611,7 @@ impl Engine {
             store, config, runtime, ..
         } = ctx;
         let kill_switch = store.kill_switch().map_err(store_error)?;
+        let held = store.is_held(tool_id).map_err(store_error)?;
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
             Some((connector, tool)) if config.policy.rules.contains_key(tool_id) => {
@@ -621,7 +625,7 @@ impl Engine {
             }
             _ => false,
         };
-        Ok(config.policy.decide(tool_id, pin_ok, kill_switch))
+        Ok(config.policy.decide(tool_id, pin_ok, kill_switch, held))
     }
 
     /// Runs an approved item. Only the caller that moves it to `Executing` runs it.
@@ -1316,6 +1320,18 @@ impl EngineApi for Engine {
         resolution: Resolution,
     ) -> BoxFuture<'a, ApiResult<Option<Outcome>>> {
         Box::pin(self.resolve_unknown_item(profile, inbox_id, resolution))
+    }
+
+    fn autonomy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Autonomy>> {
+        Box::pin(async move { self.read_autonomy(profile) })
+    }
+
+    fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.report(profile, inbox_id) })
+    }
+
+    fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.clear_hold(profile, tool) })
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {

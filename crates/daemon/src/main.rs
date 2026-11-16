@@ -400,6 +400,29 @@ enum Command {
         profile: String,
         id: i64,
     },
+    /// Show, for each write or delete tool, how often you approved, edited or dismissed its calls,
+    /// how often it ran without asking, whether it is held, and whether it is suggested for autonomous.
+    Autonomy {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Report a problem with a call that ran without asking. Its tool then asks you for every call
+    /// until you clear the hold.
+    ReportAutonomous {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        inbox_id: i64,
+    },
+    /// Clear the hold of a tool. Its calls then follow its step again.
+    ClearAutonomyHold {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>
+        tool: String,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -440,6 +463,43 @@ fn correction_text(record: &bunsin_core::records::CorrectionRecord) -> String {
         text.push_str(&format!("  {label}: {}\n", value.replace('\n', "\n    ")));
     }
     text
+}
+
+/// The autonomy counts as a header line and one tab-separated line per tool.
+fn autonomy_lines(autonomy: &bunsin_api::Autonomy) -> Vec<String> {
+    let thresholds = match &autonomy.thresholds {
+        None => "thresholds: none, so no tool is suggested; the counts cover all days".to_owned(),
+        Some(t) => format!(
+            "thresholds: {} reviewed, {}% unchanged, last {} days",
+            t.min_reviewed, t.min_unchanged_percent, t.window_days
+        ),
+    };
+    let mut lines = vec![
+        thresholds,
+        "tool\treviewed\tunchanged\tedited\trejected\tautonomous\tfailed\tstate".to_owned(),
+    ];
+    for tool in &autonomy.tools {
+        let c = &tool.counts;
+        let percent = c
+            .unchanged_percent()
+            .map_or_else(|| "-".to_owned(), |percent| format!("{percent}%"));
+        let state = match (tool.held, tool.suggested) {
+            (true, _) => "held",
+            (false, true) => "suggested",
+            (false, false) => "-",
+        };
+        lines.push(format!(
+            "{}\t{}\t{} ({percent})\t{}\t{}\t{}\t{}\t{state}",
+            tool.tool,
+            c.reviewed(),
+            c.approved,
+            c.edited,
+            c.rejected,
+            c.autonomous,
+            c.autonomous_failed
+        ));
+    }
+    lines
 }
 
 fn json<T: serde::Serialize>(value: &T) -> String {
@@ -974,6 +1034,29 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::RetireCorrection { remote, profile, id } => {
             connect(&remote)?.retire_correction(&profile, id).await.map_err(text)?;
             println!("correction {id} retired");
+        }
+        Command::Autonomy { remote, profile } => {
+            for line in autonomy_lines(&connect(&remote)?.autonomy(&profile).await.map_err(text)?) {
+                println!("{line}");
+            }
+        }
+        Command::ReportAutonomous {
+            remote,
+            profile,
+            inbox_id,
+        } => {
+            connect(&remote)?
+                .report_autonomous(&profile, inbox_id)
+                .await
+                .map_err(text)?;
+            println!("item {inbox_id} reported; its tool asks you until you clear the hold");
+        }
+        Command::ClearAutonomyHold { remote, profile, tool } => {
+            connect(&remote)?
+                .clear_autonomy_hold(&profile, &tool)
+                .await
+                .map_err(text)?;
+            println!("hold of {tool} cleared");
         }
         Command::Reject {
             remote,

@@ -487,3 +487,70 @@ fn the_owner_lists_and_retires_corrections() {
     let error = stderr_of_failure(server.run(&kim, &["retire-correction", "kim", &id]), "a second retire");
     assert!(error.contains("already retired"), "{error}");
 }
+
+#[test]
+fn the_owner_reports_an_autonomous_call_and_clears_the_hold() {
+    use bunsin_core::approval::ApprovalState;
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    // A call that the policy ran without the owner.
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let body = bunsin_core::records::InboxBody::ToolCall {
+        tool: "slack/post".into(),
+        args: serde_json::json!({"text": "hi"}).as_object().unwrap().clone(),
+    };
+    let item = store
+        .add_inbox_item("k1", &body, "asked", &[], ApprovalState::Approved, 1)
+        .unwrap();
+    for (from, to) in [
+        (ApprovalState::Approved, ApprovalState::Executing),
+        (ApprovalState::Executing, ApprovalState::Executed),
+    ] {
+        assert!(store.move_inbox_state(item.id, from, to, 1).unwrap());
+    }
+    store
+        .add_decision(
+            1,
+            Some(item.id),
+            "slack/post",
+            bunsin_core::records::DecisionKind::Autonomous,
+        )
+        .unwrap();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    let id = item.id.to_string();
+    let header = "thresholds: none, so no tool is suggested; the counts cover all days\n\
+                  tool\treviewed\tunchanged\tedited\trejected\tautonomous\tfailed\tstate\n";
+    // The profile has no write rule and no hold yet.
+    assert_eq!(stdout_of(server.run(&kim, &["autonomy", "kim"]), "autonomy"), header);
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["report-autonomous", "kim", &id]),
+            "report-autonomous"
+        ),
+        format!("item {id} reported; its tool asks you until you clear the hold\n")
+    );
+    // The hold starts the counts again.
+    assert_eq!(
+        stdout_of(server.run(&kim, &["autonomy", "kim"]), "autonomy"),
+        format!("{header}slack/post\t0\t0 (-)\t0\t0\t0\t0\theld\n")
+    );
+    let error = stderr_of_failure(server.run(&kim, &["report-autonomous", "kim", &id]), "a second report");
+    assert!(error.contains("reported before"), "{error}");
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["clear-autonomy-hold", "kim", "slack/post"]),
+            "clear-autonomy-hold"
+        ),
+        "hold of slack/post cleared\n"
+    );
+    let error = stderr_of_failure(
+        server.run(&kim, &["clear-autonomy-hold", "kim", "slack/post"]),
+        "a second clear",
+    );
+    assert!(error.contains("not held"), "{error}");
+}

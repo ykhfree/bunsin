@@ -10,7 +10,7 @@ use crate::polls_form::PollsForm;
 use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
 use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
-use bunsin_api::Resolution;
+use bunsin_api::{Autonomy, Resolution};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
@@ -127,6 +127,16 @@ pub fn inbox_title(item: &InboxItem) -> String {
         }
     };
     format!("{} · {what}", item.state.as_str())
+}
+
+/// True if the owner can report a problem with the item: a tool call that ran without asking and
+/// whose tool is not held. A report of a held tool would change nothing.
+pub fn reportable(item: &InboxItem, autonomy: Option<&Autonomy>) -> bool {
+    let InboxBody::ToolCall { tool, .. } = &item.body else {
+        return false;
+    };
+    let held = autonomy.is_some_and(|autonomy| autonomy.tools.iter().any(|entry| entry.tool == *tool && entry.held));
+    item.autonomous && matches!(item.state, ApprovalState::Executed | ApprovalState::Failed) && !held
 }
 
 /// What the user must read before deciding. A tool call shows every argument,
@@ -478,6 +488,26 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Reject(id)))),
             );
             row = row.child(buttons);
+        }
+        if reportable(item, self.state.autonomy.as_ref()) {
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .child(
+                        Button::new(SharedString::from(format!("report-{id}")))
+                            .outline()
+                            .label("Report a problem")
+                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::ReportAutonomous(id)))),
+                    )
+                    .child(quiet(
+                        "This call ran without asking. A report holds its tool: each later call asks you.",
+                        cx,
+                    )),
+            );
         }
         row
     }
@@ -908,6 +938,52 @@ mod tests {
             autonomous: false,
             retry_of: None,
         }
+    }
+
+    #[test]
+    fn only_a_finished_autonomous_call_of_a_tool_that_is_not_held_can_be_reported() {
+        let post = || InboxBody::ToolCall {
+            tool: "slack/post".into(),
+            args: json!({"text": "hi"}).as_object().unwrap().clone(),
+        };
+        let ran = InboxItem {
+            autonomous: true,
+            state: ApprovalState::Executed,
+            ..item(post())
+        };
+        assert!(reportable(&ran, None));
+        let failed = InboxItem {
+            state: ApprovalState::Failed,
+            ..ran.clone()
+        };
+        assert!(reportable(&failed, None));
+        for state in [
+            ApprovalState::Approved,
+            ApprovalState::Executing,
+            ApprovalState::Unknown,
+        ] {
+            assert!(!reportable(&InboxItem { state, ..ran.clone() }, None), "{state:?}");
+        }
+        let approved_by_owner = InboxItem {
+            autonomous: false,
+            ..ran.clone()
+        };
+        assert!(!reportable(&approved_by_owner, None));
+        let entry = |tool: &str, held| bunsin_api::ToolAutonomy {
+            tool: tool.into(),
+            counts: Default::default(),
+            held,
+            suggested: false,
+        };
+        let autonomy = |tools| Autonomy {
+            thresholds: None,
+            tools,
+        };
+        assert!(!reportable(&ran, Some(&autonomy(vec![entry("slack/post", true)]))));
+        assert!(reportable(
+            &ran,
+            Some(&autonomy(vec![entry("slack/post", false), entry("slack/react", true)]))
+        ));
     }
 
     #[test]

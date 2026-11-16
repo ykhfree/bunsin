@@ -347,6 +347,35 @@ Save sends the whole table, and the view lists each change before you save.
   server adds the AI marker by the rule in force at that time.
 - A rule that a poll needs cannot be removed. The view shows the server's reason.
 
+#### Raise a step on evidence, and hold a tool that went wrong
+
+The server counts your decisions about each write or delete tool: calls you approved
+unchanged, edited or dismissed, and calls that ran without asking (and how many failed).
+The Permissions view shows the counts under each tool.
+
+- **Suggestions.** Set thresholds in the settings file. Without them nothing is suggested.
+
+  ```json
+  { "autonomy": { "min_reviewed": 20, "min_unchanged_percent": 90, "window_days": 30 } }
+  ```
+
+  A write tool at `approve` with at least `min_reviewed` decisions in the last `window_days`
+  days, of which at least `min_unchanged_percent` % were approved unchanged, gets the badge
+  "Suggested: Autonomous". The server never raises a step. You raise it and press Save.
+  A delete tool is never suggested, and a coding tool will not be either.
+- **Holds.** If you dismiss a waiting call of a tool at `autonomous`, or press "Report a problem"
+  on a call that ran without asking, the server holds the tool at approval: each of its calls
+  waits for you, whatever its step says. A call that the server approved by itself but did
+  not run before a stop waits too. The hold is stored apart from the settings, so a settings file or "Save anyway"
+  cannot end it. Only "Clear the hold" in the Permissions view, or `bunsind clear-autonomy-hold`,
+  ends it. A hold starts the counts of the tool again.
+
+```sh
+bunsind autonomy kim                          # counts, holds and suggestions, one line per tool
+bunsind report-autonomous kim 42              # report inbox item 42, which ran without asking
+bunsind clear-autonomy-hold kim slack/post_message
+```
+
 On the command line, one rule at a time:
 
 ```sh
@@ -604,6 +633,9 @@ item of a list for `blocks.*.text`. The other arguments stay as the card shows t
 The server adds the AI marker after the edit, so the field shows the text without the marker,
 and the marker is fixed text below it. An unchanged text is a plain approval. A call whose rule
 sends no text has no Edit button.
+
+**A call that ran without asking** has the button "Report a problem". A report holds its
+tool at approval (see [Permission rules](#permission-rules)).
 
 **A call cut by a stop.** An `unknown` item has three buttons: "It ran: mark done", "It did not
 run: drop" and "Run again". A note under them says that a second run can send the call twice.

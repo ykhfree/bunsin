@@ -11,11 +11,11 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
-    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody,
-    RetireCorrectionBody, status_of,
+    ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody,
+    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
-    ApiError, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
+    ApiError, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, LlmTest, LlmUpdate, Outcome,
     Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
     ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
@@ -367,6 +367,35 @@ async fn retire_correction(
     Ok(Json(engine.retire_correction(&profile, body.id).await?))
 }
 
+async fn autonomy(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Autonomy> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.autonomy(&profile).await?))
+}
+
+async fn report_autonomous(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<ReportAutonomousBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.report_autonomous(&profile, body.inbox_id).await?))
+}
+
+async fn clear_autonomy_hold(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<ClearAutonomyHoldBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.clear_autonomy_hold(&profile, &body.tool).await?))
+}
+
 async fn wiki_index(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -436,6 +465,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("resolve-unknown"), post(resolve_unknown))
         .route(&profile("corrections"), post(corrections))
         .route(&profile("retire-correction"), post(retire_correction))
+        .route(&profile("autonomy"), post(autonomy))
+        .route(&profile("report-autonomous"), post(report_autonomous))
+        .route(&profile("clear-autonomy-hold"), post(clear_autonomy_hold))
         .route(&profile("wiki"), get(wiki_index))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(

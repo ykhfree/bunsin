@@ -52,7 +52,8 @@ async fn handle(rig: &common::Rig, event_id: &str, text: &str, reply: serde_json
 }
 
 /// A profile with items in every state the inbox shows, three pages and a connector.
-async fn fixture() -> (common::Rig, UiState) {
+/// The second state adds decisions for the permissions view: counts, a suggestion and a hold.
+async fn fixture() -> (common::Rig, UiState, UiState) {
     // 2026-11-16 09:30 UTC.
     let rig = common::rig_at(1_794_821_400).await;
     let body = "The team deploys on Fridays at 3 pm.\nA release needs two approvals.";
@@ -195,7 +196,38 @@ async fn fixture() -> (common::Rig, UiState) {
     rig.engine.poll_profile("kim").await.unwrap();
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
-    (rig, state)
+
+    // The inbox pictures use the state from before these decisions.
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.autonomy = Some(bunsin_core::autonomy::AutonomyThresholds {
+        min_reviewed: 5,
+        min_unchanged_percent: 80,
+        window_days: 30,
+    });
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    // Three more posts approved unchanged: 4 of 5 reviewed posts.
+    for (event_id, text) in [("s6", "You are welcome."), ("s7", "Thanks!"), ("s8", "Noted.")] {
+        let call = json!({"kind": "tool_call", "rationale": "Lee said thanks", "summary": null,
+            "tool": "slack/post", "args_json": json!({"channel": "C1", "text": text}).to_string()});
+        handle(&rig, event_id, "thanks", call).await;
+    }
+    for item in rig.engine.snapshot("kim").await.unwrap().inbox {
+        if item.state == bunsin_core::approval::ApprovalState::Pending
+            && matches!(&item.body, bunsin_core::records::InboxBody::ToolCall { args, .. } if args["channel"] == "C1")
+        {
+            rig.engine.approve("kim", item.id, None).await.unwrap();
+        }
+    }
+    // A reaction ran without asking, and the owner reported it.
+    let react = json!({"kind": "tool_call", "rationale": "Lee shipped the release", "summary": null,
+        "tool": "slack/add_reaction",
+        "args_json": json!({"channel": "C1", "ts": "1731750060.000200", "emoji": "tada"}).to_string()});
+    handle(&rig, "s9", "shipped!", react).await;
+    let ran = rig.engine.snapshot("kim").await.unwrap().inbox[0].id;
+    rig.engine.report_autonomous("kim", ran).await.unwrap();
+    let mut decided = UiState::default();
+    apply(&*rig.engine, &mut decided, UiCommand::Refresh).await;
+    (rig, state, decided)
 }
 
 /// An offscreen window of laptop size.
@@ -224,7 +256,14 @@ fn shot(cx: &mut HeadlessAppContext, window: AnyWindowHandle, dir: &Path, name: 
 }
 
 /// Draws every view in one mode into `dir`.
-fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common::Rig, state: &UiState) {
+fn draw(
+    mode: ThemeMode,
+    dir: &Path,
+    rt: &tokio::runtime::Runtime,
+    rig: &common::Rig,
+    state: &UiState,
+    decided: &UiState,
+) {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
         Arc::new(Assets),
@@ -412,11 +451,22 @@ fn draw(mode: ThemeMode, dir: &Path, rt: &tokio::runtime::Runtime, rig: &common:
     click(&mut cx, "note-rev-0");
     shot(&mut cx, window, dir, &name("notes-history"));
 
-    // The permissions, with one rule changed and one new rule that has no text choice yet.
-    states.send(state.clone()).unwrap();
+    // The permissions, with the counts, a suggestion and a hold, and one rule changed.
+    states.send(decided.clone()).unwrap();
     click(&mut cx, "tab-permissions");
     click(&mut cx, "perm-slack/post-tier-draft");
+    // The list scrolls so that the held tool is on screen too.
+    let scroll = |cx: &mut HeadlessAppContext, by: f32| {
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll("perm-slack/post-counts", ScrollDelta::Pixels(point(px(0.), px(by))), cx);
+        })
+        .unwrap();
+    };
+    scroll(&mut cx, -330.);
     shot(&mut cx, window, dir, &name("permissions"));
+    scroll(&mut cx, 330.);
     // More changes than the box beside Save shows at once.
     for id in [
         "perm-slack/post-text-channel",
@@ -577,8 +627,8 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    let (rig, state) = rt.block_on(fixture());
+    let (rig, state, decided) = rt.block_on(fixture());
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        draw(mode, dir, &rt, &rig, &state);
+        draw(mode, dir, &rt, &rig, &state, &decided);
     }
 }

@@ -2,9 +2,10 @@
 
 mod common;
 
-use bunsin_api::{Edit, EngineApi, Expected, Outcome, PermissionsUpdate};
+use bunsin_api::{ApiError, Edit, EngineApi, Expected, Outcome, PermissionsUpdate};
 use bunsin_core::approval::ApprovalState;
-use bunsin_core::policy::Tier;
+use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::records::{DecisionCounts, InboxBody};
 use common::*;
 use serde_json::json;
@@ -166,4 +167,192 @@ async fn dismissing_a_call_of_an_autonomous_tool_holds_it_once() {
         demoted.detail,
         json!({"tool": POST, "inbox_id": first, "cause": "rejected"})
     );
+}
+
+/// A post that ran without asking.
+async fn autonomous_run(rig: &Rig, id: &str) -> i64 {
+    match ingest(rig, id, &post("Done.")).await {
+        Outcome::Executed { inbox_id } => inbox_id,
+        other => panic!("expected an autonomous run, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_report_holds_the_tool_and_its_next_call_waits() {
+    let rig = rig().await;
+    set_tier(&rig, Tier::Autonomous).await;
+    let ran = autonomous_run(&rig, "e1").await;
+    rig.engine.report_autonomous("kim", ran).await.unwrap();
+    assert!(matches!(
+        ingest(&rig, "e2", &post("Again.")).await,
+        Outcome::PendingApproval { .. }
+    ));
+    assert_eq!(rig.slack.calls().len(), 1);
+    // The step stays as the owner set it. Only the hold keeps the tool at approval.
+    let rules = rig.engine.permissions("kim").await.unwrap().rules;
+    assert_eq!(rules[POST].tier, Tier::Autonomous);
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    let demoted = audit.iter().find(|entry| entry.kind == "autonomy_demoted").unwrap();
+    assert_eq!(
+        demoted.detail,
+        json!({"tool": POST, "inbox_id": ran, "cause": "reported"})
+    );
+    assert_eq!(audit_count(&rig, "autonomous_reported").await, 1);
+
+    // An item is reported once.
+    let again = rig.engine.report_autonomous("kim", ran).await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+}
+
+#[tokio::test]
+async fn only_a_finished_autonomous_call_can_be_reported() {
+    let rig = rig().await;
+    let waiting = pending_post(&rig, "e1").await;
+    let refused = rig.engine.report_autonomous("kim", waiting).await;
+    assert!(matches!(refused, Err(ApiError::NotAllowed(ref e)) if e.contains("did not run without you")));
+    rig.engine.approve("kim", waiting, None).await.unwrap();
+    // The owner approved it, so it did not run without the owner.
+    assert!(rig.engine.report_autonomous("kim", waiting).await.is_err());
+    // An autonomous call that has not run yet cannot be reported.
+    let body = InboxBody::ToolCall {
+        tool: POST.into(),
+        args: json!({"channel": "C1", "text": "x"}).as_object().unwrap().clone(),
+    };
+    let approved = rig
+        .kim_store()
+        .add_inbox_item("k", &body, "asked", &[], ApprovalState::Approved, 1)
+        .unwrap();
+    let refused = rig.engine.report_autonomous("kim", approved.id).await;
+    assert!(matches!(refused, Err(ApiError::NotAllowed(ref e)) if e.contains("approved")));
+    assert!(!rig.kim_store().is_held(POST).unwrap());
+    assert!(matches!(
+        rig.engine.report_autonomous("kim", 999).await,
+        Err(ApiError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_dismissed_call_of_an_autonomous_tool_makes_its_next_call_wait() {
+    let rig = rig().await;
+    let waiting = pending_post(&rig, "e1").await;
+    set_tier(&rig, Tier::Autonomous).await;
+    rig.engine.reject("kim", waiting, "wrong").await.unwrap();
+    assert!(matches!(
+        ingest(&rig, "e2", &post("Again.")).await,
+        Outcome::PendingApproval { .. }
+    ));
+    assert!(rig.slack.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_hold_survives_a_saved_settings_file_and_only_its_clearing_ends_it() {
+    let rig = rig().await;
+    set_tier(&rig, Tier::Autonomous).await;
+    let ran = autonomous_run(&rig, "e1").await;
+    // A settings file read before the report.
+    let stale = rig.engine.profile_config("kim").await.unwrap();
+    rig.engine.report_autonomous("kim", ran).await.unwrap();
+
+    rig.engine.set_profile_config("kim", stale).await.unwrap();
+    assert!(matches!(
+        ingest(&rig, "e2", &post("Again.")).await,
+        Outcome::PendingApproval { .. }
+    ));
+    // "Save anyway" of a permissions form with the step `autonomous`.
+    set_tier(&rig, Tier::Autonomous).await;
+    assert!(matches!(
+        ingest(&rig, "e3", &post("Again.")).await,
+        Outcome::PendingApproval { .. }
+    ));
+    assert!(rig.engine.autonomy("kim").await.unwrap().tools[0].held);
+
+    rig.engine.clear_autonomy_hold("kim", POST).await.unwrap();
+    autonomous_run(&rig, "e4").await;
+    assert_eq!(audit_count(&rig, "autonomy_hold_cleared").await, 1);
+    let again = rig.engine.clear_autonomy_hold("kim", POST).await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(ref e)) if e.contains("not held")));
+}
+
+async fn set_thresholds(rig: &Rig, thresholds: AutonomyThresholds) {
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.autonomy = Some(thresholds);
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+}
+
+#[tokio::test]
+async fn autonomy_lists_counts_holds_and_suggestions() {
+    let rig = rig().await;
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.policy.rules.insert(
+        "slack/remove".into(),
+        ToolRule::write(ToolClass::Delete, OutgoingText::None),
+    );
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    for id in ["e1", "e2", "e3"] {
+        let waiting = pending_post(&rig, id).await;
+        rig.engine.approve("kim", waiting, None).await.unwrap();
+    }
+    let waiting = pending_post(&rig, "e4").await;
+    rig.engine.reject("kim", waiting, "no").await.unwrap();
+
+    // Without thresholds nothing is suggested. The read rule is not listed.
+    let autonomy = rig.engine.autonomy("kim").await.unwrap();
+    assert_eq!(autonomy.thresholds, None);
+    let tools: Vec<&str> = autonomy.tools.iter().map(|t| t.tool.as_str()).collect();
+    assert_eq!(tools, ["slack/post", "slack/remove"]);
+    let post_entry = &autonomy.tools[0];
+    assert_eq!((post_entry.counts.approved, post_entry.counts.rejected), (3, 1));
+    assert!(!post_entry.suggested && !post_entry.held);
+
+    let thresholds = |min_unchanged_percent| AutonomyThresholds {
+        min_reviewed: 4,
+        min_unchanged_percent,
+        window_days: 7,
+    };
+    set_thresholds(&rig, thresholds(76)).await;
+    assert!(!rig.engine.autonomy("kim").await.unwrap().tools[0].suggested);
+    set_thresholds(&rig, thresholds(75)).await;
+    let autonomy = rig.engine.autonomy("kim").await.unwrap();
+    assert!(autonomy.tools[0].suggested);
+    assert!(!autonomy.tools[1].suggested);
+    // The engine never raises the step itself.
+    assert_eq!(
+        rig.engine.permissions("kim").await.unwrap().rules[POST].tier,
+        Tier::Approve
+    );
+
+    // Decisions older than the window do not count.
+    rig.advance(8 * 24 * 60 * 60);
+    let autonomy = rig.engine.autonomy("kim").await.unwrap();
+    assert_eq!(autonomy.tools[0].counts.reviewed(), 0);
+    assert!(!autonomy.tools[0].suggested);
+
+    // Thresholds that count nothing are refused.
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.autonomy = Some(AutonomyThresholds {
+        window_days: 0,
+        ..thresholds(75)
+    });
+    let refused = rig.engine.set_profile_config("kim", config).await;
+    assert!(matches!(refused, Err(ApiError::Invalid(ref e)) if e.contains("window_days")));
+}
+
+#[tokio::test]
+async fn a_held_tool_is_listed_without_its_rule_and_not_suggested() {
+    let rig = rig().await;
+    set_tier(&rig, Tier::Autonomous).await;
+    let ran = autonomous_run(&rig, "e1").await;
+    rig.engine.report_autonomous("kim", ran).await.unwrap();
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.policy.rules.remove(POST);
+    config.autonomy = Some(AutonomyThresholds {
+        min_reviewed: 0,
+        min_unchanged_percent: 0,
+        window_days: 30,
+    });
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    let autonomy = rig.engine.autonomy("kim").await.unwrap();
+    assert_eq!(autonomy.tools.len(), 1);
+    assert_eq!(autonomy.tools[0].tool, POST);
+    assert!(autonomy.tools[0].held && !autonomy.tools[0].suggested);
 }

@@ -1,13 +1,13 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
 use bunsin_api::http::{
-    ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, ResolveUnknownBody,
-    RetireCorrectionBody, profile_path,
+    ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody,
+    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    ApiError, ApiResult, Autonomy, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest,
+    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::event::InboundEvent;
 use bunsin_core::poll::PollConfig;
@@ -328,6 +328,29 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let body = ResolveUnknownBody { inbox_id, resolution };
             self.call(Method::POST, &profile_path(profile, "resolve-unknown"), Some(&body))
+                .await
+        })
+    }
+
+    fn autonomy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Autonomy>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "autonomy"), NO_BODY)
+                .await
+        })
+    }
+
+    fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = ReportAutonomousBody { inbox_id };
+            self.send_only(Method::POST, &profile_path(profile, "report-autonomous"), Some(&body))
+                .await
+        })
+    }
+
+    fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = ClearAutonomyHoldBody { tool: tool.to_owned() };
+            self.send_only(Method::POST, &profile_path(profile, "clear-autonomy-hold"), Some(&body))
                 .await
         })
     }

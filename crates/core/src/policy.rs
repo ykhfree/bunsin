@@ -129,8 +129,9 @@ impl Policy {
     /// Decides what happens to a proposed call of `tool_id`.
     ///
     /// The inputs are facts the harness measured. Nothing the LLM or a connector
-    /// says about the tool is an input.
-    pub fn decide(&self, tool_id: &str, pin_holds: bool, kill_switch: bool) -> Decision {
+    /// says about the tool is an input. `held` is true while the owner's hold keeps the tool
+    /// at approval: then a call that its step would run asks the owner.
+    pub fn decide(&self, tool_id: &str, pin_holds: bool, kill_switch: bool, held: bool) -> Decision {
         let Some(rule) = self.rules.get(tool_id) else {
             return Decision::Deny(DenyReason::UnknownTool);
         };
@@ -149,6 +150,7 @@ impl Policy {
             (Tier::Approve, _) => Decision::NeedsApproval,
             // A delete is never autonomous.
             (Tier::Autonomous, ToolClass::Delete) => Decision::NeedsApproval,
+            (Tier::Autonomous, _) if held => Decision::NeedsApproval,
             (Tier::Autonomous, _) => Decision::Execute,
         }
     }
@@ -180,29 +182,62 @@ mod tests {
     fn decision_table() {
         use Decision::*;
         use ToolClass::*;
-        // (class, tier, pin_holds, kill_switch, expected)
+        // (class, tier, pin_holds, kill_switch, held, expected)
         let cases = [
-            (Read, Tier::Autonomous, true, false, Execute),
-            (Read, Tier::Observe, true, false, Execute),
-            (Read, Tier::Autonomous, true, true, Execute),
-            (Read, Tier::Autonomous, false, false, Deny(DenyReason::PinChanged)),
-            (Write, Tier::Observe, true, false, RecordOnly),
-            (Write, Tier::Draft, true, false, DraftOnly),
-            (Write, Tier::Approve, true, false, NeedsApproval),
-            (Write, Tier::Autonomous, true, false, Execute),
-            (Write, Tier::Autonomous, true, true, Deny(DenyReason::KillSwitch)),
-            (Write, Tier::Observe, true, true, Deny(DenyReason::KillSwitch)),
-            (Write, Tier::Autonomous, false, false, Deny(DenyReason::PinChanged)),
-            (Delete, Tier::Approve, true, false, NeedsApproval),
-            (Delete, Tier::Autonomous, true, false, NeedsApproval),
-            (Delete, Tier::Autonomous, true, true, Deny(DenyReason::KillSwitch)),
+            (Read, Tier::Autonomous, true, false, false, Execute),
+            (Read, Tier::Observe, true, false, false, Execute),
+            (Read, Tier::Autonomous, true, true, false, Execute),
+            (
+                Read,
+                Tier::Autonomous,
+                false,
+                false,
+                false,
+                Deny(DenyReason::PinChanged),
+            ),
+            (Write, Tier::Observe, true, false, false, RecordOnly),
+            (Write, Tier::Draft, true, false, false, DraftOnly),
+            (Write, Tier::Approve, true, false, false, NeedsApproval),
+            (Write, Tier::Autonomous, true, false, false, Execute),
+            (Write, Tier::Autonomous, true, true, false, Deny(DenyReason::KillSwitch)),
+            (Write, Tier::Observe, true, true, false, Deny(DenyReason::KillSwitch)),
+            (
+                Write,
+                Tier::Autonomous,
+                false,
+                false,
+                false,
+                Deny(DenyReason::PinChanged),
+            ),
+            (Delete, Tier::Approve, true, false, false, NeedsApproval),
+            (Delete, Tier::Autonomous, true, false, false, NeedsApproval),
+            (
+                Delete,
+                Tier::Autonomous,
+                true,
+                true,
+                false,
+                Deny(DenyReason::KillSwitch),
+            ),
+            // A hold keeps an autonomous write at approval. It changes no lower step.
+            (Write, Tier::Autonomous, true, false, true, NeedsApproval),
+            (Write, Tier::Draft, true, false, true, DraftOnly),
+            (Write, Tier::Autonomous, true, true, true, Deny(DenyReason::KillSwitch)),
+            (
+                Write,
+                Tier::Autonomous,
+                false,
+                false,
+                true,
+                Deny(DenyReason::PinChanged),
+            ),
         ];
-        for (class, tier, pin_holds, kill_switch, expected) in cases {
+        for (class, tier, pin_holds, kill_switch, held, expected) in cases {
             let p = policy(&[("slack/tool", class, tier)]);
             assert_eq!(
-                p.decide("slack/tool", pin_holds, kill_switch),
+                p.decide("slack/tool", pin_holds, kill_switch, held),
                 expected,
-                "{class:?} {tier:?} pin={pin_holds} kill={kill_switch}"
+                "{class:?} {tier:?} pin={pin_holds} kill={kill_switch} held={held}"
             );
         }
     }
@@ -211,12 +246,12 @@ mod tests {
     fn a_tool_outside_the_table_is_denied() {
         let p = policy(&[("slack/post", ToolClass::Write, Tier::Autonomous)]);
         assert_eq!(
-            p.decide("slack/delete_channel", true, false),
+            p.decide("slack/delete_channel", true, false, false),
             Decision::Deny(DenyReason::UnknownTool)
         );
         // The same tool name under another connector is another tool.
         assert_eq!(
-            p.decide("jira/post", true, false),
+            p.decide("jira/post", true, false, false),
             Decision::Deny(DenyReason::UnknownTool)
         );
     }
@@ -228,7 +263,7 @@ mod tests {
             "slack/post".into(),
             ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
         );
-        assert_eq!(p.decide("slack/post", true, false), Decision::NeedsApproval);
+        assert_eq!(p.decide("slack/post", true, false, false), Decision::NeedsApproval);
     }
 
     #[test]

@@ -940,3 +940,50 @@ fn run_again_needs_a_second_click_on_the_same_item(cx: &mut TestAppContext) {
     assert_eq!(rig.slack.calls().len(), 1);
     assert_eq!(rig.slack.calls()[0].1["channel"], "C2");
 }
+
+#[gpui_kit::test]
+fn a_call_that_ran_without_asking_can_be_reported_once(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let mut rules = rt.block_on(rig.engine.permissions("kim")).unwrap().rules;
+    rules.get_mut("slack/post").unwrap().tier = bunsin_core::policy::Tier::Autonomous;
+    let update = bunsin_api::PermissionsUpdate {
+        rules,
+        expected: bunsin_api::Expected::Unchecked,
+    };
+    rt.block_on(rig.engine.set_permissions("kim", update)).unwrap();
+    let call = serde_json::json!({"kind": "tool_call", "rationale": "asked", "summary": null, "tool": "slack/post",
+        "args_json": serde_json::json!({"channel": "C1", "text": "Done."}).to_string()});
+    rig.llm.reply(&call.to_string(), 10);
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e-auto".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "is it done?".into(),
+    };
+    let bunsin_api::Outcome::Executed { inbox_id: ran } = rt.block_on(rig.engine.ingest("kim", event)).unwrap() else {
+        panic!("expected an autonomous run")
+    };
+    let (window, shell) = open(cx, &rt, &rig);
+    let report = format!("report-{ran}");
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find(report.clone()).is_some());
+        // The waiting call from before asks the owner. It has nothing to report.
+        assert!(window.try_find("report-1").is_none());
+    });
+    let held = |s: &Shell| {
+        s.state
+            .autonomy
+            .as_ref()
+            .is_some_and(|a| a.tools.iter().any(|t| t.tool == "slack/post" && t.held))
+    };
+    on_screen(cx, window, |window, cx| window.click(report.clone(), cx));
+    wait_until(cx, &shell, "the hold after the report", held);
+    on_screen(cx, window, |window, _| {
+        // A held tool has nothing more to report.
+        assert!(window.try_find(report.clone()).is_none());
+        assert_eq!(label(window, "error"), "");
+    });
+    assert!(rt.block_on(rig.engine.autonomy("kim")).unwrap().tools[0].held);
+}

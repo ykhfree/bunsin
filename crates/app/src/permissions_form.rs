@@ -3,8 +3,9 @@
 
 use crate::bridge::{SaveError, UiCommand, UiState};
 use crate::shell::{Shell, labelled, labelled_as};
-use crate::theme::{card, palette, quiet};
-use bunsin_api::{Expected, PermissionsUpdate};
+use crate::theme::{card, notice, palette, quiet};
+use bunsin_api::{Expected, PermissionsUpdate, ToolAutonomy};
+use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::tool::ToolSpec;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -21,6 +22,8 @@ const HELP: &str = "The agent can use a tool only if it has a rule here. Read: t
 const NESTED: &str = "The buttons list the text arguments at the top of a tool's input. A click adds or removes one. \
     If the text is inside another value, for example in the items of a list, set the rule with \
     `bunsind rule-set` or in the settings file.";
+const HELD: &str = "Held at approval: you dismissed or reported a call of this tool while it ran without \
+    asking. Each call asks you, whatever the step says, until you clear the hold.";
 const PAGE_CONFLICT: &str = "The rules changed on the server since this view loaded them. Nothing was saved.";
 const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 
@@ -138,6 +141,40 @@ fn rule_words(rule: Option<&DraftRule>) -> String {
             }
         ),
     }
+}
+
+/// When a tool is suggested, as one line above the list.
+fn thresholds_text(thresholds: Option<&AutonomyThresholds>) -> String {
+    match thresholds {
+        None => "Suggestions for Autonomous are off. Set `autonomy` in the settings file to get them.".to_owned(),
+        Some(t) => format!(
+            "Suggested for Autonomous: a write tool at Approve with {} or more reviewed calls and {}% or more \
+             approved unchanged in the last {} days. A hold starts the counts again.",
+            t.min_reviewed, t.min_unchanged_percent, t.window_days
+        ),
+    }
+}
+
+/// The counts of one tool as a line under it.
+fn counts_text(entry: &ToolAutonomy, thresholds: Option<&AutonomyThresholds>) -> String {
+    let c = &entry.counts;
+    let days = match thresholds {
+        None => "All days".to_owned(),
+        Some(t) => format!("Last {} days", t.window_days),
+    };
+    let percent = c
+        .unchanged_percent()
+        .map_or_else(String::new, |percent| format!(" ({percent}%)"));
+    format!(
+        "{days}: {} reviewed, {} approved unchanged{percent}, {} edited, {} dismissed. \
+         Ran without asking: {}, failed: {}.",
+        c.reviewed(),
+        c.approved,
+        c.edited,
+        c.rejected,
+        c.autonomous,
+        c.autonomous_failed
+    )
 }
 
 /// What a rule lets the agent do, as a sentence under the tool.
@@ -459,6 +496,46 @@ impl Shell {
             );
         }
         let sentence = rule_sentence(rule);
+        let autonomy = self.state.autonomy.as_ref();
+        let thresholds = autonomy.and_then(|autonomy| autonomy.thresholds.as_ref());
+        let entry = autonomy.and_then(|autonomy| autonomy.tools.iter().find(|entry| entry.tool == id));
+        let colors = palette(cx);
+        let counts = entry.map(|entry| {
+            let text = counts_text(entry, thresholds);
+            row()
+                .child(labelled_as(format!("perm-{id}-counts"), text.clone(), quiet(text, cx)))
+                .children(entry.suggested.then(|| {
+                    labelled_as(
+                        format!("perm-{id}-suggested"),
+                        "Suggested: Autonomous",
+                        div()
+                            .px_2()
+                            .rounded_full()
+                            .bg(colors.done.opacity(0.15))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.done)
+                            .child("Suggested: Autonomous"),
+                    )
+                }))
+        });
+        let held = entry.filter(|entry| entry.held).map(|_| {
+            let (profile, tool_id) = (self.state.selected.clone(), id.to_owned());
+            notice(colors.stopped, cx)
+                .child(labelled_as(format!("perm-{id}-held"), HELD, div().child(HELD)))
+                .child(
+                    Button::new(SharedString::from(format!("perm-{id}-clear-hold")))
+                        .small()
+                        .outline()
+                        .label("Clear the hold")
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if let Some(profile) = profile.clone() {
+                                let tool = tool_id.clone();
+                                this.send(UiCommand::ClearAutonomyHold { profile, tool });
+                            }
+                        })),
+                )
+        });
         div()
             .flex()
             .flex_col()
@@ -496,6 +573,8 @@ impl Shell {
                 sentence.clone(),
                 quiet(sentence, cx),
             ))
+            .children(counts)
+            .children(held)
             .into_any_element()
     }
 
@@ -506,6 +585,12 @@ impl Shell {
         let Some(server) = &self.state.permissions else {
             return quiet("The rules are not loaded.", cx).into_any_element();
         };
+        let thresholds_text = thresholds_text(
+            self.state
+                .autonomy
+                .as_ref()
+                .and_then(|autonomy| autonomy.thresholds.as_ref()),
+        );
         let changes = form.changes();
         let changes_text = if changes.is_empty() {
             String::new()
@@ -674,6 +759,11 @@ impl Shell {
                     .overflow_y_scroll()
                     .child(labelled_as("permissions-help", HELP, quiet(HELP, cx)))
                     .child(quiet(NESTED, cx))
+                    .child(labelled_as(
+                        "permissions-thresholds",
+                        thresholds_text.clone(),
+                        quiet(thresholds_text, cx),
+                    ))
                     .children(groups),
             )
             .into_any_element()
@@ -754,6 +844,42 @@ mod tests {
             "write, approve, text in `text`, `blocks.*.text`"
         );
         assert!(rule_sentence(Some(&nested)).ends_with("The AI marker goes into `text`, `blocks.*.text`."));
+    }
+
+    #[test]
+    fn the_counts_name_their_days_and_the_share_approved_unchanged() {
+        let entry = ToolAutonomy {
+            tool: "slack/post".into(),
+            counts: bunsin_core::records::DecisionCounts {
+                approved: 3,
+                edited: 1,
+                rejected: 0,
+                autonomous: 2,
+                autonomous_failed: 1,
+            },
+            held: false,
+            suggested: true,
+        };
+        let thresholds = AutonomyThresholds {
+            min_reviewed: 4,
+            min_unchanged_percent: 75,
+            window_days: 30,
+        };
+        assert_eq!(
+            counts_text(&entry, Some(&thresholds)),
+            "Last 30 days: 4 reviewed, 3 approved unchanged (75%), 1 edited, 0 dismissed. \
+             Ran without asking: 2, failed: 1."
+        );
+        let none = ToolAutonomy {
+            counts: Default::default(),
+            ..entry
+        };
+        assert_eq!(
+            counts_text(&none, None),
+            "All days: 0 reviewed, 0 approved unchanged, 0 edited, 0 dismissed. Ran without asking: 0, failed: 0."
+        );
+        assert!(thresholds_text(None).contains("are off"));
+        assert!(thresholds_text(Some(&thresholds)).contains("with 4 or more reviewed calls and 75% or more"));
     }
 
     #[test]

@@ -289,6 +289,9 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.llm_usage(other).await.map(|_| ()));
         refused(kim.corrections(other).await.map(|_| ()));
         refused(kim.retire_correction(other, 1).await);
+        refused(kim.autonomy(other).await.map(|_| ()));
+        refused(kim.report_autonomous(other, inbox_id).await);
+        refused(kim.clear_autonomy_hold(other, "slack/post").await);
         refused(
             kim.resolve_unknown(other, inbox_id, bunsin_api::Resolution::Drop)
                 .await
@@ -1012,4 +1015,44 @@ async fn corrections_are_listed_and_retired_over_http() {
     assert!(kim.corrections("kim").await.unwrap()[0].retired_at.is_some());
     let again = kim.retire_correction("kim", records[0].id).await;
     assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+}
+
+#[tokio::test]
+async fn an_autonomous_call_is_reported_and_its_hold_cleared_over_http() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let mut rules = kim.permissions("kim").await.unwrap().rules;
+    rules.get_mut("slack/post").unwrap().tier = bunsin_core::policy::Tier::Autonomous;
+    let update = bunsin_api::PermissionsUpdate {
+        rules,
+        expected: bunsin_api::Expected::Unchecked,
+    };
+    kim.set_permissions("kim", update).await.unwrap();
+    rig.llm.reply(&post("Deployed."), 10);
+    let Outcome::Executed { inbox_id } = kim.ingest("kim", event("e1")).await.unwrap() else {
+        panic!("expected an autonomous run")
+    };
+
+    // Another profile's token neither reports nor clears.
+    let lee = rig.client(&rig.lee_token);
+    let refused = lee.report_autonomous("kim", inbox_id).await;
+    assert!(matches!(refused, Err(ApiError::Unauthorized(_))), "{refused:?}");
+    kim.report_autonomous("kim", inbox_id).await.unwrap();
+    let autonomy = kim.autonomy("kim").await.unwrap();
+    assert_eq!(autonomy.tools.len(), 1);
+    assert!(autonomy.tools[0].held);
+    assert!(lee.autonomy("lee").await.unwrap().tools.iter().all(|tool| !tool.held));
+    rig.llm.reply(&post("Again."), 10);
+    let outcome = kim.ingest("kim", event("e2")).await.unwrap();
+    assert!(matches!(outcome, Outcome::PendingApproval { .. }), "{outcome:?}");
+
+    let refused = lee.clear_autonomy_hold("kim", "slack/post").await;
+    assert!(matches!(refused, Err(ApiError::Unauthorized(_))), "{refused:?}");
+    kim.clear_autonomy_hold("kim", "slack/post").await.unwrap();
+    assert!(!kim.autonomy("kim").await.unwrap().tools[0].held);
+    let again = kim.clear_autonomy_hold("kim", "slack/post").await;
+    assert!(matches!(again, Err(ApiError::NotAllowed(_))), "{again:?}");
+    rig.llm.reply(&post("Once more."), 10);
+    let outcome = kim.ingest("kim", event("e3")).await.unwrap();
+    assert!(matches!(outcome, Outcome::Executed { .. }), "{outcome:?}");
 }

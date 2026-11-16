@@ -181,6 +181,26 @@ async fn an_autonomous_call_runs_only_while_its_rule_is_still_autonomous() {
 }
 
 #[tokio::test]
+async fn a_held_tool_does_not_run_its_autonomous_call_on_resume() {
+    let rig = rig().await;
+    set_rule_tier(&rig, Tier::Autonomous).await;
+    let waits = autonomous_post(&rig);
+    // The owner held the tool before the stop. Its rule still says `autonomous`.
+    assert!(rig.kim_store().demote(1, waits, "slack/post").unwrap());
+    let rig = rig.restart();
+    start(&rig).await;
+
+    assert!(rig.slack.calls().is_empty());
+    assert_eq!(item(&rig, waits).await.state, ApprovalState::Failed);
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    let copy = inbox.iter().find(|i| i.retry_of == Some(waits)).unwrap();
+    assert_eq!((copy.state, copy.autonomous), (ApprovalState::Pending, false));
+    // The owner's approval of the copy runs it: a hold asks the owner, it does not forbid.
+    let outcome = rig.engine.approve("kim", copy.id, None).await.unwrap();
+    assert_eq!(outcome, Outcome::Executed { inbox_id: copy.id });
+}
+
+#[tokio::test]
 async fn a_removed_rule_sends_an_owner_approved_call_back() {
     let rig = rig().await;
     let id = pending_post(&rig, "e1").await;

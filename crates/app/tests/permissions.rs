@@ -685,3 +685,120 @@ fn a_stored_choice_with_a_place_inside_a_value_is_shown_and_kept(cx: &mut TestAp
         assert_eq!(label(window, "permissions-changes"), "");
     });
 }
+
+/// Gives `kim` the thresholds of a suggestion.
+async fn set_thresholds(rig: &Rig, min_reviewed: u32, min_unchanged_percent: u32) {
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.autonomy = Some(bunsin_core::autonomy::AutonomyThresholds {
+        min_reviewed,
+        min_unchanged_percent,
+        window_days: 30,
+    });
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+}
+
+/// Lets `slack/post` run without asking, and runs one post. Returns its inbox ID.
+async fn autonomous_post(rig: &Rig) -> i64 {
+    store(rig, |rules| {
+        rules.get_mut("slack/post").unwrap().tier = Tier::Autonomous
+    })
+    .await;
+    let call = json!({"kind": "tool_call", "rationale": "asked", "summary": null, "tool": "slack/post",
+        "args_json": json!({"channel": "C1", "text": "Done."}).to_string()});
+    rig.llm.reply(&call.to_string(), 10);
+    let event = bunsin_core::event::InboundEvent {
+        source: "slack".into(),
+        external_id: "e-auto".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "is it done?".into(),
+    };
+    match rig.engine.ingest("kim", event).await.unwrap() {
+        bunsin_api::Outcome::Executed { inbox_id } => inbox_id,
+        other => panic!("expected an autonomous run, got {other:?}"),
+    }
+}
+
+fn held(shell: &Shell, tool: &str) -> Option<bool> {
+    let autonomy = shell.state.autonomy.as_ref()?;
+    Some(autonomy.tools.iter().any(|entry| entry.tool == tool && entry.held))
+}
+
+#[gpui_kit::test]
+fn the_view_shows_the_counts_and_a_suggestion_only_with_thresholds(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(rig.engine.approve("kim", 1, None)).unwrap();
+    let (window, shell) = open_permissions(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "perm-slack/post-counts"),
+            "All days: 1 reviewed, 1 approved unchanged (100%), 0 edited, 0 dismissed. \
+             Ran without asking: 0, failed: 0."
+        );
+        assert!(label(window, "permissions-thresholds").contains("Suggestions for Autonomous are off"));
+        // Without the owner's thresholds nothing is suggested.
+        assert!(window.try_find("perm-slack/post-suggested").is_none());
+        assert!(window.try_find("perm-slack/post-held").is_none());
+    });
+
+    rt.block_on(set_thresholds(&rig, 1, 100));
+    wait_until(cx, &shell, "the thresholds", |s| {
+        s.state.autonomy.as_ref().is_some_and(|a| a.thresholds.is_some())
+    });
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "perm-slack/post-suggested"), "Suggested: Autonomous");
+        assert!(label(window, "perm-slack/post-counts").starts_with("Last 30 days: 1 reviewed"));
+        // The suggestion changes no step. Only Save does.
+        assert_eq!(
+            label(window, "perm-slack/post-state"),
+            "Write: it runs after you approve. The AI marker goes into `text`."
+        );
+    });
+    assert_eq!(rt.block_on(rules(&rig))["slack/post"].tier, Tier::Approve);
+    rt.block_on(set_thresholds(&rig, 2, 100));
+    wait_until(cx, &shell, "the new thresholds", |s| {
+        s.state
+            .autonomy
+            .as_ref()
+            .is_some_and(|a| a.thresholds.is_some_and(|t| t.min_reviewed == 2))
+    });
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("perm-slack/post-suggested").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn the_owner_sees_a_hold_and_clears_it(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(set_thresholds(&rig, 0, 0));
+    let ran = rt.block_on(autonomous_post(&rig));
+    rt.block_on(rig.engine.report_autonomous("kim", ran)).unwrap();
+    let (window, shell) = open_permissions(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "perm-slack/post-held").starts_with("Held at approval"));
+        // The rule still says autonomous; the hold is not part of the rules.
+        assert_eq!(
+            label(window, "perm-slack/post-state"),
+            "Write: it runs without asking. The AI marker goes into `text`."
+        );
+        assert!(window.try_find("perm-slack/post-suggested").is_none());
+        // The clear button is in the list, the Save bar stays outside it.
+        assert!(
+            window
+                .within("permissions-list")
+                .try_find("perm-slack/post-clear-hold")
+                .is_some()
+        );
+        assert!(window.within("permissions-list").try_find("save-permissions").is_none());
+    });
+    clicks(cx, window, &["perm-slack/post-clear-hold"]);
+    wait_until(cx, &shell, "the cleared hold", |s| held(s, "slack/post") == Some(false));
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("perm-slack/post-held").is_none());
+    });
+    assert!(!rt.block_on(rig.engine.autonomy("kim")).unwrap().tools[0].held);
+    // The clearing saved no rule.
+    assert_eq!(saves(cx, &shell), 0);
+}

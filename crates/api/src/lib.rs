@@ -2,13 +2,16 @@
 
 pub mod http;
 
+use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, CorrectionRecord, InboxItem, LlmUsage, ProfileInfo};
+use bunsin_core::records::{
+    ArtifactMeta, AuditEntry, CorrectionRecord, DecisionCounts, InboxItem, LlmUsage, ProfileInfo,
+};
 use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use bunsin_core::wiki::{WikiPage, WikiSummary, WikiText};
@@ -41,6 +44,9 @@ pub struct ProfileConfig {
     /// The searches the server repeats to find new events.
     #[serde(default)]
     pub polls: Vec<PollConfig>,
+    /// When the window suggests that a tool run without asking. `None`: it suggests nothing.
+    #[serde(default)]
+    pub autonomy: Option<AutonomyThresholds>,
 }
 
 impl ProfileConfig {
@@ -59,6 +65,7 @@ impl ProfileConfig {
             connectors: BTreeMap::new(),
             privacy: PrivacyConfig::default(),
             polls: Vec::new(),
+            autonomy: None,
         }
     }
 }
@@ -182,6 +189,27 @@ pub struct Permissions {
     /// The text that the server adds at each place of outgoing text that a rule names.
     #[serde(default)]
     pub ai_marker: String,
+}
+
+/// The decisions about the calls of each write or delete tool, with the holds and the suggestions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Autonomy {
+    /// The owner's thresholds. `None`: no tool is suggested, and the counts cover all days.
+    pub thresholds: Option<AutonomyThresholds>,
+    /// By tool ID: every write or delete rule, and every held tool.
+    pub tools: Vec<ToolAutonomy>,
+}
+
+/// The decisions about one tool's calls since its last hold, within the days of the thresholds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAutonomy {
+    pub tool: String,
+    pub counts: DecisionCounts,
+    /// True while the owner's hold keeps the tool at approval, whatever its step says.
+    pub held: bool,
+    /// True if the counts meet the thresholds and the owner could raise the step to `autonomous`.
+    /// Only the owner raises it, with `set_permissions`.
+    pub suggested: bool,
 }
 
 /// A new permission table, with the table the caller loaded before it changed it.
@@ -510,4 +538,11 @@ pub trait EngineApi: Send + Sync {
         inbox_id: i64,
         resolution: Resolution,
     ) -> BoxFuture<'a, ApiResult<Option<Outcome>>>;
+    /// The decisions about each write or delete tool's calls, its hold and whether it is suggested.
+    fn autonomy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Autonomy>>;
+    /// Reports a problem with a call that ran without the owner. It holds the tool at approval.
+    /// Only an autonomous tool call that is `executed` or `failed` can be reported, and only once.
+    fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Clears the hold of a tool. Its calls then follow its step again.
+    fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>>;
 }

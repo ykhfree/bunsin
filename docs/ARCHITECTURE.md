@@ -27,7 +27,7 @@
      같은 단계에서 `approved` 도구 호출의 ID를 적어 둔다.
   2. 서버가 요청을 받기 시작한다.
   3. `resume_approved()`: 1단계에서 적은 항목만 본다. 시작 뒤에 승인된 항목은 그 요청이 실행한다.
-     정책을 다시 묻는다(`decide`: 정지 스위치, pin, 규칙). 소유자가 승인한 항목은 `Execute`나 `NeedsApproval`일 때,
+     정책을 다시 묻는다(`decide`: 정지 스위치, pin, 규칙, 보류). 소유자가 승인한 항목은 `Execute`나 `NeedsApproval`일 때,
      자율 항목은 `Execute`일 때만 실행한다(감사 `resumed`, 실행은 `Approved→Executing` CAS를 지난다).
      그 밖이면 항목을 `failed`로 옮기고 같은 내용의 `pending` 사본(`retry_of`)을 만든다(감사 `resume_abandoned`).
      옮기기와 사본 만들기는 한 transaction이다. 사본의 승인은 정책을 다시 본다.
@@ -114,6 +114,7 @@
   승인함 테스트는 1280x800 창에서 실행한다.
   - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
     retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
+    정책이 소유자 없이 실행한 항목(`executed`, `failed`)에는 "Report a problem" 버튼이 있다(`report_autonomous`). 도구가 보류 중이면 버튼을 감춘다.
   - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
   - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.
@@ -154,6 +155,10 @@
   - Save와 바뀐 규칙 목록은 스크롤되는 목록 밖에 있다. 목록의 첫 줄은 바뀐 규칙의 개수이다. 도구가 30개여도 1280x800 창에서 Save를 누를 수 있다.
   - **기다리는 항목**: 승인 시점에 엔진이 그때의 규칙으로 AI 표시를 다시 붙인다.
     규칙이 가리키는 자리가 호출에 없으면 승인은 거부된다.
+  - **지표, 제안, 보류**: 화면은 `autonomy` API도 읽는다. write·delete 도구마다 개수 한 줄을 보여 준다(4절의 "결정 기록과 보류").
+    제안된 도구에는 "Suggested: Autonomous" 표시가 붙는다. 표시는 단계를 바꾸지 않는다. 소유자가 단계를 고르고 Save를 눌러야 한다.
+    보류된 도구에는 안내와 "Clear the hold" 버튼이 있다. 버튼은 `clear_autonomy_hold`만 부르고 규칙을 저장하지 않는다.
+    목록 위의 한 줄이 기준을 알려 준다. 기준이 없으면 제안이 꺼져 있다고 알린다. 이 줄을 한 줄로 둔 이유: 1280x800 창에서 기존 클릭 테스트의 버튼이 화면 밖으로 밀렸다.
 - **명령줄의 권한 규칙**: `bunsind rules`, `rule-set`, `rule-remove`는 같은 API(`permissions`, `set_permissions`)를 쓴다.
   - 명령은 표를 읽고 규칙 하나만 바꾼 뒤, 읽은 표를 `Expected`로 함께 보낸다. 그 사이에 표가 바뀌었으면 충돌로 거부된다.
     "그래도 저장"은 없다. 명령을 다시 실행하면 새 표에서 시작한다.
@@ -218,6 +223,18 @@
     이미 보류 중이면 `demoted`를 다시 쓰지 않는다. 기각: config의 단계를 고쳐 내리기. 낡은 저장이 조용히 되올린다.
   - 개수(도구별): 마지막 `demoted` 뒤의 `approved`, `edited`, `rejected`, `autonomous`를 센다. 그래서 보류가 개수를 처음부터 다시 센다.
     자율 실행의 실패는 항목이 `failed`이고 사본이 없는 것이다. 사본이 있으면 시작이나 소유자가 호출을 실행하지 않은 것이기 때문이다.
+  - 보류의 효과: `Policy::decide(tool, pin, kill, held)`는 보류된 도구의 `Execute`를 `NeedsApproval`로 바꾼다. 낮은 단계, 정지 스위치, pin은 그대로이다.
+    엔진의 `decide`가 보류를 읽으므로 새 제안, 승인, 재개가 모두 따른다. 재개에서 자율 항목은 실행되지 않고 `pending` 사본이 된다.
+  - 신고: `report_autonomous(inbox_id)`(`POST .../report-autonomous`, `bunsind report-autonomous`)는 정책이 소유자 없이 실행한 도구 호출 중
+    `executed`나 `failed`인 항목만 받고, 항목마다 한 번만 받는다. `reported`, 감사 `autonomous_reported`를 쓰고 도구를 보류한다(`cause: reported`).
+    기각: 실패만으로 내리기. 아무것도 보내지 않았다.
+  - 해제: `clear_autonomy_hold(tool)`(`POST .../clear-autonomy-hold`, `bunsind clear-autonomy-hold`)만 `hold_cleared`를 쓴다. 감사는 `autonomy_hold_cleared`이다.
+  - 제안(core `autonomy::suggest`, 순수 함수): 설정 `autonomy: {min_reviewed, min_unchanged_percent, window_days}`가 있고, write 도구이고,
+    단계가 `approve`이고, `bunsin.coding/` 도구가 아니고, 보류가 아니고, 최근 `window_days`일의 reviewed가 `min_reviewed` 이상이고,
+    unchanged%(내림)가 `min_unchanged_percent` 이상일 때만 참이다. 설정이 없으면(`None`) 제안이 없고 개수는 모든 날을 센다.
+    `min_unchanged_percent`가 100을 넘거나 `window_days`가 0이면 저장을 거부한다.
+  - 엔진은 단계를 올리지 않는다. 소유자만 `set_permissions`(창, `bunsind rule-set`)로 올린다. delete는 제안하지 않고 자율이 되지 않는다.
+  - `autonomy`(`POST .../autonomy`, `bunsind autonomy`): write·delete 규칙과 보류된 도구마다 개수, 보류, 제안을 돌려준다.
 - 비밀 값은 설정에 저장하지 않는다. 9절을 본다.
 
 ## 5. LLM 어댑터
@@ -601,6 +618,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
 | ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
+| 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 
 ## 17. 미해결
