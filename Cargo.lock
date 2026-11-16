@@ -1096,6 +1096,7 @@ dependencies = [
  "bunsin-testkit",
  "chacha20poly1305",
  "getrandom 0.3.4",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

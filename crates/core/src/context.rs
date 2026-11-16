@@ -64,9 +64,11 @@ Set the fields that a kind does not use to null.
 If you need more facts before you decide, call a tool that reads, such as a search.
 You then get its result and are asked again. You may do this a few times.
 Call a tool that writes only as your final answer.
-Your notes hold facts you learned in earlier events. Read a page with the tool
-`bunsin.wiki/read` and the argument `slug`. Notes can be out of date: if a fact matters
-for your answer and may have changed, check it with a tool.
+Your notes hold facts you learned in earlier events. Their index lists the pages most
+related to this event first. Read a page with the tool `bunsin.wiki/read` and the argument
+`slug`. Find pages with the tool `bunsin.wiki/search` and the argument `query`.
+Notes can be out of date: if a fact matters for your answer and may have changed,
+check it with a tool.
 To keep a durable fact for later (a schedule, an owner, a decision, a term), put a whole
 page into `wiki_updates`. Keep only facts you read with a tool in this event. Do not keep
 greetings, the event itself or details that matter once. To change a page that exists,

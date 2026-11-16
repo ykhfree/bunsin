@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
     sources TEXT NOT NULL,
     revision INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    author TEXT NOT NULL
+    author TEXT NOT NULL,
+    last_read_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS wiki_revisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -371,6 +372,14 @@ impl ProfileStore {
                  COMMIT;",
             )?;
         }
+        let has_last_read: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('wiki_pages') WHERE name = 'last_read_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_last_read {
+            db.execute_batch("ALTER TABLE wiki_pages ADD COLUMN last_read_at INTEGER;")?;
+        }
         create_search_indexes(&mut db)?;
         Ok(Self {
             dir: dir.to_owned(),
@@ -665,6 +674,13 @@ impl ProfileStore {
         rows.into_iter()
             .map(|text| text.map(|t| Ok(serde_json::from_str(&t)?)).transpose())
             .collect()
+    }
+
+    /// Records that the agent read a page now. A change of the page keeps the time.
+    pub fn mark_wiki_read(&self, slug: &str, now: i64) -> Result<()> {
+        self.db()
+            .execute("UPDATE wiki_pages SET last_read_at = ?1 WHERE slug = ?2", (now, slug))?;
+        Ok(())
     }
 
     /// The slugs of the pages that match the terms, best first. The terms come from
@@ -1519,6 +1535,9 @@ mod tests {
         assert!(s.search_wiki(&terms("금요일")).unwrap().is_empty());
         assert_eq!(s.search_wiki(&terms("목요일")).unwrap(), ["deploy"]);
         assert_eq!(s.search_wiki(&terms("rollback")).unwrap(), ["oncall"]);
+        // A read changes no indexed text.
+        s.mark_wiki_read("oncall", 55).unwrap();
+        assert_eq!(s.search_wiki(&terms("rollback")).unwrap(), ["oncall"]);
         // A delete removes it.
         assert!(s.delete_wiki_page("deploy", 60).unwrap());
         assert!(s.search_wiki(&terms("목요일")).unwrap().is_empty());
@@ -1911,6 +1930,33 @@ mod tests {
         assert_eq!(result, WikiWrite::RevisionMismatch { current: 1 });
         // The inbox move was undone with the refused write.
         assert_eq!(s.inbox_item(item.id).unwrap().state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn a_read_of_a_page_is_recorded_and_kept_through_a_change() {
+        let (_dir, s) = store();
+        let last_read = |slug: &str| -> Option<i64> {
+            s.db()
+                .query_row("SELECT last_read_at FROM wiki_pages WHERE slug = ?1", [slug], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        stored(
+            s.write_wiki_page("deploy", &wiki_text("v1"), &[], WikiAuthor::Owner, 0, None, 1)
+                .unwrap(),
+        );
+        assert_eq!(last_read("deploy"), None);
+        s.mark_wiki_read("deploy", 5).unwrap();
+        assert_eq!(last_read("deploy"), Some(5));
+        stored(
+            s.write_wiki_page("deploy", &wiki_text("v2"), &[], WikiAuthor::Agent, 1, None, 6)
+                .unwrap(),
+        );
+        assert_eq!(last_read("deploy"), Some(5));
+        // A page that does not exist is not made.
+        s.mark_wiki_read("missing", 7).unwrap();
+        assert!(s.wiki_page("missing").unwrap().is_none());
     }
 
     #[test]

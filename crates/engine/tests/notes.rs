@@ -5,7 +5,7 @@ mod common;
 use bunsin_api::{ApiError, EngineApi, Outcome, ReplayCase, WikiPageUpdate};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::records::InboxBody;
-use bunsin_core::wiki::{WIKI_READ_TOOL, WikiAuthor, WikiText};
+use bunsin_core::wiki::{WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiAuthor, WikiText};
 use common::*;
 use serde_json::{Value, json};
 
@@ -618,4 +618,164 @@ async fn an_edit_by_the_owner_keeps_the_sources_of_the_page() {
         .await
         .unwrap();
     assert!(rewritten.sources.is_empty());
+}
+
+fn search_notes(query: &str) -> String {
+    call(WIKI_SEARCH_TOOL, json!({"query": query}))
+}
+
+/// The owner writes a page with `body`. Each page is one second newer than the one before.
+async fn owner_page(rig: &Rig, slug: &str, body: &str) {
+    rig.advance(1);
+    rig.engine.set_wiki_page("kim", slug, owner_text(body)).await.unwrap();
+}
+
+/// The quoted index of the notes in a prompt, one line per entry.
+fn index_lines(prompt: &str) -> Vec<String> {
+    let start = prompt.find("<data source=\"notes\">\n").unwrap() + "<data source=\"notes\">\n".len();
+    let end = start + prompt[start..].find("\n</data>").unwrap();
+    prompt[start..end].lines().map(str::to_owned).collect()
+}
+
+#[tokio::test]
+async fn the_index_lists_the_pages_of_the_event_first_and_at_most_60() {
+    let rig = rig().await;
+    owner_page(&rig, "deploy", "금요일에 배포합니다.").await;
+    for n in 0..61 {
+        owner_page(&rig, &format!("page-{n:02}"), &format!("Fact number {n}.")).await;
+    }
+    rig.llm.reply(&ignore(), 10);
+    rig.engine
+        .ingest("kim", event("e1", "lee", "배포는 언제인가요?"))
+        .await
+        .unwrap();
+    let lines = index_lines(&rig.llm.requests()[0].messages[0].content);
+    assert_eq!(lines.len(), 61);
+    // The page about the event is first although it is the oldest. The newest pages follow.
+    assert!(lines[0].starts_with("deploy — "), "{}", lines[0]);
+    assert!(lines[1].starts_with("page-60 — "), "{}", lines[1]);
+    assert!(lines[59].starts_with("page-02 — "), "{}", lines[59]);
+    assert_eq!(
+        lines[60],
+        "(2 more page(s) not listed; find them with `bunsin.wiki/search`)"
+    );
+
+    // An event about nothing in the notes gets the newest pages only.
+    rig.llm.reply(&ignore(), 10);
+    rig.engine.ingest("kim", event("e2", "lee", "lunch?")).await.unwrap();
+    let lines = index_lines(&rig.llm.requests()[1].messages[0].content);
+    assert!(lines[0].starts_with("page-60 — ") && !lines.iter().any(|l| l.starts_with("deploy — ")));
+}
+
+#[tokio::test]
+async fn a_search_of_the_notes_gives_the_matching_pages_as_data() {
+    let rig = rig().await;
+    owner_page(&rig, "deploy", "금요일에 배포합니다. Ask kim@example.com.").await;
+    owner_page(&rig, "lunch", "Noodles on Monday.").await;
+    owner_page(&rig, "parking", "Level B2.").await;
+    rig.llm
+        .reply(&search_notes("배포 일정"), 10)
+        .reply(&search_notes("weather"), 10)
+        .reply(&ignore(), 10);
+    let outcome = rig.engine.ingest("kim", event("e1", "lee", "hi")).await.unwrap();
+    assert_eq!(outcome, Outcome::Ignored);
+    let requests = rig.llm.requests();
+    // The tool is offered with its argument.
+    let first = &requests[0].messages[0].content;
+    assert!(first.contains("bunsin.wiki/search: Find pages of your notes by words."));
+    assert!(first.contains(r#""required":["query"]"#), "{first}");
+    let found = &requests[1].messages[2].content;
+    assert!(found.starts_with(&format!(
+        "Result of `{WIKI_SEARCH_TOOL}`:\n<data source=\"tool-result\">"
+    )));
+    assert!(found.contains("deploy — Deploy schedule: When the team deploys"));
+    assert!(!found.contains("lunch") && !found.contains("parking"));
+    // A search gives the index line, not the body.
+    assert!(!found.contains("금요일") && !found.contains("kim@example.com"));
+    let none = &requests[2].messages[4].content;
+    assert!(none.contains("No page of your notes matches the query."), "{none}");
+    assert!(rig.slack.calls().is_empty());
+    // The searches are in the audit log like other reads.
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    let reads: Vec<_> = audit.iter().filter(|e| e.kind == "read").collect();
+    assert_eq!(reads.len(), 2);
+    assert_eq!(reads[0].detail["tool"], WIKI_SEARCH_TOOL);
+}
+
+#[tokio::test]
+async fn searches_count_as_reads_of_the_notes() {
+    let rig = rig().await;
+    owner_page(&rig, "deploy", "Fridays.").await;
+    rig.llm
+        .reply(&search_notes("deploy"), 10)
+        .reply(&read_page("deploy"), 10)
+        .reply(&search_notes("friday"), 10)
+        .reply(&read_page("missing"), 10)
+        .reply(&search_notes("team"), 10)
+        // A sixth use of the notes is one too many, but a connector read is still allowed.
+        .reply(&search("deploy"), 10)
+        .reply(&search_notes("again"), 10);
+    let outcome = rig.engine.ingest("kim", event("e1", "lee", "deploy?")).await.unwrap();
+    let Outcome::Escalated { inbox_id } = outcome else {
+        panic!("expected an escalation, got {outcome:?}")
+    };
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    let item = inbox.iter().find(|i| i.id == inbox_id).unwrap();
+    let InboxBody::Escalation { summary } = &item.body else {
+        panic!("expected an escalation")
+    };
+    assert!(summary.contains("more than 5 reads"), "{summary}");
+    assert_eq!(rig.slack.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_search_of_the_notes_is_no_source_of_a_fact() {
+    let rig = rig().await;
+    owner_page(&rig, "deploy", "Fridays.").await;
+    rig.llm
+        .reply(&search_notes("deploy"), 10)
+        .reply(&with_notes(&ignore(), json!([page("new-fact", "Thursdays.")])), 10);
+    rig.engine.ingest("kim", event("e1", "lee", "deploy?")).await.unwrap();
+    assert!(pending_notes(&rig).await.is_empty());
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    let dropped = audit.iter().find(|e| e.kind == "wiki_change_dropped").unwrap();
+    assert_eq!(dropped.detail["slug"], "new-fact");
+
+    // With a connector read too, the sources name only the connector and the event.
+    rig.llm
+        .reply(&search_notes("deploy"), 10)
+        .reply(&search("deploy"), 10)
+        .reply(&with_notes(&ignore(), json!([page("new-fact", "Thursdays.")])), 10);
+    rig.engine.ingest("kim", event("e2", "lee", "deploy?")).await.unwrap();
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    let InboxBody::WikiChange { sources, .. } = &inbox[0].body else {
+        panic!("expected a page change")
+    };
+    let origins: Vec<&str> = sources.iter().map(|s| s.origin.as_str()).collect();
+    assert_eq!(origins, ["event", "slack/search"]);
+}
+
+#[tokio::test]
+async fn a_read_of_a_page_records_when_it_was_read() {
+    let rig = rig().await;
+    owner_page(&rig, "deploy", "Fridays.").await;
+    owner_page(&rig, "lunch", "Noodles.").await;
+    rig.advance(100);
+    rig.llm
+        .reply(&read_page("deploy"), 10)
+        .reply(&search_notes("noodles"), 10)
+        .reply(&ignore(), 10);
+    rig.engine.ingest("kim", event("e1", "lee", "deploy?")).await.unwrap();
+    let db = rusqlite::Connection::open(rig.dir.path().join("profiles/kim/agent.db")).unwrap();
+    let mut statement = db
+        .prepare("SELECT slug, last_read_at FROM wiki_pages ORDER BY slug")
+        .unwrap();
+    let rows: Vec<(String, Option<i64>)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // A search reads no page.
+    let now = rig.clock.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(rows, [("deploy".to_owned(), Some(now)), ("lunch".to_owned(), None)]);
 }

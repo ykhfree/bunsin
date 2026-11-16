@@ -32,7 +32,7 @@ use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, R
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
 use bunsin_core::records::{CorrectionRecord, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
-use bunsin_core::wiki::{WIKI_READ_TOOL, WikiPage, WikiSummary, WikiUpdate, index_text, page_text};
+use bunsin_core::wiki::{WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiPage, WikiSummary, WikiUpdate, is_notes_tool};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
 use llm_log::Purpose;
 use serde_json::{Map, Value, json};
@@ -421,16 +421,12 @@ impl Engine {
         let (corrections, notes_index) = match allow_reads {
             true => (
                 Self::similar_corrections(store, event)?,
-                Some(index_text(&store.wiki_index().map_err(store_error)?, self.now())),
+                Some(self.notes_index(store, event)?),
             ),
             false => (Vec::new(), None),
         };
         if allow_reads {
-            tools.push(ToolHint {
-                tool_id: WIKI_READ_TOOL.to_owned(),
-                description: "Read one page of your notes.".to_owned(),
-                input_schema: json!({"type": "object", "required": ["slug"], "properties": {"slug": {"type": "string"}}}),
-            });
+            tools.extend(notes::notes_tools());
         }
         let mut counts = RedactionCounts::new();
         let mut request: CompletionRequest = assemble(
@@ -530,8 +526,8 @@ impl Engine {
             let Proposal::ToolCall { tool, args, .. } = &proposal else {
                 return Ok((ready(proposal, reads, pages_read), replies));
             };
-            // The built-in notes tool is handled here. It is not in the permission table.
-            let reads_notes = tool == WIKI_READ_TOOL;
+            // The built-in notes tools are handled here. They are not in the permission table.
+            let reads_notes = tool == WIKI_READ_TOOL || tool == WIKI_SEARCH_TOOL;
             let is_read = config
                 .policy
                 .rules
@@ -545,7 +541,7 @@ impl Engine {
             // The limit counts the reads of the notes and of connectors separately.
             let same_kind = reads
                 .iter()
-                .filter(|read| (read.tool == WIKI_READ_TOOL) == reads_notes)
+                .filter(|read| is_notes_tool(&read.tool) == reads_notes)
                 .count();
             if same_kind >= MAX_READS_PER_EVENT {
                 let reason = format!("the agent asked for more than {MAX_READS_PER_EVENT} reads");
@@ -563,17 +559,7 @@ impl Engine {
             }
 
             let (text, ok) = if reads_notes {
-                let slug = args.get("slug").and_then(Value::as_str).unwrap_or_default();
-                match store.wiki_page(slug).map_err(store_error)? {
-                    Some(page) => {
-                        pages_read.insert(slug.to_owned());
-                        (
-                            redactor.redact(&page_text(&page, self.now()), &mut RedactionCounts::new()),
-                            true,
-                        )
-                    }
-                    None => (format!("Your notes have no page `{slug}`."), false),
-                }
+                self.run_notes_tool(ctx, tool, args, &mut pages_read)?
             } else {
                 let result = match split_tool_id(tool) {
                     Some((connector, name)) => match runtime.connector(connector) {

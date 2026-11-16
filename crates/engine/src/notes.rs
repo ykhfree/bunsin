@@ -1,16 +1,86 @@
-//! The agent's notes (wiki): proposed changes, their approval, and the owner's own edits.
+//! The agent's notes (wiki): the index and the built-in tools in a prompt, proposed changes,
+//! their approval, and the owner's own edits.
 
 use crate::{Ctx, Engine, store_error};
 use bunsin_api::{ApiError, ApiResult, Outcome, WikiPageUpdate};
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::context::ToolHint;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::privacy::RedactionCounts;
 use bunsin_core::records::{InboxBody, InboxItem, ReadNote};
-use bunsin_core::wiki::{MAX_PAGES, WIKI_READ_TOOL, WikiAuthor, WikiPage, WikiSource, WikiUpdate, valid_slug};
+use bunsin_core::search::query_terms;
+use bunsin_core::wiki::{
+    MAX_PAGES, MAX_SEARCH_RESULTS, WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiAuthor, WikiPage, WikiSource, WikiSummary,
+    WikiUpdate, index_text, is_notes_tool, page_text, prompt_index, valid_slug,
+};
 use bunsin_store::{ProfileStore, WikiWrite};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
+/// The built-in notes tools as the LLM sees them.
+pub(crate) fn notes_tools() -> [ToolHint; 2] {
+    let one_string =
+        |name: &str| json!({"type": "object", "required": [name], "properties": {name: {"type": "string"}}});
+    [
+        ToolHint {
+            tool_id: WIKI_READ_TOOL.to_owned(),
+            description: "Read one page of your notes.".to_owned(),
+            input_schema: one_string("slug"),
+        },
+        ToolHint {
+            tool_id: WIKI_SEARCH_TOOL.to_owned(),
+            description: format!(
+                "Find pages of your notes by words. Gives up to {MAX_SEARCH_RESULTS} pages: slug, title and summary."
+            ),
+            input_schema: one_string("query"),
+        },
+    ]
+}
+
 impl Engine {
+    /// The index of the notes for the prompt of an event: the pages related to the event first.
+    pub(crate) fn notes_index(&self, store: &ProfileStore, event: &InboundEvent) -> ApiResult<String> {
+        let ranked = store.search_wiki(&query_terms(&event.text)).map_err(store_error)?;
+        let pages = store.wiki_index().map_err(store_error)?;
+        Ok(prompt_index(&pages, &ranked, self.now()))
+    }
+
+    /// Runs a built-in notes tool. Returns its result as filtered text, and false if the page
+    /// to read does not exist. A page that is read joins `pages_read`.
+    pub(crate) fn run_notes_tool(
+        &self,
+        ctx: &Ctx,
+        tool: &str,
+        args: &Map<String, Value>,
+        pages_read: &mut BTreeSet<String>,
+    ) -> ApiResult<(String, bool)> {
+        let store = &ctx.store;
+        let filter = |text: &str| ctx.redactor.redact(text, &mut RedactionCounts::new());
+        let arg = |name: &str| args.get(name).and_then(Value::as_str).unwrap_or_default();
+        if tool == WIKI_SEARCH_TOOL {
+            let found = store.search_wiki(&query_terms(arg("query"))).map_err(store_error)?;
+            let index = store.wiki_index().map_err(store_error)?;
+            let pages: Vec<WikiSummary> = found
+                .iter()
+                .take(MAX_SEARCH_RESULTS)
+                .filter_map(|slug| index.iter().find(|page| &page.slug == slug).cloned())
+                .collect();
+            if pages.is_empty() {
+                return Ok(("No page of your notes matches the query.".to_owned(), true));
+            }
+            return Ok((filter(&index_text(&pages, self.now())), true));
+        }
+        let slug = arg("slug");
+        match store.wiki_page(slug).map_err(store_error)? {
+            Some(page) => {
+                pages_read.insert(slug.to_owned());
+                store.mark_wiki_read(slug, self.now()).map_err(store_error)?;
+                Ok((filter(&page_text(&page, self.now())), true))
+            }
+            None => Ok((format!("Your notes have no page `{slug}`."), false)),
+        }
+    }
+
     /// Puts the page changes of a reply into the inbox. Nothing is stored in the notes
     /// before the owner approves an item.
     pub(crate) fn file_wiki_changes(
@@ -34,11 +104,11 @@ impl Engine {
                 json!({"slug": slug, "reason": reason}),
             )
         };
-        // A fact must come from outside the notes. A read of the notes is not a source,
+        // A fact must come from outside the notes. A read or a search of the notes is not a source,
         // or the notes could cite themselves.
         let mut sources: Vec<WikiSource> = reads
             .iter()
-            .filter(|read| read.tool != WIKI_READ_TOOL)
+            .filter(|read| !is_notes_tool(&read.tool))
             .map(|read| WikiSource {
                 origin: read.tool.clone(),
                 detail: Value::Object(read.args.clone()).to_string(),

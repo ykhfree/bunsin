@@ -6,9 +6,22 @@
 use crate::privacy::{RedactionCounts, Redactor};
 use serde::{Deserialize, Serialize};
 
-/// The ID of the built-in tool that reads one page. A connector name cannot contain `.`,
-/// so no connector tool can have this ID.
+/// The start of the IDs of the built-in notes tools. A connector name cannot contain `.`,
+/// so no connector tool can have such an ID.
+pub const WIKI_TOOL_PREFIX: &str = "bunsin.wiki/";
+/// The ID of the built-in tool that reads one page.
 pub const WIKI_READ_TOOL: &str = "bunsin.wiki/read";
+/// The ID of the built-in tool that finds pages by a query.
+pub const WIKI_SEARCH_TOOL: &str = "bunsin.wiki/search";
+/// The most pages one search returns.
+pub const MAX_SEARCH_RESULTS: usize = 10;
+/// The most lines of the index in a prompt.
+pub const MAX_INDEX_LINES: usize = 60;
+
+/// True if `tool` is a built-in notes tool. Such a tool reads the notes, so it is never the source of a fact.
+pub fn is_notes_tool(tool: &str) -> bool {
+    tool.starts_with(WIKI_TOOL_PREFIX)
+}
 
 pub const MAX_SLUG_LEN: usize = 64;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -156,6 +169,25 @@ pub fn index_text(pages: &[WikiSummary], now: i64) -> String {
         .join("\n")
 }
 
+/// The index for the prompt of one event, at most `MAX_INDEX_LINES` lines. The pages in `ranked`
+/// come first in that order, then the other pages, changed last first. A last line counts the pages left out.
+pub fn prompt_index(pages: &[WikiSummary], ranked: &[String], now: i64) -> String {
+    let by_slug = |slug: &String| pages.iter().find(|page| &page.slug == slug);
+    let mut ordered: Vec<WikiSummary> = ranked.iter().filter_map(by_slug).cloned().collect();
+    let mut rest: Vec<&WikiSummary> = pages.iter().filter(|page| !ranked.contains(&page.slug)).collect();
+    rest.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.slug.cmp(&b.slug)));
+    ordered.extend(rest.into_iter().cloned());
+    let left_out = ordered.len().saturating_sub(MAX_INDEX_LINES);
+    ordered.truncate(MAX_INDEX_LINES);
+    let mut text = index_text(&ordered, now);
+    if left_out > 0 {
+        text.push_str(&format!(
+            "\n({left_out} more page(s) not listed; find them with `{WIKI_SEARCH_TOOL}`)"
+        ));
+    }
+    text
+}
+
 /// A page as text for a prompt.
 pub fn page_text(page: &WikiPage, now: i64) -> String {
     let days = (now - page.updated_at).max(0) / 86_400;
@@ -198,12 +230,60 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_tool_id_cannot_be_a_connector_tool() {
-        let (connector, tool) = crate::proposal::split_tool_id(WIKI_READ_TOOL).unwrap();
-        assert_eq!(tool, "read");
-        assert!(!crate::settings::valid_connector_name(connector));
+    fn the_built_in_tool_ids_cannot_be_connector_tools() {
+        for (id, name) in [(WIKI_READ_TOOL, "read"), (WIKI_SEARCH_TOOL, "search")] {
+            let (connector, tool) = crate::proposal::split_tool_id(id).unwrap();
+            assert_eq!(tool, name);
+            assert!(!crate::settings::valid_connector_name(connector));
+            assert!(is_notes_tool(id));
+        }
         // A connector that is named `wiki` has another ID.
-        assert_ne!(WIKI_READ_TOOL, "wiki/read");
+        assert!(!is_notes_tool("wiki/read"));
+        assert!(!is_notes_tool("slack/search"));
+    }
+
+    fn summary(slug: &str, updated_at: i64) -> WikiSummary {
+        WikiSummary {
+            slug: slug.into(),
+            title: slug.to_uppercase(),
+            summary: "s".into(),
+            revision: 1,
+            updated_at,
+        }
+    }
+
+    fn slugs(index: &str) -> Vec<&str> {
+        index.lines().map(|line| line.split(' ').next().unwrap()).collect()
+    }
+
+    #[test]
+    fn the_prompt_index_lists_the_ranked_pages_first_then_the_newest() {
+        let pages = [summary("a", 10), summary("b", 30), summary("c", 20), summary("d", 30)];
+        let ranked = ["c".to_owned(), "a".to_owned()];
+        assert_eq!(slugs(&prompt_index(&pages, &ranked, 100)), ["c", "a", "b", "d"]);
+        // Without ranked pages, the newest come first. Equal times keep the slug order.
+        assert_eq!(slugs(&prompt_index(&pages, &[], 100)), ["b", "d", "c", "a"]);
+        // A ranked slug without a page is left out.
+        assert_eq!(slugs(&prompt_index(&pages[..1], &["gone".to_owned()], 100)), ["a"]);
+        assert_eq!(prompt_index(&[], &[], 100), "");
+    }
+
+    #[test]
+    fn the_prompt_index_has_at_most_60_lines_and_counts_the_rest() {
+        let pages: Vec<WikiSummary> = (0..62).map(|n| summary(&format!("p{n:02}"), n)).collect();
+        let ranked = ["p00".to_owned()];
+        let index = prompt_index(&pages, &ranked, 100);
+        let lines: Vec<&str> = index.lines().collect();
+        assert_eq!(lines.len(), MAX_INDEX_LINES + 1);
+        assert!(lines[0].starts_with("p00 "));
+        assert!(lines[1].starts_with("p61 "));
+        assert!(lines[59].starts_with("p03 "));
+        assert_eq!(
+            lines[60],
+            "(2 more page(s) not listed; find them with `bunsin.wiki/search`)"
+        );
+        // Exactly 60 pages need no last line.
+        assert_eq!(prompt_index(&pages[..60], &[], 100).lines().count(), 60);
     }
 
     #[test]

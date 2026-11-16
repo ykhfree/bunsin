@@ -31,7 +31,7 @@ Bunsin is in early development. Read this list before you use it.
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
-- **Not built yet:** full-text search of the notes, ARD publishing and search, the REST API
+- **Not built yet:** ARD publishing and search, the REST API
   connector, OAuth for MCP servers, the scoring of replay evaluation.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
   a real MCP server.
@@ -511,7 +511,11 @@ and the sources of its facts. It works like a small wiki that the agent writes.
   `note <page> (new page)` or `(change)`, with the new text, its sources and the text it
   replaces. Nothing is kept until you approve it.
 - In later events the agent sees the list of pages and reads the ones it needs before it
-  searches again.
+  searches again. The list shows the pages that share rare words with the message first,
+  then the newest pages, and at most 60 lines. The agent can also search its notes by
+  words (`bunsin.wiki/search`): it gets up to 10 pages with their titles and summaries.
+  A search counts toward the five reads of the notes, and it is never the source of a new
+  fact.
 - A page is reference material. Whatever a page says, the permission table decides what
   the agent may do.
 - The agent proposes a page only from something it read in that event, changes an
@@ -538,7 +542,7 @@ bunsind wiki-export kim ./notes        # index.md and pages/*.md
 ```
 
 Not built yet: a periodic check for stale or conflicting pages, applying changes without
-approval, loading a Confluence space in advance, and full-text search.
+approval, and loading a Confluence space in advance.
 
 ### Work with the agent
 
