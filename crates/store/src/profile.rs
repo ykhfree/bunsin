@@ -2,10 +2,14 @@ use crate::{Result, StoreError};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
 use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxBody, InboxItem, LlmUsage, ReadNote};
+use bunsin_core::search::{TermQuery, rank, term_query};
 use bunsin_core::sha256_hex;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiSource, WikiSummary, WikiText};
-use rusqlite::{Connection, OptionalExtension, Row};
+use rusqlite::types::FromSql;
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior};
 use serde_json::Value;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -39,7 +43,11 @@ CREATE TABLE IF NOT EXISTS corrections (
     original TEXT NOT NULL,
     edited TEXT NOT NULL,
     reason TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    tool TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    retired_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS artifacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +106,78 @@ CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit
 BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 ";
 
+/// The full-text index of the corrections. It reads its text from `corrections` by `id`.
+/// A correction is never changed or deleted: retiring it sets `retired_at`, which is not indexed.
+const CORRECTIONS_FTS: &str = "
+CREATE VIRTUAL TABLE corrections_fts USING fts5(
+    task, original, edited, reason, content = 'corrections', content_rowid = 'id', tokenize = 'trigram'
+);
+CREATE TRIGGER corrections_fts_insert AFTER INSERT ON corrections BEGIN
+    INSERT INTO corrections_fts (rowid, task, original, edited, reason)
+    VALUES (new.id, new.task, new.original, new.edited, new.reason);
+END;
+INSERT INTO corrections_fts (corrections_fts) VALUES ('rebuild');
+";
+
+/// The full-text index of the notes. It holds its own copy of the text, keyed by slug, because
+/// an external-content index needs an integer key and `wiki_pages` is keyed by slug.
+/// The triggers keep it in step with inserts, UPSERTs and deletes.
+const WIKI_FTS: &str = "
+CREATE VIRTUAL TABLE wiki_fts USING fts5(slug UNINDEXED, title, summary, body, tokenize = 'trigram');
+CREATE TRIGGER wiki_fts_insert AFTER INSERT ON wiki_pages BEGIN
+    INSERT INTO wiki_fts (slug, title, summary, body) VALUES (new.slug, new.title, new.summary, new.body);
+END;
+CREATE TRIGGER wiki_fts_update AFTER UPDATE OF title, summary, body ON wiki_pages BEGIN
+    DELETE FROM wiki_fts WHERE slug = old.slug;
+    INSERT INTO wiki_fts (slug, title, summary, body) VALUES (new.slug, new.title, new.summary, new.body);
+END;
+CREATE TRIGGER wiki_fts_delete AFTER DELETE ON wiki_pages BEGIN
+    DELETE FROM wiki_fts WHERE slug = old.slug;
+END;
+INSERT INTO wiki_fts (slug, title, summary, body) SELECT slug, title, summary, body FROM wiki_pages;
+";
+
 const KILL_SWITCH: &str = "kill_switch";
+
+/// Creates each full-text index that is missing and fills it from the rows that exist.
+/// One transaction holds the check and the fill, so an index is never half made.
+fn create_search_indexes(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (name, sql) in [("corrections_fts", CORRECTIONS_FTS), ("wiki_fts", WIKI_FTS)] {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.execute_batch(sql)?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// For each term, the keys of the rows that match it. `match_sql` and `like_sql` take the
+/// argument of `search::term_query` as `?1`.
+fn term_hits<K: FromSql + Ord>(
+    db: &Connection,
+    terms: &[String],
+    match_sql: &str,
+    like_sql: &str,
+) -> Result<Vec<BTreeSet<K>>> {
+    terms
+        .iter()
+        .map(|term| {
+            let (sql, arg) = match term_query(term) {
+                TermQuery::Match(phrase) => (match_sql, phrase),
+                TermQuery::Like(pattern) => (like_sql, pattern),
+            };
+            let mut statement = db.prepare_cached(sql)?;
+            let rows = statement.query_map([arg], |row| row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<BTreeSet<K>>>()?)
+        })
+        .collect()
+}
 
 /// A secret as it is stored: encrypted, with the address it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,7 +314,7 @@ const INBOX_COLUMNS: &str =
 impl ProfileStore {
     pub(crate) fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir.join("artifacts").join("sha256"))?;
-        let db = Connection::open(dir.join("agent.db"))?;
+        let mut db = Connection::open(dir.join("agent.db"))?;
         db.busy_timeout(crate::BUSY_TIMEOUT)?;
         db.execute_batch(SCHEMA)?;
         // A database from before events could be retried lacks two columns.
@@ -275,6 +354,23 @@ impl ProfileStore {
                  COMMIT;",
             )?;
         }
+        let has_task: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('corrections') WHERE name = 'task')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_task {
+            // An older correction has no tool, source or task. It is still found by its texts.
+            db.execute_batch(
+                "BEGIN;
+                 ALTER TABLE corrections ADD COLUMN tool TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE corrections ADD COLUMN source TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE corrections ADD COLUMN task TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE corrections ADD COLUMN retired_at INTEGER;
+                 COMMIT;",
+            )?;
+        }
+        create_search_indexes(&mut db)?;
         Ok(Self {
             dir: dir.to_owned(),
             db: Mutex::new(db),
@@ -557,6 +653,25 @@ impl ProfileStore {
             .collect()
     }
 
+    /// The slugs of the pages that match the terms, best first. The terms come from
+    /// `search::query_terms`. Of two equal matches, the page changed last comes first.
+    pub fn search_wiki(&self, terms: &[String]) -> Result<Vec<String>> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT slug, updated_at FROM wiki_pages")?;
+        let updated = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<BTreeMap<String, i64>>>()?;
+        let hits: Vec<BTreeSet<String>> = term_hits(
+            &db,
+            terms,
+            "SELECT slug FROM wiki_fts WHERE wiki_fts MATCH ?1",
+            "SELECT slug FROM wiki_pages WHERE title LIKE ?1 OR summary LIKE ?1 OR body LIKE ?1",
+        )?;
+        Ok(rank(updated.len(), &hits, |slug| {
+            (Reverse(updated[slug]), slug.clone())
+        }))
+    }
+
     /// True if a pending inbox item proposes a change to this page.
     pub fn has_pending_wiki_change(&self, slug: &str) -> Result<bool> {
         let db = self.db();
@@ -700,29 +815,78 @@ impl ProfileStore {
 
     // --- corrections ---
 
-    pub fn add_correction(&self, inbox_id: i64, correction: &Correction, now: i64) -> Result<()> {
-        self.db().execute(
-            "INSERT INTO corrections (inbox_id, original, edited, reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+    /// Stores a correction and returns its ID.
+    pub fn add_correction(&self, inbox_id: i64, correction: &Correction, now: i64) -> Result<i64> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO corrections (inbox_id, original, edited, reason, created_at, tool, source, task)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 inbox_id,
                 &correction.original,
                 &correction.edited,
                 &correction.reason,
                 now,
+                &correction.tool,
+                &correction.source,
+                &correction.task,
             ),
         )?;
-        Ok(())
+        Ok(db.last_insert_rowid())
+    }
+
+    /// The corrections that are not retired and match the terms best, at most `limit`, best first.
+    /// The terms come from `search::query_terms`. Of two equal matches, a correction of an event
+    /// from `source` comes first, then the newer one.
+    pub fn similar_corrections(&self, terms: &[String], source: &str, limit: usize) -> Result<Vec<Correction>> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT id, source FROM corrections WHERE retired_at IS NULL")?;
+        let sources = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<BTreeMap<i64, String>>>()?;
+        let hits: Vec<BTreeSet<i64>> = term_hits(
+            &db,
+            terms,
+            "SELECT c.id FROM corrections_fts f JOIN corrections c ON c.id = f.rowid
+             WHERE corrections_fts MATCH ?1 AND c.retired_at IS NULL",
+            "SELECT id FROM corrections WHERE retired_at IS NULL
+             AND (task LIKE ?1 OR original LIKE ?1 OR edited LIKE ?1 OR reason LIKE ?1)",
+        )?;
+        let ranked = rank(sources.len(), &hits, |id| (sources[id] != source, Reverse(*id)));
+        let mut statement =
+            db.prepare("SELECT tool, source, task, original, edited, reason FROM corrections WHERE id = ?1")?;
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|id| {
+                Ok(statement.query_row([id], |row| {
+                    Ok(Correction {
+                        tool: row.get(0)?,
+                        source: row.get(1)?,
+                        task: row.get(2)?,
+                        original: row.get(3)?,
+                        edited: row.get(4)?,
+                        reason: row.get(5)?,
+                    })
+                })?)
+            })
+            .collect()
     }
 
     /// Newest first.
     pub fn recent_corrections(&self, limit: u32) -> Result<Vec<Correction>> {
         let db = self.db();
-        let mut statement = db.prepare("SELECT original, edited, reason FROM corrections ORDER BY id DESC LIMIT ?1")?;
+        let mut statement = db.prepare(
+            "SELECT tool, source, task, original, edited, reason FROM corrections ORDER BY id DESC LIMIT ?1",
+        )?;
         let rows = statement.query_map([limit], |row| {
             Ok(Correction {
-                original: row.get(0)?,
-                edited: row.get(1)?,
-                reason: row.get(2)?,
+                tool: row.get(0)?,
+                source: row.get(1)?,
+                task: row.get(2)?,
+                original: row.get(3)?,
+                edited: row.get(4)?,
+                reason: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1165,19 +1329,177 @@ mod tests {
         assert_eq!(s.inbox_item(item.id).unwrap().body, tool_call("hello"));
     }
 
+    fn correction(source: &str, task: &str, reason: &str) -> Correction {
+        Correction {
+            tool: "slack/post".into(),
+            source: source.into(),
+            task: task.into(),
+            original: "Draft".into(),
+            edited: "Edit".into(),
+            reason: reason.into(),
+        }
+    }
+
     #[test]
     fn corrections_come_back_newest_first() {
         let (_dir, s) = store();
         for (i, reason) in ["too long", "wrong tone", "missing link"].iter().enumerate() {
-            let c = Correction {
-                original: "o".into(),
-                edited: "e".into(),
-                reason: (*reason).into(),
-            };
-            s.add_correction(1, &c, i as i64).unwrap();
+            s.add_correction(1, &correction("slack", "t", reason), i as i64)
+                .unwrap();
         }
         let reasons: Vec<String> = s.recent_corrections(2).unwrap().into_iter().map(|c| c.reason).collect();
         assert_eq!(reasons, ["missing link", "wrong tone"]);
+    }
+
+    fn terms(text: &str) -> Vec<String> {
+        bunsin_core::search::query_terms(text)
+    }
+
+    fn reasons(found: Vec<Correction>) -> Vec<String> {
+        found.into_iter().map(|c| c.reason).collect()
+    }
+
+    #[test]
+    fn similar_corrections_are_found_by_rare_terms_and_skip_retired_ones() {
+        let (_dir, s) = store();
+        let tasks = [
+            ("slack", "금요일 배포 일정을 알려 주세요", "deploy day"),
+            ("jira", "the release notes for PROJ please", "release notes"),
+            ("slack", "the lunch menu please", "lunch"),
+            ("jira", "배포는 언제인가요", "deploy question"),
+            ("slack", "the parking lot please", "parking"),
+        ];
+        for (i, (source, task, reason)) in tasks.iter().enumerate() {
+            s.add_correction(i as i64 + 1, &correction(source, task, reason), i as i64)
+                .unwrap();
+        }
+        // `배포` has two syllables and is found by LIKE in two tasks; `금요일` by the trigram index.
+        let found = s
+            .similar_corrections(&terms("금요일에 배포를 하나요?"), "slack", 5)
+            .unwrap();
+        assert_eq!(reasons(found), ["deploy day", "deploy question"]);
+        // `the` and `please` are in three of five tasks: too common to find anything alone.
+        assert!(
+            s.similar_corrections(&terms("the please"), "slack", 5)
+                .unwrap()
+                .is_empty()
+        );
+        let found = s.similar_corrections(&terms("the release please"), "slack", 5).unwrap();
+        assert_eq!(reasons(found), ["release notes"]);
+        // A word of every correction finds none, also in the texts of the draft and the edit.
+        assert!(
+            s.similar_corrections(&terms("draft edit"), "slack", 5)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Equal matches: the same source first, then the newest.
+        let found = s.similar_corrections(&terms("배포"), "jira", 5).unwrap();
+        assert_eq!(reasons(found), ["deploy question", "deploy day"]);
+        let found = s.similar_corrections(&terms("배포"), "slack", 5).unwrap();
+        assert_eq!(reasons(found), ["deploy day", "deploy question"]);
+        let found = s.similar_corrections(&terms("배포"), "github", 1).unwrap();
+        assert_eq!(reasons(found), ["deploy question"]);
+
+        // A retired correction is neither found nor counted.
+        s.db()
+            .execute("UPDATE corrections SET retired_at = 9 WHERE reason = 'deploy day'", [])
+            .unwrap();
+        let found = s.similar_corrections(&terms("금요일 배포"), "slack", 5).unwrap();
+        assert_eq!(reasons(found), ["deploy question"]);
+        assert!(s.similar_corrections(&[], "slack", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_notes_index_follows_inserts_upserts_and_deletes() {
+        let (_dir, s) = store();
+        let write = |slug: &str, body: &str, base: u64, now: i64| {
+            stored(
+                s.write_wiki_page(slug, &wiki_text(body), &[], WikiAuthor::Owner, base, None, now)
+                    .unwrap(),
+            )
+        };
+        write("deploy", "금요일 배포. Rollback by hand.", 0, 10);
+        write("oncall", "당번 순서표. Rollback needs the on-call.", 0, 20);
+        write("lunch", "Noodles on Monday.", 0, 30);
+        write("parking", "Level B2.", 0, 40);
+        assert_eq!(s.search_wiki(&terms("금요일")).unwrap(), ["deploy"]);
+        assert_eq!(s.search_wiki(&terms("배포")).unwrap(), ["deploy"]);
+        // Both pages match: the one changed last comes first.
+        assert_eq!(s.search_wiki(&terms("rollback")).unwrap(), ["oncall", "deploy"]);
+        // A page that matches two terms beats one that matches one.
+        assert_eq!(s.search_wiki(&terms("rollback 당번")).unwrap(), ["oncall", "deploy"]);
+        assert_eq!(s.search_wiki(&terms("rollback 금요일")).unwrap(), ["deploy", "oncall"]);
+        // The title of every page has `schedule`: too common to find a page.
+        assert!(s.search_wiki(&terms("schedule")).unwrap().is_empty());
+
+        // An UPSERT replaces the indexed text.
+        write("deploy", "목요일 배포.", 1, 50);
+        assert!(s.search_wiki(&terms("금요일")).unwrap().is_empty());
+        assert_eq!(s.search_wiki(&terms("목요일")).unwrap(), ["deploy"]);
+        assert_eq!(s.search_wiki(&terms("rollback")).unwrap(), ["oncall"]);
+        // A delete removes it.
+        assert!(s.delete_wiki_page("deploy", 60).unwrap());
+        assert!(s.search_wiki(&terms("목요일")).unwrap().is_empty());
+        let indexed: i64 = s
+            .db()
+            .query_row("SELECT count(*) FROM wiki_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexed, 3);
+    }
+
+    #[test]
+    fn an_older_database_gets_filled_search_indexes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_dir = dir.path().join("profiles/kim");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let old = Connection::open(profile_dir.join("agent.db")).unwrap();
+        old.execute_batch(
+            "CREATE TABLE corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, inbox_id INTEGER NOT NULL,
+                 original TEXT NOT NULL, edited TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO corrections (inbox_id, original, edited, reason, created_at) VALUES
+                 (1, 'Long formal draft', 'Short', 'too formal', 1),
+                 (2, 'Lunch draft', 'Lunch', 'menu', 2),
+                 (3, 'Parking draft', 'Parking', 'level', 3);
+             CREATE TABLE wiki_pages (slug TEXT PRIMARY KEY, title TEXT NOT NULL, summary TEXT NOT NULL,
+                 body TEXT NOT NULL, sources TEXT NOT NULL, revision INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL, author TEXT NOT NULL);
+             INSERT INTO wiki_pages VALUES ('deploy', 'Deploy', 'When', '금요일 배포', '[]', 1, 1, 'owner'),
+                 ('lunch', 'Lunch', 'Where', 'Noodles', '[]', 1, 2, 'owner');",
+        )
+        .unwrap();
+        drop(old);
+        let s = ProfileStore::open(&profile_dir).unwrap();
+        let found = s.similar_corrections(&terms("formal"), "slack", 5).unwrap();
+        assert_eq!(
+            found,
+            [Correction {
+                tool: String::new(),
+                source: String::new(),
+                task: String::new(),
+                original: "Long formal draft".into(),
+                edited: "Short".into(),
+                reason: "too formal".into(),
+            }]
+        );
+        assert_eq!(s.search_wiki(&terms("금요일")).unwrap(), ["deploy"]);
+        // A new correction is indexed too.
+        s.add_correction(4, &correction("slack", "금요일 회의", "meeting"), 4)
+            .unwrap();
+        assert_eq!(
+            reasons(s.similar_corrections(&terms("금요일"), "slack", 5).unwrap()),
+            ["meeting"]
+        );
+        // Opening again fills nothing twice.
+        drop(s);
+        let s = ProfileStore::open(&profile_dir).unwrap();
+        let count = |table: &str| -> i64 {
+            s.db()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!((count("wiki_fts"), count("corrections_fts")), (2, 4));
+        assert_eq!(s.search_wiki(&terms("noodles")).unwrap(), ["lunch"]);
     }
 
     fn llm_call(at: i64, purpose: &str, tokens: u64, latency_ms: u64, outcome: &str) -> LlmCall {

@@ -911,6 +911,9 @@ impl Engine {
                     .map_err(|e| ApiError::Invalid(e.to_string()))?;
             }
             let correction = Correction {
+                tool: tool_id.clone(),
+                source: String::new(),
+                task: String::new(),
                 original: draft_text(&args, text_arg),
                 edited: draft_text(&edited, text_arg),
                 reason,
