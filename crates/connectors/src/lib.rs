@@ -24,7 +24,8 @@ use std::time::Duration;
 pub use bunsin_core::settings::McpConfig;
 
 /// How long a tool call of an MCP connector may take, with the tool list that comes first.
-/// Tools can be slow, so the limit is generous. A call that runs out is cancelled on the server.
+/// A tool list alone, as the engine asks for it before each call, has the same limit.
+/// Tools can be slow, so the limit is generous. A request that runs out is cancelled on the server.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The token of an HTTP connector and the header that carries it.
@@ -47,7 +48,7 @@ pub struct McpConnector {
     name: String,
     config: McpConfig,
     client: RunningService<RoleClient, ()>,
-    /// The time limit of one tool call. `CALL_TIMEOUT` unless changed.
+    /// The time limit of one tool call or tool list. `CALL_TIMEOUT` unless changed.
     call_timeout: Duration,
 }
 
@@ -152,7 +153,7 @@ impl McpConnector {
         }
     }
 
-    /// The same connector with another time limit for each tool call.
+    /// The same connector with another time limit for each tool call and tool list.
     pub fn with_call_timeout(mut self, limit: Duration) -> Self {
         self.call_timeout = limit;
         self
@@ -186,8 +187,17 @@ impl Connector for McpConnector {
         &self.name
     }
 
+    /// The engine lists the tools before each call, so a list that never ends would hold the event too.
     fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolSpec>, ConnectorError>> {
-        Box::pin(self.list_all())
+        Box::pin(async move {
+            match tokio::time::timeout(self.call_timeout, self.list_all()).await {
+                Ok(result) => result,
+                Err(_) => Err(ConnectorError::Transport(format!(
+                    "the tool list did not end in {} s and was cancelled",
+                    self.call_timeout.as_secs_f64()
+                ))),
+            }
+        })
     }
 
     /// A server that never answers must not hold the event that called the tool. At the time

@@ -23,7 +23,9 @@ pub struct TestServer {
     pub list_requests: Arc<Mutex<usize>>,
     /// While true, a call does not answer until the client cancels it.
     pub hang: Arc<Mutex<bool>>,
-    /// The number of calls that the client cancelled.
+    /// While true, a tool list does not answer until the client cancels it.
+    pub hang_list: Arc<Mutex<bool>>,
+    /// The number of calls and tool lists that the client cancelled.
     pub cancelled: Arc<Mutex<usize>>,
 }
 
@@ -62,9 +64,15 @@ impl ServerHandler for TestServer {
     async fn list_tools(
         &self,
         request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         *self.list_requests.lock().unwrap() += 1;
+        let hang = *self.hang_list.lock().unwrap();
+        if hang {
+            context.ct.cancelled().await;
+            *self.cancelled.lock().unwrap() += 1;
+            return Err(McpError::internal_error("cancelled", None));
+        }
         let start = match request.and_then(|r| r.cursor) {
             Some(cursor) => cursor
                 .parse::<usize>()
