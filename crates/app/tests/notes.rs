@@ -1070,3 +1070,118 @@ fn the_owner_preloads_the_notes_from_one_read(cx: &mut TestAppContext) {
         bunsin_core::records::InboxBody::WikiChange { slug, .. } if slug == "releases"
     ) && item.state == bunsin_core::approval::ApprovalState::Pending));
 }
+
+/// The vertical position of a row of the list on screen.
+fn row_top(window: &Window, slug: &str) -> f32 {
+    f32::from(window.find(format!("note-row-{slug}")).bounds().origin.y)
+}
+
+/// Types `query` into the search field, clicks Search and waits for the result of that query.
+fn search_for(cx: &mut TestAppContext, window: AnyWindowHandle, shell: &Entity<Shell>, query: &'static str) {
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "notes-search", query);
+        window.click("notes-search-go", cx);
+    });
+    wait_until(cx, shell, "the result of the search", |s| {
+        s.state
+            .note_search
+            .as_ref()
+            .is_some_and(|search| search.query == query && search.found.is_some())
+    });
+}
+
+#[gpui_kit::test]
+fn a_search_filters_the_list_to_the_matching_pages_and_show_all_ends_it(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let oncall = text("On-call", "Who answers", "Kim does the rollback on Fridays.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "oncall", oncall)).unwrap();
+    let parking = text("Parking", "Where to park", "Level B2.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "parking", parking))
+        .unwrap();
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "notes-count"), "Pages: 4");
+        assert!(window.try_find("notes-search-result").is_none());
+    });
+
+    search_for(cx, window, &shell, "rollback fridays");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "notes-search-result"),
+            "2 pages match “rollback fridays”, best first."
+        );
+        // The page with both words is above the page with one, as the agent's search ranks them.
+        assert!(row_top(window, "oncall") < row_top(window, "deploy-schedule"));
+        assert!(window.try_find("note-row-team").is_none());
+        assert!(window.try_find("note-row-parking").is_none());
+        // The count still names every page.
+        assert_eq!(label(window, "notes-count"), "Pages: 4");
+    });
+
+    // The search runs again with every refresh, so a new matching page appears in the list.
+    let release = text("Release", "When we ship", "The rollback plan is in the runbook.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "release", release))
+        .unwrap();
+    wait_until(cx, &shell, "the new page in the search", |s| {
+        s.state
+            .note_search
+            .as_ref()
+            .and_then(|search| search.found.as_ref())
+            .is_some_and(|found| found.as_ref().is_ok_and(|pages| pages.len() == 3))
+    });
+    // A found page opens like any page of the list.
+    open_page(cx, window, &shell, "oncall");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(body(window), "Kim does the rollback on Fridays.");
+        assert!(window.try_find("note-row-release").is_some());
+    });
+
+    search_for(cx, window, &shell, "weather");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "notes-search-result"), "No page matches “weather”.");
+        assert!(window.try_find("note-row-oncall").is_none());
+    });
+
+    // A query without a usable word shows why. The window stays connected.
+    search_for(cx, window, &shell, "ab");
+    on_screen(cx, window, |window, _| {
+        let reason = label(window, "notes-search-result");
+        assert!(reason.contains("the query has no word to search for"), "{reason}");
+        assert!(window.try_find("note-row-team").is_none());
+    });
+    assert!(shell.read_with(cx, |s, _| s.state.connected && s.state.error.is_none()));
+
+    on_screen(cx, window, |window, cx| window.click("notes-search-clear", cx));
+    wait_until(cx, &shell, "the end of the search", |s| s.state.note_search.is_none());
+    on_screen(cx, window, |window, _| {
+        assert_eq!(value(window, "notes-search"), "");
+        assert!(window.try_find("notes-search-result").is_none());
+        for slug in ["deploy-schedule", "team", "oncall", "parking", "release"] {
+            assert!(window.try_find(format!("note-row-{slug}")).is_some(), "{slug}");
+        }
+    });
+}
+
+#[gpui_kit::test]
+fn search_with_an_empty_field_lists_every_page(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    search_for(cx, window, &shell, "kim leads");
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("note-row-deploy-schedule").is_none());
+        assert!(window.try_find("note-row-team").is_some());
+    });
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "notes-search", "   ");
+        window.click("notes-search-go", cx);
+    });
+    wait_until(cx, &shell, "the end of the search", |s| s.state.note_search.is_none());
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("note-row-deploy-schedule").is_some());
+        assert!(window.try_find("notes-search-result").is_none());
+    });
+}

@@ -14,7 +14,7 @@ use bunsin_api::http::{
     AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
     DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, OAuthFinishBody,
     OAuthStartBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody,
-    WebhookSecretBody, status_of,
+    WebhookSecretBody, WikiSearchBody, status_of,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
@@ -576,6 +576,16 @@ async fn wiki_index(
     Ok(Json(engine.wiki_index(&profile).await?))
 }
 
+async fn wiki_search(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<WikiSearchBody>,
+) -> Reply<Vec<WikiSummary>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.wiki_search(&profile, &body.query).await?))
+}
+
 async fn get_wiki_page(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -833,6 +843,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("lint-findings"), post(lint_findings))
         .route(&profile("dismiss-finding"), post(dismiss_finding))
         .route(&profile("wiki"), get(wiki_index))
+        .route(&profile("wiki-search"), post(wiki_search))
         .route(&profile("wiki/{slug}/history"), get(wiki_history))
         .route(
             &profile("wiki/{slug}"),

@@ -139,6 +139,13 @@ pub enum UiCommand {
     },
     /// Stops loading the open page.
     CloseNote,
+    /// Searches the notes. The search runs again with every refresh, until `ClearNoteSearch`.
+    SearchNotes {
+        profile: String,
+        query: String,
+    },
+    /// Stops the search. The window then lists every page again.
+    ClearNoteSearch,
     /// Loads the revisions of the open page with every refresh (`show`), or stops loading them.
     NoteHistory {
         profile: String,
@@ -279,6 +286,16 @@ pub struct OpenNote {
     pub history: Option<Vec<Option<WikiPage>>>,
 }
 
+/// The search of the notes that the window shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteSearch {
+    pub profile: String,
+    pub query: String,
+    /// The matching pages, best first, or why the server refused the query.
+    /// None until the next reload.
+    pub found: Option<Result<Vec<WikiSummary>, String>>,
+}
+
 /// What the last notes command did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoteResult {
@@ -391,6 +408,8 @@ pub struct UiState {
     pub notes: Option<Vec<WikiSummary>>,
     /// The page the window has open, as the server has it.
     pub open_note: Option<OpenNote>,
+    /// The search of the notes, if one is active.
+    pub note_search: Option<NoteSearch>,
     /// The result of the last command, if it was `SaveNote` or `DeleteNote`. A failure is shown here, not in `error`.
     pub note_result: Option<NoteResult>,
     /// How many `SaveNote` and `DeleteNote` commands the bridge has run.
@@ -637,6 +656,18 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.open_note = None;
             Ok(())
         }
+        (UiCommand::SearchNotes { profile, query }, _) => check_selected(selected, &profile).map(|()| {
+            // The reload fills the result.
+            state.note_search = Some(NoteSearch {
+                profile,
+                query,
+                found: None,
+            });
+        }),
+        (UiCommand::ClearNoteSearch, _) => {
+            state.note_search = None;
+            Ok(())
+        }
         (UiCommand::SaveNote { profile, slug, update }, _) => {
             let call = async { api.set_wiki_page(&profile, &slug, update).await.map(|_| ()) };
             let result = save_for(selected, &profile, call).await;
@@ -824,10 +855,17 @@ struct Loaded {
     page: Option<WikiPage>,
     /// The revisions of the open page, if the window shows them.
     history: Option<Vec<Option<WikiPage>>>,
+    /// The result of the search, if one is active.
+    found: Option<Result<Vec<WikiSummary>, String>>,
 }
 
-/// `open` is the open page and whether its history is shown.
-async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bool)>) -> ApiResult<Loaded> {
+/// `open` is the open page and whether its history is shown. `query` is the search of the notes.
+async fn load_profile(
+    api: &dyn EngineApi,
+    profile: &str,
+    open: Option<(&str, bool)>,
+    query: Option<&str>,
+) -> ApiResult<Loaded> {
     Ok(Loaded {
         snapshot: api.snapshot(profile).await?,
         privacy: api.privacy(profile).await?,
@@ -852,6 +890,15 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bo
         history: match open {
             Some((slug, true)) => Some(api.wiki_history(profile, slug).await?),
             _ => None,
+        },
+        found: match query {
+            None => None,
+            // A refused query is not a failure of the connection.
+            Some(query) => match api.wiki_search(profile, query).await {
+                Ok(pages) => Some(Ok(pages)),
+                Err(ApiError::Invalid(reason)) => Some(Err(reason)),
+                Err(error) => return Err(error),
+            },
         },
         page: match open {
             None => None,
@@ -900,10 +947,14 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     if !state.selected.as_ref().is_some_and(known) {
         state.selected = state.profiles.first().map(|p| p.id.clone());
     }
-    // A page stays open only while its profile is the selected one.
+    // A page stays open, and a search active, only while its profile is the selected one.
     if state.open_note.as_ref().map(|open| &open.profile) != state.selected.as_ref() {
         state.open_note = None;
     }
+    if state.note_search.as_ref().map(|search| &search.profile) != state.selected.as_ref() {
+        state.note_search = None;
+    }
+    let query = state.note_search.as_ref().map(|search| search.query.clone());
     let open = state
         .open_note
         .as_ref()
@@ -911,7 +962,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     let open = open.as_ref().map(|(slug, history)| (slug.as_str(), *history));
     match &state.selected {
         // The window is connected only if every call succeeds.
-        Some(profile) => match load_profile(api, profile, open).await {
+        Some(profile) => match load_profile(api, profile, open, query.as_deref()).await {
             Ok(loaded) => {
                 state.snapshot = Some(loaded.snapshot);
                 state.privacy = Some(loaded.privacy);
@@ -936,6 +987,9 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 if let Some(open) = &mut state.open_note {
                     open.page = loaded.page;
                     open.history = loaded.history;
+                }
+                if let Some(search) = &mut state.note_search {
+                    search.found = loaded.found;
                 }
                 state.connected = true;
             }

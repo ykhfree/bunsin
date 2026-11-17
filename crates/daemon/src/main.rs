@@ -396,6 +396,14 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Search the notes by words. Prints every page that matches, best first, as `wiki-list` does.
+    /// The agent's tool `bunsin.wiki/search` ranks the pages the same way.
+    WikiSearch {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        query: String,
+    },
     /// Print one page of the notes with its sources.
     WikiShow {
         #[command(flatten)]
@@ -1380,6 +1388,15 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::WikiList { remote, profile } => {
             for page in connect(&remote)?.wiki_index(&profile).await.map_err(text)? {
+                println!("{}\t{}\t{}", page.slug, page.title, page.summary);
+            }
+        }
+        Command::WikiSearch { remote, profile, query } => {
+            let found = connect(&remote)?.wiki_search(&profile, &query).await.map_err(text)?;
+            if found.is_empty() {
+                println!("no page matches");
+            }
+            for page in found {
                 println!("{}\t{}\t{}", page.slug, page.title, page.summary);
             }
         }

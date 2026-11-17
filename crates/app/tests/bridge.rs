@@ -891,6 +891,61 @@ async fn the_state_holds_the_index_and_the_open_page_of_the_selected_profile() {
     assert_eq!(state.open_note, None);
 }
 
+fn search(profile: &str, query: &str) -> UiCommand {
+    UiCommand::SearchNotes {
+        profile: profile.into(),
+        query: query.into(),
+    }
+}
+
+/// The slugs that the active search found.
+fn found(state: &UiState) -> Vec<String> {
+    let found = state.note_search.as_ref().unwrap().found.clone().unwrap().unwrap();
+    found.into_iter().map(|page| page.slug).collect()
+}
+
+#[tokio::test]
+async fn a_search_of_the_notes_is_for_the_selected_profile_and_runs_with_every_reload() {
+    let rig = common::rig().await;
+    rig.engine
+        .set_wiki_page("kim", "team", note("Kim leads.", None))
+        .await
+        .unwrap();
+    rig.engine
+        .set_wiki_page("lee", "team", note("Lee leads.", None))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+
+    // A search for a profile that is not selected is refused.
+    apply(&*rig.engine, &mut state, search("lee", "leads")).await;
+    assert_eq!(state.note_search, None);
+    assert!(state.error.clone().unwrap().contains("another profile"));
+
+    apply(&*rig.engine, &mut state, search("kim", "leads")).await;
+    assert_eq!(found(&state), ["team"]);
+    // The search runs again with a refresh, so it follows the pages of the server.
+    rig.engine.delete_wiki_page("kim", "team").await.unwrap();
+    refresh(&*rig.engine, &mut state).await;
+    assert!(found(&state).is_empty());
+
+    // A refused query is shown in the search, not as a lost connection.
+    apply(&*rig.engine, &mut state, search("kim", "ab")).await;
+    let refused = state.note_search.clone().unwrap().found.unwrap().unwrap_err();
+    assert!(refused.contains("no word to search for"), "{refused}");
+    assert!(state.connected && state.error.is_none());
+
+    // The search ends with another profile, and with ClearNoteSearch.
+    apply(&*rig.engine, &mut state, search("kim", "leads")).await;
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
+    assert_eq!(state.note_search, None);
+    apply(&*rig.engine, &mut state, search("lee", "leads")).await;
+    assert_eq!(found(&state), ["team"]);
+    apply(&*rig.engine, &mut state, UiCommand::ClearNoteSearch).await;
+    assert_eq!(state.note_search, None);
+}
+
 #[tokio::test]
 async fn a_missing_page_is_not_a_lost_connection() {
     let rig = common::rig().await;

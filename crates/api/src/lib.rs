@@ -761,6 +761,10 @@ pub trait EngineApi: Send + Sync {
     fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
     fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>>;
+    /// The index entries of every page that matches the words of `query`, best first. The ranking is the
+    /// one of the agent's tool `bunsin.wiki/search`, without its limit of 10 pages.
+    /// A query without a word of 3 or more characters or of 2 Hangul syllables is invalid.
+    fn wiki_search<'a>(&'a self, profile: &'a str, query: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
     /// Stores the owner's text for a page. The owner's text replaces the agent's. The sources of the page stay.
     fn set_wiki_page<'a>(
         &'a self,

@@ -1619,6 +1619,10 @@ impl EngineApi for Engine {
         Box::pin(async move { self.read_wiki_page(profile, slug) })
     }
 
+    fn wiki_search<'a>(&'a self, profile: &'a str, query: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
+        Box::pin(async move { self.search_owner_notes(profile, query) })
+    }
+
     fn set_wiki_page<'a>(
         &'a self,
         profile: &'a str,

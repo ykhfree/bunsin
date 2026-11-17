@@ -780,3 +780,104 @@ async fn a_read_of_a_page_records_when_it_was_read() {
     let now = rig.clock.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(rows, [("deploy".to_owned(), Some(now)), ("lunch".to_owned(), None)]);
 }
+
+/// The owner writes a page with its own title and summary. Each page is one second newer than the one before.
+async fn titled_page(rig: &Rig, slug: &str, title: &str, body: &str) {
+    rig.advance(1);
+    let update = WikiPageUpdate {
+        text: WikiText {
+            title: title.into(),
+            summary: format!("About {slug}"),
+            body: body.into(),
+        },
+        expected_revision: None,
+    };
+    rig.engine.set_wiki_page("kim", slug, update).await.unwrap();
+}
+
+/// The slugs that the owner's search finds, best first.
+async fn owner_search(rig: &Rig, query: &str) -> Vec<String> {
+    let found = rig.engine.wiki_search("kim", query).await.unwrap();
+    found.into_iter().map(|page| page.slug).collect()
+}
+
+#[tokio::test]
+async fn the_owner_searches_the_notes_by_english_and_korean_words() {
+    let rig = rig().await;
+    titled_page(
+        &rig,
+        "deploy",
+        "Deploy",
+        "금요일에 배포를 합니다. A rollback needs the on-call person.",
+    )
+    .await;
+    titled_page(&rig, "oncall", "On-call", "The rollback is done by the 당번.").await;
+    titled_page(&rig, "lunch", "Lunch", "Noodles on Monday.").await;
+    titled_page(&rig, "parking", "Parking", "Level B2.").await;
+    titled_page(&rig, "travel", "Travel", "Book trains early.").await;
+
+    // English, in any case. The trigram index finds a part of a word too.
+    assert_eq!(owner_search(&rig, "NOODLES").await, ["lunch"]);
+    assert_eq!(owner_search(&rig, "train").await, ["travel"]);
+    // A Korean word of three or more syllables loses its particle: "금요일은" finds "금요일에".
+    assert_eq!(owner_search(&rig, "금요일은").await, ["deploy"]);
+    // A Korean word of two syllables goes to LIKE: "배포는" becomes "배포" and finds "배포를".
+    assert_eq!(owner_search(&rig, "배포는").await, ["deploy"]);
+    assert_eq!(owner_search(&rig, "당번").await, ["oncall"]);
+    // Of two equal matches, the page changed last comes first.
+    assert_eq!(owner_search(&rig, "rollback").await, ["oncall", "deploy"]);
+    // A page that matches more rare words comes first.
+    assert_eq!(owner_search(&rig, "rollback 금요일").await, ["deploy", "oncall"]);
+    assert_eq!(owner_search(&rig, "rollback 당번").await, ["oncall", "deploy"]);
+    // No page has the word.
+    assert!(owner_search(&rig, "weather").await.is_empty());
+
+    // A query without a usable word is refused, not answered with nothing.
+    for query in ["", "ab", "a b c", "배", "[REDACTED:EMAIL]"] {
+        let refused = rig.engine.wiki_search("kim", query).await;
+        assert!(matches!(refused, Err(ApiError::Invalid(_))), "{query}: {refused:?}");
+    }
+    // A search of the owner is not a read of the agent.
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    assert!(!audit.iter().any(|entry| entry.kind == "read"));
+}
+
+#[tokio::test]
+async fn the_owner_gets_every_match_in_the_order_of_the_agents_search() {
+    let rig = rig().await;
+    // 11 of 44 pages name kimchi, so the word is still rare (at most a quarter of the pages).
+    for n in 0..44 {
+        let body = match n % 4 {
+            0 => format!("Kimchi fact {n}."),
+            _ => format!("Other fact {n}."),
+        };
+        let body = if n == 8 {
+            "Kimchi and more kimchi, with jjigae.".to_owned()
+        } else {
+            body
+        };
+        titled_page(&rig, &format!("page-{n:02}"), &format!("Page {n}"), &body).await;
+    }
+    let owner = owner_search(&rig, "kimchi jjigae").await;
+    // The page with both words is first. The others follow, changed last first.
+    let mut expected = vec!["page-08".to_owned()];
+    expected.extend(
+        (0..44)
+            .rev()
+            .filter(|n| n % 4 == 0 && *n != 8)
+            .map(|n| format!("page-{n:02}")),
+    );
+    assert_eq!(owner, expected);
+
+    rig.llm.reply(&search_notes("kimchi jjigae"), 10).reply(&ignore(), 10);
+    rig.engine.ingest("kim", event("e1", "lee", "hi")).await.unwrap();
+    let result = &rig.llm.requests()[1].messages[2].content;
+    let start = result.find("<data source=\"tool-result\">\n").unwrap() + "<data source=\"tool-result\">\n".len();
+    let end = start + result[start..].find("\n</data>").unwrap();
+    let agent: Vec<&str> = result[start..end]
+        .lines()
+        .map(|line| line.split(" — ").next().unwrap())
+        .collect();
+    // The agent gets the first 10 of the same order.
+    assert_eq!(agent, owner[..10]);
+}

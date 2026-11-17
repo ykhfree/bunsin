@@ -659,6 +659,12 @@ agent가 쓰는 작은 wiki입니다.
 - 사용자가 직접 페이지를 읽고, 쓰고, 지울 수 있습니다. 창의 **Notes** 화면이 페이지 목록을 보여 줍니다.
   페이지를 선택하면 읽고 고칠 수 있고, 새 페이지를 만들 수 있습니다.
   그 사이에 서버의 페이지가 바뀌었으면 Save가 경고합니다. Delete는 삭제 전에 한 번 묻습니다.
+- 페이지 목록 위의 **Search**는 낱말로 페이지를 찾습니다. 그러면 목록은 맞는 페이지만 잘 맞는 것부터 보여 줍니다.
+  순서는 agent의 검색과 같습니다. **Show all**을 누르면 모든 페이지가 다시 보입니다.
+  검색은 세 글자(문자나 숫자) 이상인 낱말의 일부와 두 음절 한국어 낱말을 찾습니다.
+  더 긴 한국어 낱말은 끝의 조사 하나를 떼고 찾습니다("금요일은"으로 "금요일에"를 찾습니다).
+  페이지의 4분의 1보다 많은 페이지(그리고 3쪽 이상)에 있는 낱말은 그 낱말만으로는 아무것도 찾지 못합니다. 그러면 더 드문 낱말을 더하십시오.
+  agent는 10쪽까지만 받지만, 사용자는 맞는 페이지를 모두 받습니다.
 - **History**는 열린 페이지의 revision을 최신 것부터 보여 줍니다. 하나를 고르면 그 본문을 읽을 수 있고, 고칠 수는 없습니다.
   "Put this text into the fields"는 옛 본문을 입력란에 넣습니다. Save는 그 본문을 평소처럼 revision을 확인하고 새 revision으로 저장합니다.
   저장하지 않은 입력 내용이 있으면 덮어쓰지 않습니다.
@@ -669,6 +675,7 @@ agent가 쓰는 작은 wiki입니다.
 
 ```sh
 bunsind wiki-list kim
+bunsind wiki-search kim "deploy friday"   # 맞는 페이지를 잘 맞는 것부터
 bunsind wiki-show kim deploy-schedule
 bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
 bunsind wiki-delete kim team

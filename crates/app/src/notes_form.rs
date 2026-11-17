@@ -91,6 +91,8 @@ pub struct NotesForm {
     preload_args: Entity<InputState>,
     /// Why the window did not send a pre-load.
     preload_message: Option<String>,
+    /// The words of a search of the notes.
+    search: Entity<InputState>,
 }
 
 impl NotesForm {
@@ -111,6 +113,7 @@ impl NotesForm {
             preload_tool: cx.new(|cx| InputState::new(window, cx).placeholder("connector/tool")),
             preload_args: cx.new(|cx| InputState::new(window, cx).placeholder("{\"query\": \"...\"}")),
             preload_message: None,
+            search: cx.new(|cx| InputState::new(window, cx).placeholder("Search the notes")),
         }
     }
 
@@ -175,6 +178,9 @@ impl NotesForm {
         if self.profile != state.selected {
             self.profile = state.selected.clone();
             self.close(window, cx);
+            // The bridge ends the search of the other profile.
+            self.search
+                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         }
         // Without an answer from the server, the state says nothing about the pages.
         // The result of a command waits for the next state that has an answer.
@@ -445,9 +451,101 @@ impl Shell {
         self.send(UiCommand::DeleteNote { profile, slug });
     }
 
-    /// The list of pages. A click opens the page.
+    /// Searches the notes for the typed words. Without words it lists every page again.
+    fn search_notes(&mut self, cx: &App) {
+        let Some(profile) = self.notes.profile.clone() else {
+            return;
+        };
+        let query = self.notes.search.read(cx).value().trim().to_owned();
+        self.send(match query.is_empty() {
+            true => UiCommand::ClearNoteSearch,
+            false => UiCommand::SearchNotes { profile, query },
+        });
+    }
+
+    /// Empties the search field and lists every page again.
+    fn clear_note_search(&mut self, window: &mut Window, cx: &mut App) {
+        self.notes
+            .search
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.send(UiCommand::ClearNoteSearch);
+    }
+
+    /// The search field, and the result of the active search with a button that ends it.
+    fn notes_search(&self, cx: &Context<Self>) -> impl IntoElement {
+        let search = self.state.note_search.as_ref();
+        let result = search.map(|search| match &search.found {
+            None => "Searching…".to_owned(),
+            Some(Ok(pages)) if pages.is_empty() => format!("No page matches “{}”.", search.query),
+            Some(Ok(pages)) if pages.len() == 1 => format!("1 page matches “{}”, best first.", search.query),
+            Some(Ok(pages)) => format!("{} pages match “{}”, best first.", pages.len(), search.query),
+            Some(Err(reason)) => reason.clone(),
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div().flex_1().min_w(px(0.)).child(
+                            Input::new(&self.notes.search)
+                                .id("notes-search")
+                                .aria_label("Search the notes")
+                                .small(),
+                        ),
+                    )
+                    .child(
+                        Button::new("notes-search-go")
+                            .small()
+                            .outline()
+                            .icon(icon("search"))
+                            .label("Search")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.search_notes(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .children(result.map(|result| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .child(labelled("notes-search-result", result)),
+                    )
+                    .child(
+                        Button::new("notes-search-clear")
+                            .small()
+                            .ghost()
+                            .label("Show all")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clear_note_search(window, cx);
+                                cx.notify();
+                            })),
+                    )
+            }))
+    }
+
+    /// The list of pages, or the pages that the active search found, best first. A click opens the page.
     fn notes_list(&self, cx: &Context<Self>) -> impl IntoElement {
-        let pages = self.state.notes.as_deref().unwrap_or_default();
+        let all = self.state.notes.as_deref().unwrap_or_default();
+        let pages = match &self.state.note_search {
+            None => all,
+            Some(search) => match &search.found {
+                Some(Ok(found)) => found.as_slice(),
+                _ => &[],
+            },
+        };
         let open = match &self.notes.draft {
             Some(Draft::Page { base, .. }) => Some(base.slug.as_str()),
             _ => None,
@@ -503,9 +601,9 @@ impl Shell {
                     .justify_between()
                     .child(labelled_as(
                         "notes-count",
-                        format!("Pages: {}", pages.len()),
+                        format!("Pages: {}", all.len()),
                         quiet(
-                            match pages.len() {
+                            match all.len() {
                                 0 => "No page yet".to_owned(),
                                 1 => "1 page".to_owned(),
                                 count => format!("{count} pages"),
@@ -524,6 +622,7 @@ impl Shell {
                             })),
                     ),
             )
+            .child(self.notes_search(cx))
             .child(
                 div()
                     .id("notes-list")

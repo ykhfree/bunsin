@@ -58,6 +58,7 @@
 //! | POST | `/v1/profiles/{p}/connectors/{c}/oauth/finish` | `OAuthFinishBody` | |
 //! | GET | `/v1/profiles/{p}/wiki` | | `[WikiSummary]` |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}` | | `WikiPage` |
+//! | POST | `/v1/profiles/{p}/wiki-search` | `WikiSearchBody` | `[WikiSummary]` |
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
 //! | DELETE | `/v1/profiles/{p}/wiki/{slug}` | | |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}/history` | | `[WikiPage or null]` |
@@ -204,6 +205,11 @@ pub struct DismissPrincipleBody {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DismissFindingBody {
     pub id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiSearchBody {
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

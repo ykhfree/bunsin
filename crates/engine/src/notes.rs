@@ -37,6 +37,17 @@ pub(crate) fn notes_tools() -> [ToolHint; 2] {
     ]
 }
 
+/// The index entries of the pages that match `terms`, best first. The agent's search and the
+/// owner's search both use it, so both rank the pages the same way.
+fn find_pages(store: &ProfileStore, terms: &[String]) -> ApiResult<Vec<WikiSummary>> {
+    let found = store.search_wiki(terms).map_err(store_error)?;
+    let index = store.wiki_index().map_err(store_error)?;
+    Ok(found
+        .iter()
+        .filter_map(|slug| index.iter().find(|page| &page.slug == slug).cloned())
+        .collect())
+}
+
 impl Engine {
     /// The index of the notes for the prompt of an event: the pages related to the event first.
     pub(crate) fn notes_index(&self, store: &ProfileStore, event: &InboundEvent) -> ApiResult<String> {
@@ -58,13 +69,8 @@ impl Engine {
         let filter = |text: &str| ctx.redactor.redact(text, &mut RedactionCounts::new());
         let arg = |name: &str| args.get(name).and_then(Value::as_str).unwrap_or_default();
         if tool == WIKI_SEARCH_TOOL {
-            let found = store.search_wiki(&query_terms(arg("query"))).map_err(store_error)?;
-            let index = store.wiki_index().map_err(store_error)?;
-            let pages: Vec<WikiSummary> = found
-                .iter()
-                .take(MAX_SEARCH_RESULTS)
-                .filter_map(|slug| index.iter().find(|page| &page.slug == slug).cloned())
-                .collect();
+            let mut pages = find_pages(store, &query_terms(arg("query")))?;
+            pages.truncate(MAX_SEARCH_RESULTS);
             if pages.is_empty() {
                 return Ok(("No page of your notes matches the query.".to_owned(), true));
             }
@@ -234,6 +240,21 @@ impl Engine {
                 item.state.as_str()
             ))),
         }
+    }
+
+    /// The owner's search of the notes: every page that matches, best first. A query without a usable
+    /// word is refused, because it can match nothing.
+    pub(crate) fn search_owner_notes(&self, profile: &str, query: &str) -> ApiResult<Vec<WikiSummary>> {
+        let store = self.store(profile)?;
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return Err(ApiError::Invalid(
+                "the query has no word to search for: use a word of 3 or more letters or digits, \
+                 or a Korean word of 2 syllables"
+                    .into(),
+            ));
+        }
+        find_pages(&store, &terms)
     }
 
     pub(crate) fn read_wiki_page(&self, profile: &str, slug: &str) -> ApiResult<WikiPage> {

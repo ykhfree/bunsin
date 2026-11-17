@@ -774,6 +774,13 @@ and the sources of its facts. It works like a small wiki that the agent writes.
 - You can read, write and delete pages yourself. In the window, the **Notes** view lists
   the pages. Select a page to read and edit it, or make a new page. Save warns you if the
   page changed on the server meanwhile. Delete asks once before it deletes.
+- **Search** above the list of pages finds pages by words. The list then shows only the
+  pages that match, best first, ranked as the agent's search ranks them; **Show all** brings
+  back every page. The search finds a part of a word of three or more letters or digits,
+  and a Korean word of two syllables. It drops one particle from a longer Korean word
+  ("금요일은" finds "금요일에"). A word that more than a quarter of the pages share (and more
+  than two pages) finds nothing by itself; add a rarer word. Unlike the agent, you get every
+  match, not only 10.
 - **History** lists the revisions of the open page, newest first. Choose one to read its
   text; nothing in it can be edited. "Put this text into the fields" copies the old text
   into the fields, and Save stores it as a new revision with the usual check. It does not
@@ -785,6 +792,7 @@ and the sources of its facts. It works like a small wiki that the agent writes.
 
 ```sh
 bunsind wiki-list kim
+bunsind wiki-search kim "deploy friday"   # matching pages, best first
 bunsind wiki-show kim deploy-schedule
 bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
 bunsind wiki-delete kim team

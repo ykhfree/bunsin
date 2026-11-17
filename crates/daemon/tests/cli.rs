@@ -994,6 +994,46 @@ fn the_owner_checks_the_notes_and_dismisses_a_finding() {
 }
 
 #[test]
+fn the_owner_searches_the_notes_from_the_command_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let pages = [
+        ("deploy", "Deploy", "금요일에 배포합니다. Rollback with care."),
+        ("oncall", "On-call", "Rollback by the 당번."),
+        ("lunch", "Lunch", "Noodles."),
+        ("parking", "Parking", "Level B2."),
+    ];
+    for (at, (slug, title, body)) in pages.into_iter().enumerate() {
+        let text = bunsin_core::wiki::WikiText {
+            title: title.into(),
+            summary: format!("About {slug}"),
+            body: body.into(),
+        };
+        let owner = bunsin_core::wiki::WikiAuthor::Owner;
+        store
+            .write_wiki_page(slug, &text, &[], owner, 0, None, at as i64 + 1)
+            .unwrap();
+    }
+    drop(store);
+
+    let search = |query: &str| stdout_of(server.run(&kim, &["wiki-search", "kim", query]), query);
+    // The page with both words first, then the other match.
+    assert_eq!(
+        search("rollback 금요일"),
+        "deploy\tDeploy\tAbout deploy\noncall\tOn-call\tAbout oncall\n"
+    );
+    assert_eq!(search("배포"), "deploy\tDeploy\tAbout deploy\n");
+    assert_eq!(search("weather"), "no page matches\n");
+    let error = stderr_of_failure(server.run(&kim, &["wiki-search", "kim", "ab"]), "a short query");
+    assert!(error.contains("the query has no word to search for"), "{error}");
+}
+
+#[test]
 fn a_preload_needs_a_tool_with_a_read_rule() {
     let dir = tempfile::tempdir().unwrap();
     let kim = add_profile(dir.path(), "kim", "Kim");

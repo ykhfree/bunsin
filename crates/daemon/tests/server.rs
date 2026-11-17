@@ -271,6 +271,9 @@ async fn a_token_reaches_only_its_own_profile() {
         refused(kim.test_poll(other, 0).await.map(|_| ()));
         refused(kim.wiki_index(other).await.map(|_| ()));
         refused(kim.wiki_page(other, "team").await.map(|_| ()));
+        // The route checks the token before the query: a query without a usable word is refused as unauthorized.
+        refused(kim.wiki_search(other, "ab").await.map(|_| ()));
+        refused(kim.wiki_search(other, "team").await.map(|_| ()));
         refused(
             kim.set_wiki_page(other, "team", note("Mallory leads."))
                 .await
@@ -793,6 +796,13 @@ async fn the_notes_are_read_and_written_through_the_server() {
     assert_eq!(page.revision, 1);
     assert_eq!(kim.wiki_page("kim", "team").await.unwrap(), page);
     assert_eq!(kim.wiki_index("kim").await.unwrap()[0].slug, "team");
+    // The search keeps its result and its error kind across the network.
+    assert_eq!(
+        kim.wiki_search("kim", "Kim leads").await.unwrap(),
+        kim.wiki_index("kim").await.unwrap()
+    );
+    assert!(kim.wiki_search("kim", "weather").await.unwrap().is_empty());
+    assert!(matches!(kim.wiki_search("kim", "ab").await, Err(ApiError::Invalid(_))));
 
     // An edit from an old revision keeps its error kind across the network.
     let mut stale = note("Stale.");

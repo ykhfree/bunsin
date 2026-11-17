@@ -4,7 +4,7 @@ use bunsin_api::http::{
     AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
     DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, OAuthFinishBody,
     OAuthStartBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody,
-    WebhookSecretBody, profile_path,
+    WebhookSecretBody, WikiSearchBody, profile_path,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
@@ -722,6 +722,16 @@ impl EngineApi for RemoteEngine {
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>> {
         Box::pin(async move {
             self.call(Method::GET, &profile_path(profile, &format!("wiki/{slug}")), NO_BODY)
+                .await
+        })
+    }
+
+    fn wiki_search<'a>(&'a self, profile: &'a str, query: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
+        Box::pin(async move {
+            let body = WikiSearchBody {
+                query: query.to_owned(),
+            };
+            self.call(Method::POST, &profile_path(profile, "wiki-search"), Some(&body))
                 .await
         })
     }
