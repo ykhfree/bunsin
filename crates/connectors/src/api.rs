@@ -18,6 +18,9 @@ use std::time::Duration;
 /// The longest API error detail that goes into an error text, in characters.
 const MAX_DETAIL_CHARS: usize = 300;
 
+/// The tools that change data on the server. Every other tool only reads.
+const WRITE_TOOLS: [&str; 3] = ["post_message", "add_comment", "create_page"];
+
 /// The credentials of an API connector.
 #[derive(Clone)]
 pub enum ApiAuth {
@@ -178,7 +181,7 @@ impl ApiConnector {
             }
             _ => unreachable!("every tool in tools() has a request above"),
         };
-        self.send(request).await
+        self.send(request, WRITE_TOOLS.contains(&tool)).await
     }
 
     fn json(&self, request: reqwest::RequestBuilder, body: &Value) -> reqwest::RequestBuilder {
@@ -189,7 +192,9 @@ impl ApiConnector {
 
     /// A request that never connected is a transport error. After the connect, the server may
     /// have done the call, so a later error, the time limit included, is `Unanswered`.
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<Value, ConnectorError> {
+    /// A success status with a body that is not JSON is `Unanswered` for a write:
+    /// the server accepted the request, so the write may be done.
+    async fn send(&self, request: reqwest::RequestBuilder, write: bool) -> Result<Value, ConnectorError> {
         let response = request
             .header(AUTHORIZATION, self.authorization.clone())
             .send()
@@ -222,7 +227,16 @@ impl ApiConnector {
                 .unwrap_or_else(|| "no error detail".into());
             return Err(ConnectorError::Failed(format!("HTTP {}: {detail}", status.as_u16())));
         }
-        let body = body.ok_or_else(|| ConnectorError::Transport("the response is not JSON".into()))?;
+        let Some(body) = body else {
+            return Err(if write {
+                ConnectorError::Unanswered(format!(
+                    "the server answered HTTP {} with a body that is not JSON; the write may be done",
+                    status.as_u16()
+                ))
+            } else {
+                ConnectorError::Transport("the response is not JSON".into())
+            });
+        };
         // The Slack Web API answers HTTP 200 also for a failed call. `ok` tells the result.
         if self.service == ApiService::Slack && body.get("ok") != Some(&Value::Bool(true)) {
             return Err(ConnectorError::Failed(self.error_detail(&body)));
@@ -600,6 +614,17 @@ mod tests {
                     assert!(tool.input_schema["properties"].get(name.as_str().unwrap()).is_some());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_write_tool_is_a_tool_of_one_service() {
+        for write in WRITE_TOOLS {
+            let services = [ApiService::Slack, ApiService::Jira, ApiService::Confluence]
+                .into_iter()
+                .filter(|service| tools(*service).iter().any(|t| t.name == write))
+                .count();
+            assert_eq!(services, 1, "{write}");
         }
     }
 

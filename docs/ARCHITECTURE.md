@@ -39,6 +39,8 @@
     `Unanswered`는 요청이 서버에 닿았을 수 있다는 뜻이다. MCP 커넥터는 도구 호출 단계의 시간 초과에 쓴다.
     호출 앞의 도구 목록 단계의 시간 초과는 호출을 보내지 않았으므로 `Transport`이다.
     REST API 커넥터는 reqwest가 연결 오류(`is_connect`)나 요청 생성 오류(`is_builder`)로 분류하지 않은 전송 오류와, 응답 본문 읽기 오류에 쓴다.
+    쓰기 도구(`WRITE_TOOLS`: `post_message`, `add_comment`, `create_page`)가 HTTP 2xx와 JSON이 아닌 본문을 받을 때도 쓴다.
+    서버가 요청을 받았으므로 쓰기가 끝났을 수 있다. 읽기 도구가 같은 답을 받으면 전처럼 `Transport`("the response is not JSON")이다.
     문구로 분류하지 않는다. `Failed`(서버의 거절, HTTP 4xx·5xx), `Transport`, `UnknownTool`은 전처럼 `failed`이다.
     읽기 도구의 오류는 모든 종류가 전처럼 자료로 LLM에 간다. 창은 승인 결과가 `ExecutionUnknown`이면 오류 줄에 "the outcome of the call is unknown"을 보인다.
   - inbox 열 `autonomous`는 정책이 소유자 없이 승인한 항목이다(처음부터 `approved`로 생긴 항목).

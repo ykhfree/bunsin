@@ -349,14 +349,63 @@ async fn http_errors_become_failed_with_the_api_messages() {
 }
 
 #[tokio::test]
-async fn a_success_that_is_not_json_is_a_transport_error() {
+async fn a_read_with_a_success_that_is_not_json_is_a_transport_error() {
     let (base, _) = stub(Arc::new(|_| (StatusCode::OK, "<html>login</html>".into()))).await;
-    let connector = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
-    let error = connector
-        .call_tool("get_issue", args(json!({"issue": "PROJ-1"})))
+    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
+    let slack = ApiConnector::new("slack", ApiService::Slack, &base, bearer(), TIMEOUT).unwrap();
+    // `search_issues` is a POST, but it only reads.
+    for (connector, tool, tool_args) in [
+        (&jira, "get_issue", json!({"issue": "PROJ-1"})),
+        (&jira, "search_issues", json!({"jql": "x"})),
+        (&slack, "get_thread", json!({"channel": "C1", "ts": "1.2"})),
+    ] {
+        let error = connector.call_tool(tool, args(tool_args)).await.unwrap_err();
+        assert_eq!(
+            error,
+            ConnectorError::Transport("the response is not JSON".into()),
+            "{tool}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_write_with_a_success_that_is_not_json_is_unanswered() {
+    // The server accepted the write but answered with a page, so the write may be done.
+    let (base, seen) = stub(Arc::new(|_| (StatusCode::CREATED, "<html>login</html>".into()))).await;
+    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
+    let slack = ApiConnector::new("slack", ApiService::Slack, &base, bearer(), TIMEOUT).unwrap();
+    let confluence = ApiConnector::new("confluence", ApiService::Confluence, &base, bearer(), TIMEOUT).unwrap();
+    for (connector, tool, tool_args) in [
+        (&jira, "add_comment", json!({"issue": "PROJ-1", "text": "x"})),
+        (&slack, "post_message", json!({"channel": "C1", "text": "x"})),
+        (
+            &confluence,
+            "create_page",
+            json!({"space_id": "1", "title": "t", "text": "x"}),
+        ),
+    ] {
+        let error = connector.call_tool(tool, args(tool_args)).await.unwrap_err();
+        assert_eq!(
+            error,
+            ConnectorError::Unanswered(
+                "the server answered HTTP 201 with a body that is not JSON; the write may be done".into()
+            ),
+            "{tool}"
+        );
+    }
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_write_with_an_error_status_that_is_not_json_still_fails() {
+    // An error status says that the server refused the write, so it is not done.
+    let (base, _) = stub(Arc::new(|_| (StatusCode::FORBIDDEN, "<html>denied</html>".into()))).await;
+    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
+    let error = jira
+        .call_tool("add_comment", args(json!({"issue": "PROJ-1", "text": "x"})))
         .await
         .unwrap_err();
-    assert_eq!(error, ConnectorError::Transport("the response is not JSON".into()));
+    assert_eq!(error, ConnectorError::Failed("HTTP 403: no error detail".into()));
 }
 
 #[tokio::test]

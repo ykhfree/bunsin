@@ -319,6 +319,8 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   주소 규칙과 token의 origin 결합은 base URL에 적용됩니다. 요청 모양은 공식 API 문서를 따랐고, 실제 서비스로는 시험하지 않았습니다.
   요청 하나는 30초 안에 끝나야 합니다. 그 안에 답하지 않으면 오류가 됩니다.
   요청이 서비스에 닿은 뒤의 오류이면, 승인된 쓰기나 삭제는 `unknown`이 됩니다.
+  쓰기가 HTTP 2xx와 JSON이 아닌 본문(예: 로그인 페이지)을 받아도 `unknown`이 됩니다. 서비스가 요청을 받았기 때문입니다.
+  읽기가 그런 본문을 받으면 실패합니다.
   연결하지 못한 요청과 HTTP 4xx 같은 분명한 거절은 `failed`가 됩니다.
 - 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token이나 주소 커넥터의 token을 읽습니다.
   항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.

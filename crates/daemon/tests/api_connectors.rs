@@ -8,6 +8,7 @@ use base64::Engine as _;
 use bunsin_api::{
     ApiConnectorUpdate, ApiError, EngineApi, Expected, Outcome, PermissionsUpdate, ProfileConfig, TokenChange,
 };
+use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, LlmClient};
@@ -63,6 +64,8 @@ impl Jira {
                 "/rest/api/3/issue/PROJ-7/comment" => {
                     (StatusCode::CREATED, axum::Json(json!({"id": "10001"}))).into_response()
                 }
+                // A proxy in front of the server answers with a login page after it passed the write on.
+                "/rest/api/3/issue/PROJ-8/comment" => (StatusCode::OK, "<html>login</html>").into_response(),
                 _ => (
                     StatusCode::NOT_FOUND,
                     axum::Json(json!({"errorMessages": ["no such path"]})),
@@ -248,6 +251,52 @@ async fn a_rest_api_connector_lists_reads_and_writes_only_after_approval() {
     assert!(!config.contains(TOKEN));
     let audit = format!("{:?}", engine.snapshot("kim").await.unwrap().audit);
     assert!(!audit.contains(TOKEN));
+}
+
+#[tokio::test]
+async fn a_write_answered_with_a_page_that_is_not_json_becomes_unknown() {
+    let stub = Jira::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, llm) = engine(dir.path(), local()).await;
+    engine
+        .set_api_connector("kim", "jira", jira(&stub.url, TokenChange::Set(TOKEN.into())))
+        .await
+        .unwrap();
+    let report = engine.connector_tools("kim", "jira").await.unwrap();
+    engine.approve_tools("kim", "jira", pin(&report.tools)).await.unwrap();
+    let rules = [(
+        "jira/add_comment".to_owned(),
+        ToolRule::write(ToolClass::Write, OutgoingText::Arg("text".into())),
+    )]
+    .into();
+    let update = PermissionsUpdate {
+        rules,
+        expected: Expected::Unchecked,
+    };
+    engine.set_permissions("kim", update).await.unwrap();
+
+    llm.reply(
+        &call("jira/add_comment", json!({"issue": "PROJ-8", "text": "Done."})),
+        10,
+    );
+    let Outcome::PendingApproval { inbox_id } = engine.ingest("kim", event("comment please")).await.unwrap() else {
+        panic!("expected a pending comment")
+    };
+    let outcome = engine.approve("kim", inbox_id, None).await.unwrap();
+    assert!(
+        matches!(&outcome, Outcome::ExecutionUnknown { error, .. } if error.contains("may be done")),
+        "{outcome:?}"
+    );
+    let snapshot = engine.snapshot("kim").await.unwrap();
+    let item = snapshot.inbox.iter().find(|i| i.id == inbox_id).unwrap();
+    assert_eq!(item.state, ApprovalState::Unknown);
+    assert!(snapshot.audit.iter().any(|a| a.kind == "outcome_unknown"));
+    // The write reached the server once and is not sent again.
+    assert!(matches!(
+        engine.approve("kim", inbox_id, None).await,
+        Err(ApiError::NotAllowed(_))
+    ));
+    assert_eq!(stub.seen().len(), 1);
 }
 
 #[tokio::test]

@@ -375,7 +375,9 @@ bunsind connector-remove kim jira                # removes the connector and its
   shapes follow the official API docs; no test ran against the real services. Each request
   must end in 30 seconds; a service that does not answer in time gives an error. If the
   request reached the service before the error, an approved write or delete becomes
-  `unknown`. A request that never connected, and a clean refusal such as HTTP 4xx, fail.
+  `unknown`. A write that gets HTTP 2xx with a body that is not JSON (for example a login
+  page) also becomes `unknown`: the service accepted it. A read with such a body fails.
+  A request that never connected, and a clean refusal such as HTTP 4xx, fail.
 - In the window, **Copy the token from the Keychain** reads the LLM token or the token of
   an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
