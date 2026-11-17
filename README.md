@@ -196,12 +196,21 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   of the server, so it can read the data of the other profiles and the key file. Use the
   flag only on a server whose profile owners you all trust, such as a server for yourself.
 - **Coding jobs.** A profile can start coding jobs (see [Delegate coding](#delegate-coding))
-  only if the server runs with `--allow-coding --coding-repo-root <dir>`. Each repository must
-  be a git repository under that directory; the server checks it when the settings are saved
-  and when a job starts, after it follows links. The coding CLI runs as the user of the server,
-  with its own permission settings: Bunsin passes no flag that turns off its prompts or its
-  sandbox. A job keeps its worktree and transcript in `<data dir>/coding/<profile>/`; the
-  server does not remove the worktrees.
+  only if the server runs with `--allow-coding --coding-repo-root <dir>`, and only with a
+  program that you name: `--coding-program claude-code=<absolute path>` and
+  `--coding-program codex=<absolute path>`. A profile picks only the backend and a repository.
+  Each repository must be a git repository under the root; the server checks it, after it
+  follows links, when the settings are saved and again when a job starts. The same holds for
+  every check below.
+- **Coding commands.** A profile's own program (the backend `command`) and a test command run
+  only with `--allow-coding-commands`. This flag gives every profile owner the same power as
+  `--allow-stdio-connectors`: they can run any program as the user of the server, and that
+  program can read the data of the other profiles and the key file. Use it only on a server
+  whose profile owners you all trust.
+- **No sandbox.** A coding job runs as the user of the server. The coding CLI keeps its own
+  permission settings: Bunsin passes no flag that turns off its prompts or its sandbox, and
+  adds no sandbox of its own. A job keeps its worktree and transcript in
+  `<data dir>/coding/<profile>/`; the server does not remove the worktrees.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 
@@ -675,15 +684,17 @@ name). It never writes code itself and never merges. Set it up in the settings f
 ```json
 "coding": {
   "backend": "claude_code",
-  "program": "/opt/homebrew/bin/claude",
   "timeout_secs": 1800,
-  "repos": {"web-app": {"path": "/srv/code/web-app", "test_command": ["/usr/bin/make", "test"]}}
+  "repos": {"web-app": {"path": "/srv/code/web-app"}}
 },
 "policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
 ```
 
-- `backend` is `claude_code`, `codex` or `command`. Only `command` takes `args`. The program
-  path must be absolute. The instructions go to the program on stdin.
+- `backend` is `claude_code` or `codex`; the server operator names the program of each
+  (`--coding-program`), and a profile cannot. On a server with `--allow-coding-commands`, the
+  backend `command` with `"command": ["/abs/program", "arg", ...]` and a repository's
+  `"test_command": ["/usr/bin/make", "test"]` are allowed too. The instructions go to the
+  program on stdin.
 - The agent sees the built-in tool `bunsin.coding/start` only with these settings and the rule.
   It sees a fixed description and the repository names, never a path, the program or the test
   command. It chooses the repository, a base (default `HEAD`) and the instructions.

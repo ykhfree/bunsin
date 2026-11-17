@@ -334,8 +334,9 @@
 - 백엔드 명령에는 권한 확인이나 sandbox를 끄는 플래그가 없다. 두 CLI의 기본 모드는 파일 수정을 막을 수 있다.
   편집을 허용하는 opt-in 설정은 두지 않았고, 실제 CLI로 실행해 보지 않았다. 운영자는 서버에서 CLI 자체의 설정을 바꿀 수 있다.
 - **엔진 연결**(core `coding`, engine `coding.rs`):
-  - 설정 `coding: Option<{backend, program, args, timeout_secs, repos: {이름: {path, test_command}}}>`(`serde(default)`, `deny_unknown_fields`).
-    프로그램과 저장소 경로는 절대 경로, `args`는 `command` 백엔드만, 시간 한도는 1초에서 24시간, 저장소 이름은 a-z, 0-9, `-`, `_` 40자까지이다.
+  - 설정 `coding: Option<{backend, command, timeout_secs, repos: {이름: {path, test_command}}}>`(`serde(default)`, `deny_unknown_fields`).
+    프로필은 `claude_code`, `codex`의 프로그램을 정하지 못한다(`program` 필드는 거부된다). `command`는 백엔드 `command`에만 있고 절대 경로로 시작한다.
+    저장소 경로는 절대 경로, 시간 한도는 1초에서 24시간, 저장소 이름은 a-z, 0-9, `-`, `_` 40자까지이다.
   - 내장 도구 `bunsin.coding/start {repo, base_ref?, instructions}`. 규칙은 `write`와 `"none"`만 받고, 다른 `bunsin.coding/` 도구의 규칙은 거부한다.
     설정과 규칙이 모두 있을 때만 LLM이 도구를 본다. LLM은 고정 설명과 저장소 이름(스키마의 `enum`)만 보고, 경로, 프로그램, 테스트 명령은 설정에서 온다.
   - pin은 언제나 참이다(명세가 코드에 있다). `Policy::decide`는 delete처럼 coding 도구의 `Autonomous`도 `NeedsApproval`로 둔다. `autonomy::suggest`도 제안하지 않는다.
@@ -348,9 +349,14 @@
   - 작업 중에 서버가 멈추면 항목은 `executing`으로 남고, 다음 시작이 `unknown`으로 옮긴다(1절의 재개). 자식 프로세스는 자기 process group이라 남을 수 있다(가정).
   - **서버 쪽**(daemon `coding.rs`): 운영자 플래그 `--allow-coding`과 `--coding-repo-root <dir>`(둘은 서로를 요구한다)가 있어야
     `RealBackends::with_coding`이 `RealCoder`를 만든다. 없으면 `validate`가 `coding` 설정의 저장을 거부하고, `coder()`는 Err이다.
-    저장소는 `canonicalize`(링크를 따라감)한 경로가 root 아래이고 `.git`이 있어야 한다. 저장할 때(`validate`)와 시작할 때(`start`) 모두 확인한다.
+  - 프로그램은 운영자가 정한다: `--coding-program claude-code=<절대 경로>`, `--coding-program codex=<절대 경로>`(반복). 운영자 프로그램이 없는 백엔드는 거부한다.
+  - 프로필이 정한 프로그램(백엔드 `command`, `test_command`)은 `--allow-coding-commands`가 있을 때만 받는다. 이 옵션은 `--allow-stdio-connectors`와
+    같은 권한이다(9절): 프로필 소유자가 서버 사용자로 아무 프로그램이나 실행하고, 다른 프로필의 DB와 `master.key`를 읽을 수 있다.
+  - 저장소는 `canonicalize`(링크를 따라감)한 경로가 root 아래이고 `.git`이 있어야 한다. 위의 모든 검사를 저장할 때(`validate`)와 시작할 때(`start`) 한다.
+    그래서 플래그를 빼고 다시 시작한 서버는 전에 저장된 설정의 작업도 시작하지 않는다(항목은 `failed`).
+  - 한계: 작업은 서버 사용자로 실행되고 sandbox가 없다. 코딩 CLI 자체의 권한 설정만 적용된다.
   - `RealCoder::start`는 tokio task에서 `CodingRunner`를 돌린다. worktree는 `<data>/coding/<profile>/worktrees`, transcript는 `<data>/coding/<profile>/logs`이다.
-    끝나면 transcript 파일을 읽어 `CodingReport`를 쌓고, 엔진의 `background_tick`(5초마다)이 가져간다. 백엔드는 설정의 `backend`로 고른다(`command`는 `Generic`, `args` 그대로).
+    끝나면 transcript 파일을 읽어 `CodingReport`를 쌓고, 엔진의 `background_tick`(5초마다)이 가져간다. 백엔드는 설정의 `backend`로 고른다(`command`는 `Generic`, 인자 그대로).
   - 테스트는 임시 git 저장소와 `/bin/sh` 명령 백엔드로 끝까지 돈다. 실제 Claude Code와 Codex는 실행하지 않았다.
   - 한계: 두 CLI의 기본 모드는 사람이 없으면 편집을 막을 수 있다. 그때 작업은 변경 없이 끝나고, Draft가 "no change"를 보인다. 우회 플래그는 넣지 않는다.
   - 창: 대기 중인 coding 호출의 카드는 "Approve and start the job"과 "Bunsin은 병합하지 않는다"는 안내를, 실행 중인 호출은 "결과는 새 항목으로 온다"는 안내를 보인다.
@@ -412,6 +418,8 @@
 - **stdio 커넥터**: 서버에서 명령을 실행하므로 기본으로 거부한다. 운영자가 `--allow-stdio-connectors`로 켠다.
   이 옵션은 프로필 격리를 넘는 권한이다: 프로필 소유자가 서버 사용자의 권한으로 아무 프로그램이나 실행할 수 있고,
   그 프로그램은 다른 프로필의 DB와 `master.key`를 읽을 수 있다. 모든 소유자를 신뢰하는 서버에서만 켠다.
+  `--allow-coding-commands`(6절)도 같은 권한을 준다. `--allow-coding`과 `--coding-program`만으로는 운영자가 정한 코딩 CLI만 실행된다.
+  그 CLI도 서버 사용자로, sandbox 없이 돈다. 지시문은 프로필 소유자가 승인한 글이다.
   설정이 바뀌면 그 프로필의 client를 버리고, `rmcp`의 자식 프로세스 transport가 버려질 때 프로그램을 종료한다
   (`rmcp-3.10.0`의 `ChildWithCleanup::drop`). 그래서 설정을 저장해도 프로그램이 남지 않는다.
 - **LLM과 MCP 주소**: 기본 규칙은 `https://` 주소만 받고, `localhost`와 내부 IP 주소(loopback, 사설, link-local 등)로 적힌 host를 거부한다.

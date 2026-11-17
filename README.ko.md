@@ -170,8 +170,14 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   프로그램은 서버 사용자의 권한으로 실행되므로, 다른 프로필의 데이터와 키 파일을 읽을 수 있습니다.
   모든 프로필 소유자를 신뢰하는 서버(예: 혼자 쓰는 서버)에서만 이 옵션을 켜십시오.
 - **코딩 작업.** 서버가 `--allow-coding --coding-repo-root <dir>`로 떠 있을 때만 프로필이 코딩 작업을 시작할 수 있습니다([코딩 위임](#코딩-위임) 참고).
-  저장소는 그 폴더 아래의 git 저장소여야 합니다. 서버는 링크를 따라간 뒤, 설정을 저장할 때와 작업을 시작할 때 이를 확인합니다.
-  코딩 CLI는 서버 사용자로, 자기 권한 설정대로 실행됩니다. Bunsin은 확인 질문이나 sandbox를 끄는 플래그를 넘기지 않습니다.
+  프로그램은 운영자가 정합니다: `--coding-program claude-code=<절대 경로>`, `--coding-program codex=<절대 경로>`.
+  프로필은 백엔드 종류와 저장소만 고릅니다. 저장소는 root 아래의 git 저장소여야 합니다.
+  서버는 링크를 따라간 뒤, 설정을 저장할 때와 작업을 시작할 때 다시 확인합니다. 아래의 검사도 모두 같습니다.
+- **코딩 명령.** 프로필이 지정한 프로그램(백엔드 `command`)과 테스트 명령은 `--allow-coding-commands`가 있어야 실행됩니다.
+  이 옵션은 `--allow-stdio-connectors`와 같은 권한을 줍니다. 모든 프로필 소유자가 서버 사용자의 권한으로 아무 프로그램이나 실행할 수 있고,
+  그 프로그램은 다른 프로필의 데이터와 키 파일을 읽을 수 있습니다. 모든 프로필 소유자를 신뢰하는 서버에서만 켜십시오.
+- **sandbox 없음.** 코딩 작업은 서버 사용자로 실행됩니다. 코딩 CLI는 자기 권한 설정을 따릅니다.
+  Bunsin은 확인 질문이나 sandbox를 끄는 플래그를 넘기지 않고, 자체 sandbox도 두지 않습니다.
   작업의 worktree와 기록 파일은 `<data dir>/coding/<프로필>/`에 남습니다. 서버는 worktree를 지우지 않습니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
@@ -588,15 +594,15 @@ agent는 코드를 직접 쓰지 않고, 병합하지 않습니다. 설정 파�
 ```json
 "coding": {
   "backend": "claude_code",
-  "program": "/opt/homebrew/bin/claude",
   "timeout_secs": 1800,
-  "repos": {"web-app": {"path": "/srv/code/web-app", "test_command": ["/usr/bin/make", "test"]}}
+  "repos": {"web-app": {"path": "/srv/code/web-app"}}
 },
 "policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
 ```
 
-- `backend`는 `claude_code`, `codex`, `command` 중 하나입니다. `args`는 `command`만 받습니다.
-  프로그램 경로는 절대 경로여야 합니다. 지시문은 stdin으로 프로그램에 갑니다.
+- `backend`는 `claude_code`나 `codex`입니다. 각 프로그램은 서버 운영자가 정하고(`--coding-program`), 프로필은 정할 수 없습니다.
+  서버가 `--allow-coding-commands`로 떠 있으면 `"command": ["/절대/프로그램", "인자", ...]`를 쓰는 백엔드 `command`와
+  저장소의 `"test_command": ["/usr/bin/make", "test"]`도 쓸 수 있습니다. 지시문은 stdin으로 프로그램에 갑니다.
 - agent는 이 설정과 규칙이 모두 있을 때만 내장 도구 `bunsin.coding/start`를 봅니다.
   agent는 고정된 설명과 저장소 이름만 보고, 경로, 프로그램, 테스트 명령은 보지 않습니다.
   agent는 저장소, base(기본값 `HEAD`), 지시문을 고릅니다.

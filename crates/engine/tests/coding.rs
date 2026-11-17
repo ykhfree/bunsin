@@ -15,7 +15,7 @@ const EMAIL: &str = "lee.park@corp.example.com";
 
 fn coding() -> CodingConfig {
     serde_json::from_value(json!({
-        "backend": "command", "program": "/bin/sh", "args": ["-c", "true"], "timeout_secs": 60,
+        "backend": "command", "command": ["/bin/sh", "-c", "true"], "timeout_secs": 60,
         "repos": {"app": {"path": "/srv/secret-path/app", "test_command": ["/usr/bin/make", "test"]}}
     }))
     .unwrap()
@@ -257,7 +257,7 @@ async fn coding_rules_and_settings_are_checked() {
         .insert("bunsin.coding/merge".into(), rule(Tier::Approve));
     refuse(other).await;
     let mut bad = with_coding(Tier::Approve);
-    bad.coding.as_mut().unwrap().program = "sh".into();
+    bad.coding.as_mut().unwrap().command = Some(vec!["sh".into()]);
     refuse(bad).await;
     rig.engine
         .set_profile_config("kim", with_coding(Tier::Approve))

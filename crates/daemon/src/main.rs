@@ -108,6 +108,15 @@ enum Command {
         /// Every repository of a coding job must be a git repository under this directory.
         #[arg(long, requires = "allow_coding")]
         coding_repo_root: Option<PathBuf>,
+        /// The program of a coding agent CLI: `claude-code=<absolute path>` or `codex=<absolute path>`.
+        /// Repeat it for both. A profile picks only the backend; a backend without a program cannot run.
+        #[arg(long = "coding-program", requires = "allow_coding")]
+        coding_programs: Vec<String>,
+        /// Let profile settings name programs of their own for coding: the backend `command` and test
+        /// commands. Every profile owner can then run any program as the user of this server, and that
+        /// program can read the data of the other profiles. Use it only if you trust every profile owner.
+        #[arg(long, requires = "allow_coding")]
+        allow_coding_commands: bool,
         /// Where the key is kept that encrypts tokens which owners store on the server.
         /// `keychain`: the login Keychain of this Mac. `file`: a key file.
         /// The default is `keychain` on macOS and `file` on other systems. A server on a Mac
@@ -843,6 +852,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_upstream_hosts,
             allow_coding,
             coding_repo_root,
+            coding_programs,
+            allow_coding_commands,
             key_store,
             accept_new_key,
             master_key_file,
@@ -853,9 +864,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .collect();
             let mut backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
             if let (true, Some(repo_root)) = (allow_coding, coding_repo_root) {
+                let programs = coding_programs
+                    .iter()
+                    .map(|text| bunsin_daemon::coding::parse_program(text))
+                    .collect::<Result<_, _>>()?;
                 let access = bunsin_daemon::coding::CodingAccess {
                     repo_root,
                     data_dir: local.data_dir.clone(),
+                    programs,
+                    allow_commands: allow_coding_commands,
                 };
                 backends = backends.with_coding(access);
             }

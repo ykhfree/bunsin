@@ -1,9 +1,10 @@
 //! Coding delegation as the engine sees it: the settings, the built-in tool `bunsin.coding/start`,
 //! the job the server runs, and the report it gives back. The runner itself is in `bunsin-coding`.
 //!
-//! The LLM chooses only a repository by name, a base and the instructions. The program, the paths and
-//! the test command come from the settings. A coding job always needs the owner's approval, and the
-//! engine never merges: the owner reviews the branch and merges it.
+//! The LLM chooses only a repository by name, a base and the instructions. The paths and the test command
+//! come from the settings. The program of a coding agent CLI comes from the server operator; a profile
+//! picks only the kind. A coding job always needs the owner's approval, and the engine never merges:
+//! the owner reviews the branch and merges it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -28,13 +29,27 @@ pub fn job_id(inbox_id: i64, profile: &str) -> String {
 }
 
 /// The coding agent CLI that runs a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
+    /// Claude Code, at the path the server operator names.
     ClaudeCode,
+    /// Codex, at the path the server operator names.
     Codex,
-    /// A program the owner names, with fixed arguments. It reads the instructions on stdin.
+    /// A program the profile owner names, with fixed arguments. It reads the instructions on stdin.
+    /// The server runs it only if its operator allows coding commands.
     Command,
+}
+
+impl BackendKind {
+    /// The name in the settings file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendKind::ClaudeCode => "claude_code",
+            BackendKind::Codex => "codex",
+            BackendKind::Command => "command",
+        }
+    }
 }
 
 /// A repository that coding jobs may change.
@@ -53,11 +68,9 @@ pub struct RepoConfig {
 #[serde(deny_unknown_fields)]
 pub struct CodingConfig {
     pub backend: BackendKind,
-    /// The absolute path of the coding agent CLI.
-    pub program: PathBuf,
-    /// The arguments of a `command` backend. The other backends have fixed arguments.
+    /// The program and its arguments, only for the backend `command`. The program is an absolute path.
     #[serde(default)]
-    pub args: Vec<String>,
+    pub command: Option<Vec<String>>,
     /// The limit of the coding agent's run. The test command gets the same limit.
     pub timeout_secs: u64,
     /// By name. The LLM sees only the names.
@@ -75,11 +88,18 @@ pub fn valid_repo_name(name: &str) -> bool {
 impl CodingConfig {
     /// Refuses settings that cannot run a job. The error says what to change.
     pub fn check(&self) -> Result<(), String> {
-        if !self.program.is_absolute() {
-            return Err("`coding.program` must be an absolute path".into());
-        }
-        if self.backend != BackendKind::Command && !self.args.is_empty() {
-            return Err("`coding.args` is only for the backend `command`".into());
+        match (self.backend, &self.command) {
+            (BackendKind::Command, None) => return Err("the backend `command` needs `coding.command`".into()),
+            (BackendKind::Command, Some(command)) => {
+                if !command
+                    .first()
+                    .is_some_and(|program| PathBuf::from(program).is_absolute())
+                {
+                    return Err("`coding.command` must start with the absolute path of a program".into());
+                }
+            }
+            (_, Some(_)) => return Err("`coding.command` is only for the backend `command`".into()),
+            (_, None) => {}
         }
         if !(1..=MAX_TIMEOUT_SECS).contains(&self.timeout_secs) {
             return Err(format!("`coding.timeout_secs` must be 1 to {MAX_TIMEOUT_SECS}"));
@@ -101,6 +121,12 @@ impl CodingConfig {
             }
         }
         Ok(())
+    }
+
+    /// True if the settings name a program of their own: the backend `command` or a test command.
+    /// The server runs such programs only if its operator allows coding commands.
+    pub fn names_programs(&self) -> bool {
+        self.command.is_some() || self.repos.values().any(|repo| repo.test_command.is_some())
     }
 
     /// The description of `bunsin.coding/start` as the LLM sees it: fixed text and the repository names.
@@ -172,8 +198,8 @@ pub struct CodingJobSpec {
     pub instructions: String,
     pub test_command: Option<Vec<String>>,
     pub backend: BackendKind,
-    pub program: PathBuf,
-    pub args: Vec<String>,
+    /// The program and its arguments of the backend `command`.
+    pub command: Option<Vec<String>>,
     pub timeout_secs: u64,
 }
 
@@ -194,8 +220,7 @@ impl CodingJobSpec {
             instructions: args.instructions,
             test_command: repo.test_command.clone(),
             backend: config.backend,
-            program: config.program.clone(),
-            args: config.args.clone(),
+            command: config.command.clone(),
             timeout_secs: config.timeout_secs,
         })
     }
@@ -287,7 +312,7 @@ mod tests {
 
     fn config() -> CodingConfig {
         serde_json::from_value(json!({
-            "backend": "command", "program": "/bin/sh", "args": ["-c", "true"], "timeout_secs": 60,
+            "backend": "command", "command": ["/bin/sh", "-c", "true"], "timeout_secs": 60,
             "repos": {"app": {"path": "/srv/app", "test_command": ["/usr/bin/make", "test"]}}
         }))
         .unwrap()
@@ -297,11 +322,27 @@ mod tests {
     fn settings_must_name_absolute_paths_and_a_repository() {
         assert_eq!(config().check(), Ok(()));
         let mut bad = config();
-        bad.program = "sh".into();
+        bad.command = Some(vec!["sh".into()]);
         assert!(bad.check().unwrap_err().contains("absolute"));
+        let mut bad = config();
+        bad.command = Some(Vec::new());
+        assert!(bad.check().unwrap_err().contains("absolute"));
+        let mut bad = config();
+        bad.command = None;
+        assert!(bad.check().unwrap_err().contains("needs `coding.command`"));
         let mut bad = config();
         bad.backend = BackendKind::ClaudeCode;
         assert!(bad.check().unwrap_err().contains("only for the backend"));
+        // A profile cannot name the program of Claude Code or Codex: the operator does.
+        let named = json!({"backend": "claude_code", "program": "/tmp/evil", "timeout_secs": 60,
+            "repos": {"app": {"path": "/srv/app"}}});
+        assert!(serde_json::from_value::<CodingConfig>(named).is_err());
+        let plain: CodingConfig = serde_json::from_value(json!({"backend": "claude_code", "timeout_secs": 60,
+            "repos": {"app": {"path": "/srv/app"}}}))
+        .unwrap();
+        assert_eq!(plain.check(), Ok(()));
+        assert!(!plain.names_programs());
+        assert!(config().names_programs());
         let mut bad = config();
         bad.timeout_secs = 0;
         assert!(bad.check().unwrap_err().contains("timeout_secs"));
@@ -318,7 +359,7 @@ mod tests {
         bad.repos.get_mut("app").unwrap().test_command = Some(Vec::new());
         assert!(bad.check().unwrap_err().contains("empty"));
         // An unknown field is refused, so a typo does not drop a setting.
-        let typo = json!({"backend": "codex", "program": "/x", "timeout_secs": 1, "repos": {}, "sandbox": "off"});
+        let typo = json!({"backend": "codex", "timeout_secs": 1, "repos": {}, "sandbox": "off"});
         assert!(serde_json::from_value::<CodingConfig>(typo).is_err());
     }
 

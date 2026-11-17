@@ -337,9 +337,7 @@ impl Backends for RealBackends {
             let coder = self.coder.as_ref().ok_or(
                 "the settings have `coding`, but the server operator did not start the server with --allow-coding",
             )?;
-            for (name, repo) in &settings.repos {
-                coder.check_repo(name, &repo.path)?;
-            }
+            coder.check_settings(settings)?;
         }
         if !config.llm.is_null() {
             secret_env_name(profile, &self.llm_section(&config.llm)?.token_secret)?;

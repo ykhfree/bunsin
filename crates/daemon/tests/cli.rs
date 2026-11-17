@@ -760,11 +760,30 @@ fn a_preload_needs_a_tool_with_a_read_rule() {
 fn coding_needs_both_operator_flags() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_str().unwrap();
-    for flags in [vec!["--allow-coding"], vec!["--coding-repo-root", root]] {
+    for flags in [
+        vec!["--allow-coding"],
+        vec!["--coding-repo-root", root],
+        vec!["--coding-program", "codex=/usr/local/bin/codex"],
+        vec!["--allow-coding-commands"],
+    ] {
         let output = operator(dir.path(), &[["serve"].as_slice(), flags.as_slice()].concat());
         // clap refuses the arguments before the server starts.
         assert_eq!(output.status.code(), Some(2), "{flags:?}");
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(error.contains("required"), "{error}");
     }
+    // A custom program is no operator program: it needs --allow-coding-commands and the profile's settings.
+    let output = operator(
+        dir.path(),
+        &[
+            "serve",
+            "--allow-coding",
+            "--coding-repo-root",
+            root,
+            "--coding-program",
+            "command=/bin/sh",
+        ],
+    );
+    let error = stderr_of_failure(output, "a custom program");
+    assert!(error.contains("not a backend"), "{error}");
 }
