@@ -23,7 +23,7 @@ Bunsin is in early development. Read this list before you use it.
   against test servers. There is no webhook intake.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
   tools with the class `read` (for example a search) up to five times, and read up to
-  five pages of its notes, and use the results. Facts it keeps go into its notes, which you approve page by page (see
+  five pages of its notes, and use the results. A search of your ARD registries counts as a tool read. Facts it keeps go into its notes, which you approve page by page (see
   [Notes](#notes)). The notes fill with what the agent read while it handled events, and
   with reads that you start yourself. The search quality depends on your MCP servers.
 - **The privacy filter works on patterns and on your list of terms.** It finds email
@@ -31,7 +31,7 @@ Bunsin is in early development. Read this list before you use it.
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
-- **Not built yet:** ARD search, OAuth for MCP servers, webhook intake.
+- **Not built yet:** OAuth for MCP servers, webhook intake.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
   a real MCP server, or the real Slack, Jira or Confluence API.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
@@ -703,6 +703,30 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 - In the window, the **Read into the notes** card of the Notes view does the same.
 
 Not built yet: a check of a page when you lose access to its source.
+
+### Search ARD registries
+
+The agent can look for other agents and tools in ARD registries (Agentic Resource Discovery)
+that you name in the settings:
+
+```json
+"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}]
+```
+
+- The agent then sees the built-in read tool `bunsin.ard/search {text, registry?}`. It sends
+  `POST <url>/search` with `query.text`, `federation: "none"` and `pageSize: 5` to the named
+  registry, or to the first one. It needs no permission rule, and it counts toward the five
+  reads of an event.
+- The search follows no referral: a referral names a registry that the registry chose, not
+  you. A redirect is not followed either.
+- The registry addresses pass the same address rules as the LLM and connector addresses.
+  A name is 1 to 32 of a-z, 0-9 and `-`.
+- The results are text written by others. They pass the privacy filter and reach the LLM as
+  quoted data. The agent gets the identifier, name, type, URL, description, capabilities,
+  score and source of each result; nothing else. The `score` is only text for the LLM: no
+  decision of the server uses it.
+- The agent cannot call what it found. You add a found agent or tool as a connector, approve
+  its tools and give each a rule.
 
 ### Delegate coding
 

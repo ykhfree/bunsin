@@ -34,6 +34,7 @@ use bunsin_api::{
     Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::ard::ARD_SEARCH_TOOL;
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::is_coding_tool;
@@ -339,6 +340,7 @@ impl Engine {
         Self::check_coding_rules(config)?;
         Self::check_inbound(config)?;
         Self::check_ard(config)?;
+        bunsin_core::ard::check_registries(&config.ard_registries).map_err(ApiError::Invalid)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -430,6 +432,18 @@ impl Engine {
             .collect()
     }
 
+    /// The ARD search, if the settings name a registry.
+    fn ard_search_hint(config: &ProfileConfig) -> Option<ToolHint> {
+        (!config.ard_registries.is_empty()).then(|| {
+            let spec = bunsin_core::ard::search_spec(&config.ard_registries);
+            ToolHint {
+                tool_id: ARD_SEARCH_TOOL.to_owned(),
+                description: spec.description,
+                input_schema: spec.input_schema,
+            }
+        })
+    }
+
     /// A tool result as text for the prompt and for the disk: filtered, and cut if it is long.
     /// One function serves both, so nothing unfiltered is stored.
     fn result_text(redactor: &Redactor, result: &Value) -> String {
@@ -478,6 +492,7 @@ impl Engine {
         };
         if allow_reads {
             tools.extend(notes::notes_tools());
+            tools.extend(Self::ard_search_hint(config));
         }
         let mut counts = RedactionCounts::new();
         let mut request: CompletionRequest = assemble(
@@ -589,19 +604,21 @@ impl Engine {
             let Proposal::ToolCall { tool, args, .. } = &proposal else {
                 return Ok((ready(proposal, reads, pages_read), replies));
             };
-            // The built-in notes tools are handled here. They are not in the permission table.
+            // The built-in notes tools and the ARD search are handled here. They are not in the permission table.
             let reads_notes = tool == WIKI_READ_TOOL || tool == WIKI_SEARCH_TOOL;
+            let reads_ard = tool == ARD_SEARCH_TOOL && !config.ard_registries.is_empty();
             let is_read = config
                 .policy
                 .rules
                 .get(tool)
                 .is_some_and(|rule| rule.class == ToolClass::Read);
-            let allowed =
-                allow_reads && (reads_notes || (is_read && self.decide(ctx, tool).await? == Decision::Execute));
+            let allowed = allow_reads
+                && (reads_notes || reads_ard || (is_read && self.decide(ctx, tool).await? == Decision::Execute));
             if !allowed {
                 return Ok((ready(proposal, reads, pages_read), replies));
             }
-            // The limit counts the reads of the notes and of connectors separately.
+            // The limit counts the reads of the notes and of connectors separately. An ARD search is a
+            // read of a connector: it leaves the server.
             let same_kind = reads
                 .iter()
                 .filter(|read| is_notes_tool(&read.tool) == reads_notes)

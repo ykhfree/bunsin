@@ -21,13 +21,14 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
 - **이벤트 수신은 사용하는 MCP 서버에 달려 있습니다.** 서버는 설정에 적힌 검색 도구를 반복 호출합니다
   ([이벤트 찾기](#이벤트-찾기-폴링) 참고). 이 기능은 테스트 서버로만 실행해 보았습니다. webhook 수신은 없습니다.
 - **agent는 허용한 도구로만 읽습니다.** 제안하기 전에 `read` 도구(예: 검색)를 최대 5번 호출하고, notes의 페이지를 최대 5번 읽고, 그 결과를 씁니다.
+  ARD registry 검색은 도구 읽기로 셉니다.
   오래 쓸 사실은 notes에 정리하고, 사용자가 한 쪽씩 승인합니다([Notes](#notes) 참고).
   notes는 agent가 이벤트를 처리하며 읽은 것과 사용자가 시작한 읽기로 채워집니다. 검색 품질은 MCP 서버에 달려 있습니다.
 - **개인정보 필터는 패턴과 사용자의 단어 목록으로 동작합니다.** 이메일, 전화번호 같은 정해진 형식은 찾습니다.
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
   원칙과 poll도 창에서 정합니다.
-- **아직 만들지 않은 것:** ARD 검색, MCP 서버용 OAuth, webhook 수신.
+- **아직 만들지 않은 것:** MCP 서버용 OAuth, webhook 수신.
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
@@ -607,6 +608,24 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 - 창의 Notes 화면에 있는 **Read into the notes** 카드도 같은 일을 합니다.
 
 아직 없는 것: 출처의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
+
+### ARD registry 검색
+
+agent는 설정에 적은 ARD registry(Agentic Resource Discovery)에서 다른 agent와 도구를 찾을 수 있습니다.
+
+```json
+"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}]
+```
+
+- 그러면 agent는 내장 읽기 도구 `bunsin.ard/search {text, registry?}`를 봅니다.
+  이 도구는 지정한 registry(없으면 첫 registry)에 `POST <url>/search`로 `query.text`, `federation: "none"`, `pageSize: 5`를 보냅니다.
+  권한 규칙이 필요 없고, 이벤트 하나의 읽기 5번에 포함됩니다.
+- referral은 따라가지 않습니다. referral은 소유자가 아니라 registry가 고른 registry이기 때문입니다. redirect도 따라가지 않습니다.
+- registry 주소는 LLM과 커넥터 주소와 같은 주소 규칙을 지납니다. 이름은 a-z, 0-9, `-` 1~32자입니다.
+- 결과는 다른 사람이 쓴 글입니다. 개인정보 필터를 거쳐 인용 데이터로 LLM에 갑니다.
+  agent는 결과마다 identifier, 이름, type, URL, 설명, capabilities, score, source만 받습니다.
+  `score`는 LLM이 읽는 글일 뿐이고, 서버의 어떤 결정에도 쓰이지 않습니다.
+- agent는 찾은 것을 호출할 수 없습니다. 소유자가 커넥터로 더하고, 도구를 승인하고, 규칙을 주어야 합니다.
 
 ### 코딩 위임
 

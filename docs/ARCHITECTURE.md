@@ -676,6 +676,17 @@ agent는 이벤트만 보고 답하지 않는다. 필요한 사실을 `read` 도
   뒤의 읽기는 앞에서 읽은 글을 인자에 담을 수 있다. 그래서 통제할 수 없는 URL을 가져오는 도구는 `read`로 두면 안 된다.
 - 한계: 무엇을 읽을지는 LLM이 정한다. notes에는 관련도 순위와 검색이 있다(15절). 커넥터의 문서에는 색인이 없다.
 
+**ARD 검색 `bunsin.ard/search {text, registry?}`**(core `ard`, daemon `ard_search.rs`)
+
+- 설정 `ard_registries: [{name, url}]`(`ProfileConfig`, `#[serde(default)]`). 설계의 `federation` 필드는 두지 않았다. referral을 따르지 않으므로 고를 값이 `none` 하나뿐이다.
+- 엔진에는 HTTP client가 없으므로 `RealBackends`가 runtime에 내장 connector `bunsin.ard`를 넣는다. 이름의 `.` 때문에 소유자 connector와 겹치지 않는다.
+- 요청: `POST <url>/search`, `query.text`, `federation: "none"`, `pageSize: 5`. `SearchClient`의 hop 한도는 0이라 referral 요청이 없다(테스트가 목록 안의 registry를 가리키는 referral로 확인한다). redirect도 따르지 않는다.
+- registry 주소는 `UpstreamPolicy::check`를 저장할 때와 만들 때 지난다. 이름은 `check_registries`가 검사한다(connector 이름 규칙, 중복 없음).
+- 엔진은 이 도구를 notes 읽기처럼 규칙 없이 허용한다(registry가 있을 때만, 읽기 허용 단계에서만). 실행과 결과 처리는 connector 읽기와 같아서
+  필터, 인용, 감사 `read`, 산출물 `read_result`를 지나고 커넥터 읽기 5회 한도에 든다. 정지 스위치는 다른 읽기처럼 막지 않는다.
+- 결과는 identifier, displayName, type, url, description, capabilities, score, source만 넘긴다. `score`는 글일 뿐이고 `Policy::decide`에는 score 입력이 없다.
+- 찾은 자원은 부를 수 없다. 소유자가 connector로 더하고 도구를 승인해야 한다.
+
 ## 14. 설정 저장의 충돌 검사
 
 - 저장 요청은 "화면이 읽었던 값"을 함께 보낼 수 있다(`Expected::Value`). 서버의 현재 값이 다르면 서버는 `Conflict`로 거부하고 아무것도 저장하지 않는다.
@@ -830,7 +841,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 구성 마법사, 비밀 저장소 | 없음 |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI). 창에는 없음. |
-| ARD 검색 | 없음 |
+| ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버). 로컬 stub registry로만 테스트 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 

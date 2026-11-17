@@ -1,6 +1,7 @@
 //! Pure harness logic. This crate does no IO: callers inject time, IDs and data.
 
 pub mod approval;
+pub mod ard;
 pub mod autonomy;
 pub mod candidates;
 pub mod coding;

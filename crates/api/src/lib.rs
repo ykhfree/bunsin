@@ -2,6 +2,7 @@
 
 pub mod http;
 
+use bunsin_core::ard::ArdRegistry;
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::CodingConfig;
@@ -64,6 +65,9 @@ pub struct ProfileConfig {
     /// The inbound endpoint where other people's agents ask questions. Off by default.
     #[serde(default)]
     pub inbound: InboundConfig,
+    /// The ARD registries that the agent may search with `bunsin.ard/search`. Empty: no search.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ard_registries: Vec<ArdRegistry>,
 }
 
 impl ProfileConfig {
@@ -87,6 +91,7 @@ impl ProfileConfig {
             notes: NotesConfig::default(),
             coding: None,
             inbound: InboundConfig::default(),
+            ard_registries: Vec::new(),
         }
     }
 }

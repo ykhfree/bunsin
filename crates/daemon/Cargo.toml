@@ -13,6 +13,7 @@ path = "src/main.rs"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 axum-server = { version = "0.9", features = ["tls-rustls"] }
 bunsin-api.workspace = true
+bunsin-ard.workspace = true
 bunsin-client.workspace = true
 bunsin-coding.workspace = true
 bunsin-connectors.workspace = true

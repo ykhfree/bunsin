@@ -7,6 +7,7 @@
 //! A profile owner chooses the LLM and MCP addresses, and the server sends the requests.
 //! [`UpstreamPolicy`] stops an owner from pointing the server at its own internal network.
 
+pub mod ard_search;
 pub mod coding;
 pub mod inbound;
 pub mod keystore;
@@ -15,6 +16,7 @@ pub mod server;
 
 use bunsin_api::ProfileConfig;
 use bunsin_connectors::{ApiAuth, ApiConnector, McpConnector, TokenAuth};
+use bunsin_core::ard::{ARD_CONNECTOR, ArdRegistry};
 use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::settings::{
     ApiAuthMethod, ConnectorKind, ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key,
@@ -277,6 +279,18 @@ impl RealBackends {
         Ok(section)
     }
 
+    /// Checks the addresses of the ARD registries with the same rules as the other addresses.
+    /// Every save and every build of the search passes here.
+    fn ard_registries(&self, registries: &[ArdRegistry]) -> Result<(), String> {
+        for registry in registries {
+            self.upstream.check(
+                &format!("the address of ARD registry `{}`", registry.name),
+                &registry.url,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn llm(&self, profile: &str, section: &Value, secrets: &ProfileSecrets) -> Result<HttpLlmClient, String> {
         let section = self.llm_section(section)?;
         let token = self.token(profile, &section.token_secret, Some(&section.base_url), secrets)?;
@@ -355,6 +369,13 @@ impl Backends for RealBackends {
             for (name, section) in &config.connectors {
                 connectors.insert(name.clone(), self.connector(profile, name, section, secrets).await);
             }
+            if !config.ard_registries.is_empty() {
+                let search = self
+                    .ard_registries(&config.ard_registries)
+                    .and_then(|()| ard_search::ArdSearch::new(&config.ard_registries))
+                    .map(|search| Arc::new(search) as Arc<dyn Connector>);
+                connectors.insert(ARD_CONNECTOR.to_owned(), search);
+            }
             Ok(Runtime { llm, connectors })
         })
     }
@@ -402,7 +423,7 @@ impl Backends for RealBackends {
                 secret_env_name(profile, &key)?;
             }
         }
-        Ok(())
+        self.ard_registries(&config.ard_registries)
     }
 }
 
