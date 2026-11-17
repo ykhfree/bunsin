@@ -568,6 +568,7 @@ async fn a_server_that_never_answers_ends_the_call_at_the_time_limit() {
     .unwrap_err();
 
     assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
-    assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
+    // The request reached the server, so the server may have done it.
+    assert!(matches!(error, ConnectorError::Unanswered(_)), "{error:?}");
     assert!(!error.to_string().contains(TOKEN));
 }

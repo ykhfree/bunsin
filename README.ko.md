@@ -246,8 +246,9 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
   그 커넥터에 `connector-set`을 실행할 때마다 `--token-header`를 주십시오. 빼면 `Authorization: Bearer`로 돌아갑니다.
 - MCP 커넥터의 도구 호출 하나는 2분 안에 끝나야 합니다. 서버가 호출마다 먼저 받는 도구 목록도 같습니다.
-  더 걸리면 호출을 취소하고 오류가 됩니다.
+  더 걸리면 호출을 취소합니다.
   다만 MCP 서버가 그 호출을 이미 실행했을 수 있습니다.
+  그래서 시간이 지난 승인된 쓰기나 삭제는 `failed`가 아니라 `unknown`이 됩니다(아래 "멈춤으로 끊기거나 답이 없는 호출" 참고).
 - **OAuth.** 주소로 접속하는 MCP 서버는 token 대신 OAuth 로그인을 쓸 수 있습니다.
   설정 파일에서 켭니다: 커넥터에 `"oauth": {}`를 넣고 token은 빼고 `config-set`을 실행합니다. 예:
   `"docs": {"mcp": {"transport": "http", "url": "https://mcp.example.com/docs"}, "oauth": {}}`.
@@ -274,6 +275,8 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   도구 승인과 도구별 규칙은 MCP 서버와 같습니다. AI 표시는 규칙이 글 자리로 정한 곳(예: `{"arg": "text"}`)에 붙습니다.
   주소 규칙과 token의 origin 결합은 base URL에 적용됩니다. 요청 모양은 공식 API 문서를 따랐고, 실제 서비스로는 시험하지 않았습니다.
   요청 하나는 30초 안에 끝나야 합니다. 그 안에 답하지 않으면 오류가 됩니다.
+  요청이 서비스에 닿은 뒤의 오류이면, 승인된 쓰기나 삭제는 `unknown`이 됩니다.
+  연결하지 못한 요청과 HTTP 4xx 같은 분명한 거절은 `failed`가 됩니다.
 - 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token이나 주소 커넥터의 token을 읽습니다.
   항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.
   token은 서버로 한 번 복사됩니다. 이후 Keychain에서 값을 바꿔도 서버에는 반영되지 않습니다.
@@ -797,6 +800,9 @@ bunsind stop kim on                # 정지 스위치: 이 프로필의 모든 �
 
 승인된 호출이 실행되는 중에 서버가 멈추면, 다음 시작은 그 호출을 다시 실행하지 않습니다.
 호출이 이미 도구에 닿았을 수 있기 때문입니다. `status`는 그 항목을 `unknown`으로 보여 줍니다.
+승인된 호출이 답을 받지 못해도 같습니다. 커넥터의 시간 한도가 호출을 끝냈거나, 요청을 보낸 뒤에 연결이 끊긴 경우입니다.
+Bunsin은 그런 호출을 스스로 다시 보내지 않습니다.
+읽기는 다릅니다. 실패한 읽기는 오류가 자료로 agent에게 갑니다.
 대상 시스템을 확인한 뒤 `resolve-unknown`이나 창에서 처리합니다.
 호출이 도구에 닿았으면 `done`, 닿지 않았으면 `drop`을 고릅니다. `retry`는 사본을 새 항목으로 지금 실행합니다.
 retry는 권한 규칙을 다시 확인합니다. 첫 호출이 도구에 닿았다면 retry는 같은 호출을 두 번 보냅니다.
@@ -870,7 +876,7 @@ AI 표시는 서버가 수정 뒤에 붙입니다. 그래서 입력란에는 표
 
 **묻지 않고 실행된 호출**에는 "Report a problem" 버튼이 있습니다. 신고하면 그 도구가 승인 단계로 보류됩니다([권한 규칙](#권한-규칙)).
 
-**멈춤으로 끊긴 호출.** `unknown` 항목에는 버튼이 세 개 있습니다: "It ran: mark done", "It did not run: drop", "Run again".
+**멈춤으로 끊기거나 답이 없는 호출.** `unknown` 항목에는 버튼이 세 개 있습니다: "It ran: mark done", "It did not run: drop", "Run again".
 버튼 아래의 안내문은 다시 실행하면 호출이 두 번 갈 수 있다고 알립니다.
 "Run again"은 먼저 묻습니다. 한 번 누르면 버튼이 "Yes, run it again"으로 바뀌고, 같은 항목에서 한 번 더 눌러야 실행합니다.
 

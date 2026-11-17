@@ -396,10 +396,11 @@ async fn save_for(
     })
 }
 
-/// The result of an approval. A call that ran and failed is a failure too.
+/// The result of an approval. A call that ran and failed, or got no answer, is a failure too.
 fn approved(result: Result<Outcome, String>) -> Result<(), String> {
     match result? {
         Outcome::ExecutionFailed { error, .. } => Err(format!("the call failed: {error}")),
+        Outcome::ExecutionUnknown { error, .. } => Err(format!("the outcome of the call is unknown: {error}")),
         _ => Ok(()),
     }
 }

@@ -19,8 +19,14 @@ pub enum ConnectorError {
     UnknownTool(String),
     #[error("the tool call failed: {0}")]
     Failed(String),
+    /// The request did not reach the service, or the service could not take it.
     #[error("transport failure: {0}")]
     Transport(String),
+    /// The request may have reached the service, but no full answer came.
+    /// A time limit ended the call, or the connection broke after the send.
+    /// The service may have done the call.
+    #[error("no answer: {0}")]
+    Unanswered(String),
 }
 
 /// One external service (Slack, Jira, Confluence), reached by MCP or by its REST API.

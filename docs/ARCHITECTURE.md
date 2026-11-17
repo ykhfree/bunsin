@@ -34,6 +34,13 @@
   4. 폴링을 시작한다.
   - 프로필 하나의 실패는 stderr에 쓰고, 다른 프로필과 서버의 시작을 막지 않는다.
   - `unknown`에서 `approved`나 `executing`으로 가는 전이는 없다. 이미 보냈을 수 있으므로 자동 재실행은 기각했다.
+  - **답이 없는 호출.** `execute`가 커넥터에서 `ConnectorError::Unanswered`를 받으면 항목을 `executing`에서 `unknown`으로 옮긴다.
+    감사는 `outcome_unknown`(`inbox_id`, `tool`, `error`)이고, 결과는 `Outcome::ExecutionUnknown`이다. 이벤트는 다시 처리하지 않는다.
+    `Unanswered`는 요청이 서버에 닿았을 수 있다는 뜻이다. MCP 커넥터는 도구 호출 단계의 시간 초과에 쓴다.
+    호출 앞의 도구 목록 단계의 시간 초과는 호출을 보내지 않았으므로 `Transport`이다.
+    REST API 커넥터는 reqwest가 연결 오류(`is_connect`)나 요청 생성 오류(`is_builder`)로 분류하지 않은 전송 오류와, 응답 본문 읽기 오류에 쓴다.
+    문구로 분류하지 않는다. `Failed`(서버의 거절, HTTP 4xx·5xx), `Transport`, `UnknownTool`은 전처럼 `failed`이다.
+    읽기 도구의 오류는 모든 종류가 전처럼 자료로 LLM에 간다. 창은 승인 결과가 `ExecutionUnknown`이면 오류 줄에 "the outcome of the call is unknown"을 보인다.
   - inbox 열 `autonomous`는 정책이 소유자 없이 승인한 항목이다(처음부터 `approved`로 생긴 항목).
     이 열이 없던 DB의 `approved` 항목은 자율 항목으로 본다. 그래서 정책이 소유자 없이 허용할 때만 다시 실행되고, 아니면 소유자에게 다시 묻는다.
   - `execute`는 도구를 부르기 전에 감사 `execution_started`를 남긴다. 실행의 ID는 inbox ID이다.
@@ -567,7 +574,8 @@
 - 연결은 30초 안에 끝나야 한다. 시간이 지나면 `RealBackends`가 오류를 돌려준다.
 - 도구 호출 하나는 앞의 도구 목록 조회까지 120초(`CALL_TIMEOUT`) 안에 끝나야 한다. 도구가 느릴 수 있어 넉넉히 잡았다.
   엔진이 호출 전 pin 검사로 따로 부르는 `list_tools`도 같은 한도이다. 그렇지 않으면 목록에 답하지 않는 서버가 이벤트를 막는다.
-  시간이 지나면 요청을 버리고, rmcp가 서버에 `notifications/cancelled`를 보낸다. 오류는 transport 오류이다.
+  시간이 지나면 요청을 버리고, rmcp가 서버에 `notifications/cancelled`를 보낸다.
+  목록 단계에서 시간이 지나면 오류는 `Transport`이다. 호출 단계에서 지나면 `Unanswered`이고, 승인된 쓰기는 `unknown`이 된다(1절).
   쓰기 도구라면 서버가 이미 실행했을 수 있다. 엔진은 다른 호출 오류처럼 `failed`로 둔다. OAuth 커넥터도 같다.
 - 커넥터는 권한을 판단하지 않는다. 엔진이 호출 전에 정책과 pin을 검사한다.
 - HTTP transport는 token을 `Authorization: Bearer <token>`으로 보내거나, OAuth로 받은 access token을 보낸다(아래 **OAuth**).
@@ -625,7 +633,7 @@
   창의 종류 **REST API**(서비스, base URL, 인증 방식, email, token). 창은 Slack을 고르면 `https://slack.com/api`를 채운다.
   REST API 커넥터의 token은 창에서 지울 수 없다. token이 없으면 쓸 수 없기 때문이다.
 - HTTP client는 redirect를 따르지 않는다. 오류 문구에서 token과 basic 인코딩 값을 지운다.
-- 요청 하나는 30초 안에 끝나야 한다(MCP 커넥터의 연결 한도와 같은 `CONNECT_TIMEOUT`). 답하지 않는 서버는 이벤트 처리를 막지 못하고 transport 오류가 된다.
+- 요청 하나는 30초 안에 끝나야 한다(MCP 커넥터의 연결 한도와 같은 `CONNECT_TIMEOUT`). 답하지 않는 서버는 이벤트 처리를 막지 못한다. 연결 뒤의 시간 초과는 `Unanswered`이다(1절).
 - 요청 모양은 공식 API 문서를 따랐다. 테스트는 로컬 stub(daemon `tests/api_connectors.rs`)으로 도구 목록, 승인, 규칙, 읽기, 승인 뒤 쓰기와 AI 표시를 끝까지 돈다.
   실제 서비스로는 실행하지 않았다.
 
@@ -897,7 +905,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI). 창에는 없음. |
 | ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버). 로컬 stub registry로만 테스트 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
-| 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
+| 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
 
 ## 17. 미해결
 

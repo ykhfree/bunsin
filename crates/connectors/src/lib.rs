@@ -171,13 +171,29 @@ impl McpConnector {
             .collect())
     }
 
+    /// The list and the call share one time limit. The end of the limit has two meanings.
+    /// During the list, the call was not sent. During the call, the server may have done it.
     async fn call(&self, tool: &str, args: Map<String, Value>) -> Result<Value, ConnectorError> {
+        let deadline = tokio::time::Instant::now() + self.call_timeout;
+        let limit = self.call_timeout.as_secs_f64();
         // List first, so that a tool the server does not list never reaches the server.
-        if !self.list_all().await?.iter().any(|t| t.name == tool) {
+        let tools = tokio::time::timeout_at(deadline, self.list_all()).await.map_err(|_| {
+            ConnectorError::Transport(format!(
+                "the tool list before the call of `{tool}` did not end in {limit} s; the call was not sent"
+            ))
+        })??;
+        if !tools.iter().any(|t| t.name == tool) {
             return Err(ConnectorError::UnknownTool(tool.to_owned()));
         }
         let params = CallToolRequestParams::new(tool.to_owned()).with_arguments(args);
-        let result = self.client.call_tool(params).await.map_err(service_error)?;
+        let result = tokio::time::timeout_at(deadline, self.client.call_tool(params))
+            .await
+            .map_err(|_| {
+                ConnectorError::Unanswered(format!(
+                    "the call of `{tool}` did not end in {limit} s and was cancelled; the server may have done it anyway"
+                ))
+            })?
+            .map_err(service_error)?;
         tool_result(result)
     }
 }
@@ -204,15 +220,7 @@ impl Connector for McpConnector {
     /// limit the request is dropped, and rmcp tells the server that it is cancelled.
     fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>> {
         let tool = tool.to_owned();
-        Box::pin(async move {
-            match tokio::time::timeout(self.call_timeout, self.call(&tool, args)).await {
-                Ok(result) => result,
-                Err(_) => Err(ConnectorError::Transport(format!(
-                    "the call of `{tool}` did not end in {} s and was cancelled; the server may have done it anyway",
-                    self.call_timeout.as_secs_f64()
-                ))),
-            }
-        })
+        Box::pin(async move { self.call(&tool, args).await })
     }
 }
 

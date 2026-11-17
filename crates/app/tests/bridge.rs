@@ -157,6 +157,27 @@ async fn a_failed_call_is_shown_as_an_error() {
 }
 
 #[tokio::test]
+async fn a_call_without_an_answer_is_shown_as_unknown() {
+    let rig = common::rig().await;
+    rig.slack
+        .fail_with_error(bunsin_core::ports::ConnectorError::Unanswered(
+            "no reply in 120 s".into(),
+        ));
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    apply(&*rig.engine, &mut state, UiCommand::Approve(1)).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("the outcome of the call is unknown") && e.contains("no reply in 120 s")),
+        "{:?}",
+        state.error
+    );
+    assert_eq!(state.snapshot.unwrap().inbox[0].state, ApprovalState::Unknown);
+}
+
+#[tokio::test]
 async fn the_kill_switch_state_comes_from_the_engine() {
     let rig = common::rig().await;
     let mut state = UiState::default();

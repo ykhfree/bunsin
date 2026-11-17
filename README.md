@@ -286,8 +286,9 @@ bunsind connector-remove kim jira                # removes the connector and its
   window. That header then carries the token as it is. Give `--token-header` with every
   `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
 - A tool call of an MCP connector must end in 2 minutes, and so must the list of its tools
-  that the server asks for before each call. A call that runs longer is cancelled and gives
-  an error, but the MCP server may have done it anyway.
+  that the server asks for before each call. A call that runs longer is cancelled, but the
+  MCP server may have done it anyway. So an approved write or delete that runs out of time
+  becomes `unknown`, not `failed` (see "A call cut by a stop or without an answer" below).
 - **OAuth.** An MCP server at an address can take a sign-in with OAuth instead of a token.
   Turn it on in the settings file: give the connector `"oauth": {}` and no token, then
   `config-set`. For example:
@@ -323,7 +324,9 @@ bunsind connector-remove kim jira                # removes the connector and its
   AI marker goes where the rule names the text, for example `{"arg": "text"}`. The address
   rules and the binding of the token to the origin apply to the base URL. The request
   shapes follow the official API docs; no test ran against the real services. Each request
-  must end in 30 seconds; a service that does not answer in time gives an error.
+  must end in 30 seconds; a service that does not answer in time gives an error. If the
+  request reached the service before the error, an approved write or delete becomes
+  `unknown`. A request that never connected, and a clean refusal such as HTTP 4xx, fail.
 - In the window, **Copy the token from the Keychain** reads the LLM token or the token of
   an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
@@ -933,7 +936,10 @@ no corrections: one of them can hold the real reply. A retired correction stays 
 and reaches no prompt.
 
 If the server stops while it runs an approved call, the next start does not run that call
-again: it may have reached its tool already. `status` shows it as `unknown`. Check the
+again: it may have reached its tool already. `status` shows it as `unknown`. The same
+happens when an approved call gets no answer: the connector's time limit ended it, or the
+connection broke after the request was sent. Bunsin never sends such a call again by
+itself. A failed read is different: the agent gets the error as data. Check the
 target system, then resolve it with `resolve-unknown` or in the window: `done` if the call
 reached its tool, `drop` if it did not, or `retry` to run a copy now as a new item.
 A retry checks the permission rules again. If the first call reached its tool, a retry
@@ -1020,7 +1026,7 @@ sends no text has no Edit button.
 **A call that ran without asking** has the button "Report a problem". A report holds its
 tool at approval (see [Permission rules](#permission-rules)).
 
-**A call cut by a stop.** An `unknown` item has three buttons: "It ran: mark done", "It did not
+**A call cut by a stop or without an answer.** An `unknown` item has three buttons: "It ran: mark done", "It did not
 run: drop" and "Run again". A note under them says that a second run can send the call twice.
 "Run again" asks first: its label becomes "Yes, run it again", and a second click on the same
 item runs the call.

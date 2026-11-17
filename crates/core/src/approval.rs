@@ -12,7 +12,8 @@ pub enum ApprovalState {
     Executing,
     Executed,
     Failed,
-    /// The server stopped while the call ran. The call may or may not have reached its tool.
+    /// The server stopped while the call ran, or the call got no answer in its time limit.
+    /// The call may or may not have reached its tool.
     /// Only the owner resolves it: done, drop, or retry as a new item.
     Unknown,
 }
@@ -24,7 +25,7 @@ pub enum ApprovalEvent {
     StartExecution,
     ExecutionSucceeded,
     ExecutionFailed,
-    /// A start found the call cut by a stop.
+    /// A start found the call cut by a stop, or the call got no answer.
     Interrupt,
     /// The owner says that the cut call reached its tool.
     MarkDone,

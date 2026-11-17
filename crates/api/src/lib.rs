@@ -131,6 +131,12 @@ pub enum Outcome {
         inbox_id: i64,
         error: String,
     },
+    /// The tool call got no answer, for example at its time limit. It may have reached its tool.
+    /// The item is `unknown`, and only the owner resolves it with `resolve_unknown`.
+    ExecutionUnknown {
+        inbox_id: i64,
+        error: String,
+    },
     Denied {
         reason: DenyReason,
     },
@@ -140,7 +146,7 @@ pub enum Outcome {
     },
 }
 
-/// How the owner resolves a tool call whose outcome is unknown, because a stop cut it while it ran.
+/// How the owner resolves a tool call whose outcome is unknown: a stop cut it, or it got no answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {

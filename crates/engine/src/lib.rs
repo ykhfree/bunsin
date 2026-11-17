@@ -50,7 +50,7 @@ use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::poll::PollConfig;
-use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
+use bunsin_core::ports::{BoxFuture, Coder, Connector, ConnectorError, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
 use bunsin_core::records::{
@@ -781,10 +781,10 @@ impl Engine {
         }
         let result = match split_tool_id(tool_id) {
             Some((connector, tool)) => match runtime.connector(connector) {
-                Ok(connector) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),
-                Err(error) => Err(error),
+                Ok(connector) => connector.call_tool(tool, args.clone()).await,
+                Err(error) => return self.execution_failed(ctx, item, tool_id, error),
             },
-            None => Err(format!("`{tool_id}` is not a tool ID")),
+            None => return self.execution_failed(ctx, item, tool_id, format!("`{tool_id}` is not a tool ID")),
         };
         match result {
             Ok(value) => {
@@ -798,7 +798,20 @@ impl Engine {
                 self.audit(store, "executed", key, json!({"inbox_id": item.id, "tool": tool_id}))?;
                 Ok(Outcome::Executed { inbox_id: item.id })
             }
-            Err(error) => self.execution_failed(ctx, item, tool_id, error),
+            // The call may have reached its tool, so it is not run again. Only the owner resolves it.
+            Err(error @ ConnectorError::Unanswered(_)) => {
+                let error = error.to_string();
+                store
+                    .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Unknown, self.now())
+                    .map_err(store_error)?;
+                let detail = json!({"inbox_id": item.id, "tool": tool_id, "error": error});
+                self.audit(store, "outcome_unknown", key, detail)?;
+                Ok(Outcome::ExecutionUnknown {
+                    inbox_id: item.id,
+                    error,
+                })
+            }
+            Err(error) => self.execution_failed(ctx, item, tool_id, error.to_string()),
         }
     }
 

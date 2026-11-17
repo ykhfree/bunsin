@@ -386,12 +386,13 @@ async fn a_call_that_does_not_end_in_time_is_cancelled_on_the_server() {
     .expect("the call must end at the connector's time limit")
     .unwrap_err();
     assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+    // The call was sent, so the server may have done it. The engine must not treat it as failed.
     match &error {
-        ConnectorError::Transport(text) => assert!(
+        ConnectorError::Unanswered(text) => assert!(
             text.contains("`echo` did not end in 0.3 s") && text.contains("may have done it"),
             "{text}"
         ),
-        other => panic!("expected a transport error, got {other:?}"),
+        other => panic!("expected an unanswered call, got {other:?}"),
     }
 
     // The server hears that the client gave up on the call.
@@ -443,7 +444,13 @@ async fn a_tool_list_that_does_not_end_in_time_is_cancelled_too() {
     .await
     .expect("the call must end at the connector's time limit")
     .unwrap_err();
-    assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
+    // The call itself was not sent, so it did not run.
+    assert_eq!(
+        error,
+        ConnectorError::Transport(
+            "the tool list before the call of `echo` did not end in 0.3 s; the call was not sent".into()
+        )
+    );
     wait_for_cancels(&server, 2).await;
     assert!(calls(&server).is_empty());
 

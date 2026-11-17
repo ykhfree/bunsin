@@ -187,12 +187,21 @@ impl ApiConnector {
             .body(body.to_string())
     }
 
+    /// A request that never connected is a transport error. After the connect, the server may
+    /// have done the call, so a later error, the time limit included, is `Unanswered`.
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<Value, ConnectorError> {
         let response = request
             .header(AUTHORIZATION, self.authorization.clone())
             .send()
             .await
-            .map_err(|e| ConnectorError::Transport(format!("the request failed: {e}")))?;
+            .map_err(|e| {
+                let text = format!("the request failed: {e}");
+                if e.is_connect() || e.is_builder() {
+                    ConnectorError::Transport(text)
+                } else {
+                    ConnectorError::Unanswered(text)
+                }
+            })?;
         let status = response.status();
         if status.is_redirection() {
             return Err(ConnectorError::Transport(format!(
@@ -203,7 +212,7 @@ impl ApiConnector {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| ConnectorError::Transport(format!("cannot read the response: {e}")))?;
+            .map_err(|e| ConnectorError::Unanswered(format!("cannot read the response: {e}")))?;
         let body: Option<Value> = serde_json::from_slice(&bytes).ok();
         if !status.is_success() {
             let detail = body
@@ -278,6 +287,7 @@ impl ApiConnector {
             ConnectorError::UnknownTool(text) => ConnectorError::UnknownTool(clean(text)),
             ConnectorError::Failed(text) => ConnectorError::Failed(clean(text)),
             ConnectorError::Transport(text) => ConnectorError::Transport(clean(text)),
+            ConnectorError::Unanswered(text) => ConnectorError::Unanswered(clean(text)),
         }
     }
 }
