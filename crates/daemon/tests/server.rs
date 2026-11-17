@@ -4,10 +4,12 @@ use bunsin_api::{
     ApiError, ConnectorUpdate, Edit, EngineApi, LlmUpdate, Outcome, ProfileConfig, ReplayCase, TokenChange, TokenSource,
 };
 use bunsin_client::{RemoteConfig, RemoteEngine};
+use bunsin_connectors::{McpConfig, McpConnector, TokenAuth};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::inbound::RequestStatus;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
+use bunsin_core::ports::ConnectorError;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use bunsin_core::settings::Wire;
@@ -1314,6 +1316,7 @@ async fn an_outer_listener_has_no_control_api() {
     let internal = bunsin_daemon::server::serve_outer(
         rig.engine.clone(),
         outer(Reach::Internal, "127.0.0.1:0", "http://127.0.0.1"),
+        Arc::new(tokio::sync::Notify::new()),
     )
     .await
     .unwrap();
@@ -1429,4 +1432,285 @@ async fn the_intake_task_hands_a_stored_question_to_the_agent_and_stops_with_the
         rig.engine.request(&caller, &later.request_id).unwrap().status,
         RequestStatus::Working
     );
+}
+
+/// Kim's endpoint is on for the internal listener. Lee's is off.
+async fn inbound_rig() -> (Rig, Running, Running) {
+    let rig = rig().await;
+    let mut config = rig.kim().profile_config("kim").await.unwrap();
+    config.inbound.enabled = true;
+    config.inbound.description = "Questions about the deploy schedule.".into();
+    config.inbound.title = Some("Kim's agent".into());
+    rig.kim().set_profile_config("kim", config).await.unwrap();
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let internal = bunsin_daemon::server::serve_outer(
+        rig.engine.clone(),
+        outer(Reach::Internal, "127.0.0.1:0", "http://127.0.0.1"),
+        wake.clone(),
+    )
+    .await
+    .unwrap();
+    let public = bunsin_daemon::server::serve_outer(
+        rig.engine.clone(),
+        outer(Reach::Public, "127.0.0.1:0", "http://localhost"),
+        wake,
+    )
+    .await
+    .unwrap();
+    (rig, internal, public)
+}
+
+fn caller_token(rig: &Rig, profile: &str) -> String {
+    rig.engine.app_store().add_caller_token(profile, "bot", 1).unwrap().1
+}
+
+async fn mcp(listener: &Running, profile: &str, token: &str) -> Result<McpConnector, ConnectorError> {
+    let url = format!("{}/agents/{profile}/mcp", listener.url());
+    McpConnector::connect("inbound", McpConfig::Http { url }, Some(TokenAuth::bearer(token))).await
+}
+
+/// One raw MCP request, to see the HTTP status.
+async fn raw(listener: &Running, profile: &str, token: &str, host: Option<&str>, body: String) -> reqwest::StatusCode {
+    let mut request = reqwest::Client::new()
+        .post(format!("{}/agents/{profile}/mcp", listener.url()))
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(body);
+    if let Some(host) = host {
+        request = request.header("host", host);
+    }
+    request.send().await.unwrap().status()
+}
+
+async fn read(client: &McpConnector, id: &str) -> Result<serde_json::Value, ConnectorError> {
+    client.call_tool("get_request", args(json!({"request_id": id}))).await
+}
+
+fn initialize() -> String {
+    json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18",
+        "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}})
+    .to_string()
+}
+
+fn args(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    value.as_object().unwrap().clone()
+}
+
+#[tokio::test]
+async fn a_caller_asks_over_mcp_and_reads_the_answer_after_the_owner_approves_it() {
+    let (rig, internal, _public) = inbound_rig().await;
+    let token = caller_token(&rig, "kim");
+    let client = mcp(&internal, "kim", &token).await.unwrap();
+    let names: Vec<String> = client.list_tools().await.unwrap().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["ask", "get_request"]);
+
+    let asked = client
+        .call_tool("ask", args(json!({"question": "When do we deploy?"})))
+        .await
+        .unwrap();
+    assert_eq!(asked["pending_approval"], true);
+    let id = asked["request_id"].as_str().unwrap().to_owned();
+    assert_eq!(read(&client, &id).await.unwrap()["status"], "working");
+
+    rig.llm.reply(
+        &json!({"kind": "tool_call", "rationale": "asked", "summary": null, "tool": "bunsin.inbound/reply",
+            "args_json": json!({"text": "Friday."}).to_string()})
+        .to_string(),
+        10,
+    );
+    assert!(rig.engine.drain_intake().await.is_empty());
+    let state = read(&client, &id).await.unwrap();
+    assert_eq!(state["status"], "pending_approval");
+    assert!(state.get("answer").is_none());
+    let inbox_id = rig.kim().snapshot("kim").await.unwrap().inbox[0].id;
+    rig.kim().approve("kim", inbox_id, None).await.unwrap();
+    let state = read(&client, &id).await.unwrap();
+    assert_eq!(state["status"], "answered");
+    let answer = state["answer"].as_str().unwrap();
+    assert!(
+        answer.starts_with("Friday.") && answer.contains("— AI agent"),
+        "{answer}"
+    );
+
+    // The checks of the tools: a long question, another caller's request, and too many reads.
+    let long = "x".repeat(4_001);
+    let refused = client.call_tool("ask", args(json!({"question": long}))).await;
+    assert!(matches!(refused, Err(ConnectorError::Failed(_))), "{refused:?}");
+    let other = mcp(&internal, "kim", &caller_token(&rig, "kim")).await.unwrap();
+    let refused = read(&other, &id).await;
+    assert!(
+        matches!(&refused, Err(ConnectorError::Failed(text)) if text.contains("not found")),
+        "{refused:?}"
+    );
+    for _ in 0..117 {
+        read(&client, &id).await.unwrap();
+    }
+    let refused = read(&client, &id).await;
+    assert!(
+        matches!(&refused, Err(ConnectorError::Failed(text)) if text.contains("a minute")),
+        "{refused:?}"
+    );
+    // The limit is per caller.
+    assert!(
+        read(&other, &id)
+            .await
+            .is_err_and(|e| !e.to_string().contains("a minute"))
+    );
+}
+
+#[tokio::test]
+async fn the_inbound_endpoint_takes_only_a_caller_token_of_its_profile_on_its_listener() {
+    let (rig, internal, public) = inbound_rig().await;
+    let kim = caller_token(&rig, "kim");
+    let lee = caller_token(&rig, "lee");
+    let status = |listener, profile, token, host| raw(listener, profile, token, host, initialize());
+    // The control request on the same rig succeeds.
+    assert_eq!(status(&internal, "kim", &kim, None).await, reqwest::StatusCode::OK);
+    mcp(&internal, "kim", &kim).await.unwrap();
+    for (listener, profile, token) in [
+        // Another profile's caller token, and a caller token on another profile's path.
+        (&internal, "kim", lee.as_str()),
+        (&internal, "lee", kim.as_str()),
+        // An access token, a guess, and a profile that does not exist.
+        (&internal, "kim", rig.kim_token.as_str()),
+        (&internal, "kim", "bsc_guess"),
+        (&internal, "nobody", kim.as_str()),
+        // Kim's scope is internal, so the public listener does not serve kim.
+        (&public, "kim", kim.as_str()),
+    ] {
+        assert_eq!(
+            status(listener, profile, token, None).await,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{profile} {token}"
+        );
+    }
+    assert!(mcp(&internal, "kim", &rig.kim_token).await.is_err());
+    // A Host other than the listener's address is refused, also with a valid token.
+    assert_eq!(
+        status(&internal, "kim", &kim, Some("evil.example")).await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+    // A body over 64 KiB is refused.
+    let big = json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"pad": "x".repeat(70_000)}});
+    assert_eq!(
+        raw(&internal, "kim", &kim, None, big.to_string()).await,
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    );
+    // A revoked token is refused from the next request on.
+    let id = rig.kim().caller_tokens("kim").await.unwrap()[0].id;
+    rig.kim().revoke_caller_token("kim", id).await.unwrap();
+    assert_eq!(
+        status(&internal, "kim", &kim, None).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    // The control API takes no caller token, and the outer listener has no control API.
+    assert!(matches!(
+        rig.client(&lee).snapshot("lee").await,
+        Err(ApiError::Unauthorized(_))
+    ));
+
+    // Public scope: now both listeners serve kim.
+    let mut config = rig.kim().profile_config("kim").await.unwrap();
+    config.inbound.scope = bunsin_core::inbound::InboundScope::Public;
+    rig.kim().set_profile_config("kim", config).await.unwrap();
+    let fresh = caller_token(&rig, "kim");
+    assert_eq!(
+        status(&public, "kim", &fresh, Some("localhost")).await,
+        reqwest::StatusCode::OK
+    );
+    // The public listener accepts only its own host.
+    assert_eq!(
+        status(&public, "kim", &fresh, None).await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn the_server_card_describes_only_a_served_endpoint() {
+    let (rig, internal, public) = inbound_rig().await;
+    let get = |listener: &Running, profile: &str| {
+        reqwest::Client::new()
+            .get(format!("{}/agents/{profile}/mcp/server-card", listener.url()))
+            .send()
+    };
+    let response = get(&internal, "kim").await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "application/mcp-server-card+json");
+    assert_eq!(headers["access-control-allow-origin"], "*");
+    assert_eq!(headers["cache-control"], "public, max-age=300");
+    assert!(headers["etag"].to_str().unwrap().starts_with('"'));
+    let card: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        card["$schema"],
+        "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+    );
+    assert_eq!(card["name"], "1.0.0.127/kim");
+    assert_eq!(card["description"], "Questions about the deploy schedule.");
+    assert_eq!(card["title"], "Kim's agent");
+    assert_eq!(card["remotes"][0]["type"], "streamable-http");
+    assert_eq!(card["remotes"][0]["url"], "http://127.0.0.1/agents/kim/mcp");
+    assert_eq!(card["remotes"][0]["headers"][0]["isSecret"], true);
+    // No owner name and no token.
+    let text = card.to_string();
+    assert!(!text.contains("acting for Kim") && !text.contains("owner_name"));
+    assert!(!text.contains("bsc_") && !text.contains("bsn_"));
+    // Lee's endpoint is off, kim's is not on the public listener, and nobody's exists.
+    for (listener, profile) in [(&internal, "lee"), (&public, "kim"), (&internal, "nobody")] {
+        assert_eq!(
+            get(listener, profile).await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    // Turning the endpoint off removes the card at once.
+    let mut config = rig.kim().profile_config("kim").await.unwrap();
+    config.inbound.enabled = false;
+    rig.kim().set_profile_config("kim", config).await.unwrap();
+    assert_eq!(
+        get(&internal, "kim").await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_started_server_hands_a_question_from_its_listener_to_the_agent_at_once() {
+    use std::time::{Duration, Instant};
+    let rig = rig().await;
+    let mut config = rig.kim().profile_config("kim").await.unwrap();
+    config.inbound.enabled = true;
+    config.inbound.description = "Questions about the deploy schedule.".into();
+    rig.kim().set_profile_config("kim", config).await.unwrap();
+    rig.llm.reply(&ignore_reply(), 10);
+    let control = ServeConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        tls: None,
+    };
+    let internal = outer(Reach::Internal, "127.0.0.1:0", "http://127.0.0.1");
+    let started = start(rig.engine.clone(), control, vec![internal]).await.unwrap();
+    let client = mcp(&started.outer[0], "kim", &caller_token(&rig, "kim")).await.unwrap();
+    let asked = client
+        .call_tool("ask", args(json!({"question": "Hello?"})))
+        .await
+        .unwrap();
+    let id = asked["request_id"].as_str().unwrap().to_owned();
+    // The question wakes the intake task; the 5 s tick is not needed.
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let state = client
+            .call_tool("get_request", args(json!({"request_id": id})))
+            .await
+            .unwrap();
+        if state["status"] == "declined" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the question was not handled: {state}");
+        // Slow enough to stay under the read limit of a caller.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    started.stop().await.unwrap();
+}
+
+fn ignore_reply() -> String {
+    json!({"kind": "ignore", "rationale": "a greeting", "summary": null, "tool": null, "args_json": null}).to_string()
 }

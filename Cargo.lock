@@ -1079,6 +1079,8 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "rcgen",
+ "reqwest",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

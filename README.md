@@ -32,7 +32,7 @@ Bunsin is in early development. Read this list before you use it.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
 - **Not built yet:** ARD publishing and search, the REST API
-  connector, OAuth for MCP servers.
+  connector, OAuth for MCP servers, webhook intake.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint or
   a real MCP server.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
@@ -219,7 +219,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   control API is not reachable through them. Each needs TLS on a public address
   (`--internal-tls-cert`/`--internal-tls-key`, `--public-tls-cert`/`--public-tls-key`), and no
   two listeners may share an address. The server checks all of this before it reads the key.
-  The listeners serve nothing yet.
+  They serve the inbound endpoints of the profiles that turn them on (see
+  [Let others ask your agent](#let-others-ask-your-agent)): the internal listener serves the
+  scopes `internal` and `public`, the public listener only `public`.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 
@@ -758,7 +760,19 @@ bunsind caller-revoke kim 1                        # the next request with it is
 - A question that fails three times ends as failed, with a note in your inbox.
 - A page change the agent proposes while it handles a question always waits for you, also with
   `notes.auto_apply`.
-- Not built yet: the inbound endpoint itself.
+- **The endpoint** is an MCP server (streamable HTTP, stateless) at
+  `<listener URL>/agents/<profile>/mcp`, with two tools: `ask {question}` returns
+  `{request_id, pending_approval: true}` at once, and `get_request {request_id}` returns
+  `{request_id, status, answer?}` with the status `working`, `pending_approval`, `answered`,
+  `declined` or `failed`. The caller sends `Authorization: Bearer <caller token>`.
+- Every refusal of the token, the profile or the listener is the same `401`. A `Host` other than
+  the listener's URL gets `403`, a body over 64 KiB `413`, and more than 64 requests at once on a
+  listener `503`. A caller may call `get_request` 120 times a minute; this count is in memory.
+- **The server card** of the endpoint is at `<listener URL>/agents/<profile>/mcp/server-card`
+  (`application/mcp-server-card+json`, no token needed). It holds the title, the description and
+  the endpoint URL, never a token or the owner's name. A listener that does not serve the
+  profile answers `404`.
+- Not built yet: publishing the card in an ARD catalog, OAuth for callers.
 
 ### Work with the agent
 

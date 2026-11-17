@@ -45,7 +45,9 @@
 - **리스너 셋.** 리스너마다 router가 따로 있다.
   - 제어(`--listen`): `/v1/...`만 있다. 접속 token을 받는다.
   - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
-    인바운드 MCP, ARD, webhook의 경로를 여기에 둔다. 지금은 아무 경로도 없다.
+    인바운드 MCP와 server card(7절)가 여기에 있다. ARD와 webhook의 경로도 여기에 둔다(아직 없음).
+  - 리스너 L은 `served_on(config, L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
+    MCP 경로와 card가 이 함수 하나를 쓴다. ARD catalog도 이 함수를 써야 한다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다).
   - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
     `https://`만 받고, `http://`는 host가 loopback일 때만 받는다. 사용자 이름, query, fragment는 거부한다.
   - 리스너마다 제어 API의 TLS 규칙(loopback이 아니면 TLS)을 적용한다. 같은 주소를 두 리스너가 쓸 수 없다(포트 0은 예외).
@@ -398,7 +400,22 @@
   - `decide`는 이 도구에 pin 검사를 하지 않는다(명세가 코드에 있다). `execute`는 connector를 부르지 않는다. intake 행이 있는지 보고 항목을 `executed`로 옮긴다(감사 `inbound_answered`).
   - 그래서 AI 표시, 정지 스위치, 수정의 교정 기록, 1회 실행이 다른 쓰기와 같다. 기각: 새 `InboxBody` variant(CLI와 app이 전부 match한다).
 - 인바운드 질문에서 나온 notes 변경은 자동 반영하지 않는다(channel outside, source 검사 둘 다).
-- 아직 없는 것: MCP endpoint와 server card(다음 단계), webhook intake(같은 `intake` 표를 쓸 예정).
+- **MCP endpoint** `POST /agents/{p}/mcp`(daemon `inbound.rs`): rmcp `StreamableHttpService`, 세션 없음(`NeverSessionManager`, legacy session mode off, JSON 응답).
+  - 무상태인 이유: 열린 stream은 폐기된 token보다 오래 살고 종료 대기 300초를 붙잡는다. POST 하나가 응답 하나이고, GET은 405이다.
+  - `route_layer`의 미들웨어가 먼저 확인한다: `Bearer` 값이 `caller_tokens`의 유효한 token이고, 그 프로필이 경로의 `{p}`이고, `served_on`이다.
+    하나라도 아니면 같은 본문의 401이다. 통과하면 `Caller`를 request extension에 넣고, 도구 handler가 `http::request::Parts`의 extension에서 읽는다.
+  - rmcp 설정: `allowed_hosts`는 `--*-url`의 host 하나(다른 Host는 403, DNS rebinding 방어), 본문 64 KiB(넘으면 413).
+  - 리스너당 동시 요청 64(semaphore, 넘으면 503). `get_request`는 호출자당 1분에 120번(메모리, 재시작하면 초기화). `ask`의 한도는 위의 intake 행으로 센다.
+  - 도구 오류(검사 실패, 한도, 남의 ID)는 MCP tool 오류 결과이다. 내부 오류의 문구는 서버 내용을 담지 않는다.
+  - `ask`가 성공하면 `Notify`로 intake task를 깨운다. 그래서 질문은 5초 tick을 기다리지 않는다.
+  - 기각: token만으로 프로필 고르기. card와 ARD 항목은 프로필마다 URL이 필요하다.
+- **Server card** `GET /agents/{p}/mcp/server-card`: MCP server card 확장(snapshot `526201bb`)이 권하는 `<streamable-http-url>/server-card`이다.
+  인증이 없고, `served_on`이 아니면 404이다.
+  - 헤더: `Content-Type: application/mcp-server-card+json`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=300`, `ETag`(본문의 SHA-256).
+  - 본문: `$schema`(`https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`, 스키마의 pattern이 이 값만 받는다), `name`(리스너 host의 label을 뒤집고 `/<프로필>`, 예 `com.example.agents/kim`),
+    `version`(bunsind 버전), `description`, `title`(있으면), `remotes: [{type: "streamable-http", url, headers: [{name: "Authorization", isRequired, isSecret}]}]`.
+    token과 소유자 이름은 넣지 않는다.
+- 아직 없는 것: ARD 게시(card를 catalog에 싣기), webhook intake(같은 `intake` 표를 쓸 예정), 호출자용 OAuth.
 
 ## 8. AI 표시
 
@@ -781,8 +798,8 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
-| 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP endpoint는 없음 |
-| ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
+| 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
+| ARD 게시와 검색 | 없음 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 

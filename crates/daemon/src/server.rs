@@ -869,15 +869,11 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
     bind(router(engine), config.listen, config.tls).await
 }
 
-/// The routes of an outer listener. Nothing of the control API is here.
-fn outer_router(_engine: Arc<Engine>, _config: &OuterConfig) -> Router {
-    Router::new()
-}
-
-/// Starts an outer listener and returns when it is listening.
-pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig) -> Result<Running, ServeError> {
+/// Starts an outer listener and returns when it is listening. Nothing of the control API is on it.
+/// A question that a caller asks there signals `wake`.
+pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig, wake: Arc<Notify>) -> Result<Running, ServeError> {
     config.check()?;
-    let router = outer_router(engine, &config);
+    let router = crate::inbound::routes(engine, &config, wake);
     bind(router, config.listen, config.tls).await
 }
 
@@ -933,7 +929,7 @@ pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterCon
     let control = serve(engine.clone(), config).await?;
     let mut listeners = Vec::new();
     for listener in outer {
-        listeners.push(serve_outer(engine.clone(), listener).await?);
+        listeners.push(serve_outer(engine.clone(), listener, wake.clone()).await?);
     }
     for (profile, error) in engine.resume_approved(interrupted).await {
         eprintln!("an approved call of profile {profile} was not resumed: {error}");

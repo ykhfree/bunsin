@@ -27,7 +27,7 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
   원칙과 poll도 창에서 정합니다.
-- **아직 만들지 않은 것:** ARD 게시와 검색, REST API 커넥터, MCP 서버용 OAuth.
+- **아직 만들지 않은 것:** ARD 게시와 검색, REST API 커넥터, MCP 서버용 OAuth, webhook 수신.
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint나 실제 MCP 서버로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
@@ -185,7 +185,8 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   이 리스너에는 제어 API가 없습니다. 접속 token은 여기서 아무것도 하지 못하고, 이 리스너로 제어 API에 닿을 수 없습니다.
   외부 주소에 뜨는 리스너는 TLS가 필요합니다(`--internal-tls-cert`/`--internal-tls-key`, `--public-tls-cert`/`--public-tls-key`).
   두 리스너는 같은 주소를 쓸 수 없습니다. 서버는 키를 읽기 전에 이것을 모두 검사합니다.
-  이 리스너는 아직 아무것도 제공하지 않습니다.
+  이 리스너는 endpoint를 켠 프로필의 인바운드 endpoint를 제공합니다([다른 사람이 내 agent에게 묻게 하기](#다른-사람이-내-agent에게-묻게-하기) 참고).
+  내부 리스너는 범위 `internal`과 `public`을, 공개 리스너는 `public`만 제공합니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
 ## agent 설정 (프로필 소유자)
@@ -655,7 +656,15 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
   정지 스위치가 켜져 있으면 질문은 기다립니다.
 - 세 번 실패한 질문은 failed로 끝나고, 승인함에 알림이 하나 생깁니다.
 - 질문을 처리하며 agent가 제안한 페이지 변경은 `notes.auto_apply`가 켜져 있어도 언제나 소유자를 기다립니다.
-- 아직 만들지 않은 것: 인바운드 endpoint 자체.
+- **endpoint**는 MCP 서버(streamable HTTP, 무상태)이고 주소는 `<리스너 URL>/agents/<프로필>/mcp`입니다. 도구는 둘입니다.
+  `ask {question}`은 즉시 `{request_id, pending_approval: true}`를 돌려줍니다.
+  `get_request {request_id}`는 `{request_id, status, answer?}`를 돌려줍니다. status는 `working`, `pending_approval`, `answered`, `declined`, `failed` 중 하나입니다.
+  호출자는 `Authorization: Bearer <호출자 token>`을 보냅니다.
+- token, 프로필, 리스너의 모든 거부는 같은 `401`입니다. 리스너 URL과 다른 `Host`는 `403`, 64 KiB를 넘는 본문은 `413`,
+  리스너 하나에서 동시에 64개를 넘는 요청은 `503`을 받습니다. 호출자는 `get_request`를 1분에 120번까지 부를 수 있습니다. 이 횟수는 메모리에서만 셉니다.
+- **server card**는 `<리스너 URL>/agents/<프로필>/mcp/server-card`에 있습니다(`application/mcp-server-card+json`, token 불필요).
+  제목, 설명, endpoint URL을 담고, token과 소유자 이름은 담지 않습니다. 그 프로필을 제공하지 않는 리스너는 `404`를 돌려줍니다.
+- 아직 만들지 않은 것: ARD catalog에 card 게시, 호출자용 OAuth.
 
 ### agent와 일하기
 

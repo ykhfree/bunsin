@@ -8,6 +8,7 @@
 //! [`UpstreamPolicy`] stops an owner from pointing the server at its own internal network.
 
 pub mod coding;
+pub mod inbound;
 pub mod keystore;
 pub mod rules;
 pub mod server;
