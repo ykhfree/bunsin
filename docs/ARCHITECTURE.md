@@ -22,6 +22,20 @@
 - 서버는 SIGTERM이나 Ctrl-C를 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다린 뒤에 종료한다.
   그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다. 다음 시작이 그 항목을 `unknown`으로 옮긴다(아래 "재개").
   서비스 관리자의 종료 대기 시간(systemd의 기본값은 90초)이 더 짧으면 그 시간에 끊긴다.
+  그래서 `packaging/linux/bunsind.service`는 `TimeoutStopSec=330`을 둔다.
+- **배포 패키지**(PLAN 6절 4단계): 저장소의 스크립트가 만든다. 스크립트는 비밀 값을 읽지도 담지도 않는다.
+  - `packaging/linux/build-tarball.sh`: `cargo build --release -p bunsin-daemon --locked` 뒤에 `bunsind`, unit, sysusers 파일,
+    환경 파일 견본(`bunsind.env.example`, 비밀은 이름만), `INSTALL.md`, LICENSE, README를 tarball과 sha256 파일로 묶는다.
+  - unit: 전용 사용자 `bunsin`, `EnvironmentFile=/etc/bunsin/bunsind.env`, `ExecStart=... serve $BUNSIND_SERVE_ARGS`,
+    `StateDirectory`(home, data, key 폴더, 0700), `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, 빈 capability 집합 등.
+    stdio 커넥터와 코딩 CLI가 깨지지 않게 `MemoryDenyWriteExecute`(Node.js JIT), `RestrictNamespaces`(CLI의 sandbox), `SystemCallFilter`는 두지 않았다.
+    `--allow-coding`은 `ReadWritePaths=<repo root>`가 필요하다(git worktree가 `.git`에 쓴다). `INSTALL.md`가 바꿀 옵션을 적는다.
+  - `packaging/macos/build-app.sh`: `cargo build --release -p bunsin-app --locked` 뒤에 `Bunsin.app`(Info.plist, PkgInfo)을 만든다.
+    Developer ID 서명과 공증은 손으로 한다(`packaging/macos/README.md`). 저장소에 아이콘이 없어 아이콘을 넣지 않았다.
+    bundle ID는 `BUNSIN_BUNDLE_ID`이고, 기본값 `local.bunsin.app`은 로컬 빌드용이다.
+  - CI의 `package-linux` job이 ubuntu에서 shellcheck, tarball 빌드, `systemd-analyze verify`(결과를 막지 않음)를 하고 tarball을 artifact로 올린다. 배포는 하지 않는다.
+  - 확인한 것(macOS): 두 스크립트 실행, bundle 구조와 `plutil -lint`, tarball 목록과 sha256, 견본 환경 값으로 `bunsind serve` 시작과 SIGTERM 종료.
+    이 Mac에는 `systemd-analyze`와 `shellcheck`가 없어 실행하지 않았다. unit을 systemd로 시작해 보지 않았다.
 - **재개**: `server::start`가 아래 순서로 시작한다. `main.rs`와 daemon 테스트가 같은 함수를 부른다.
   1. `mark_interrupted()`: 모든 프로필의 `executing` 항목을 `unknown`으로 옮기고 감사 `outcome_unknown`을 남긴다.
      같은 단계에서 `approved` 도구 호출의 ID를 적어 둔다.
@@ -950,6 +964,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버, 창의 목록 편집). 로컬 stub registry로만 테스트 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
+| 배포 패키지(Linux 서버 tarball과 systemd unit, macOS `Bunsin.app`, CI artifact) | 구현. macOS에서 두 스크립트를 실행해 확인. unit은 systemd로 시작해 보지 않았고, 앱은 서명하지 않았다. |
 
 ## 17. 미해결
 
@@ -957,7 +972,6 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - 코딩 백엔드의 편집 허용 설정(예: Claude Code의 permission mode, Codex의 sandbox 설정)을 opt-in으로 둘지.
 - 평문 `env`에 이미 들어 있는 비밀 값을 비밀 변수로 옮기는 기능. 지금은 사용자가 다시 입력하고 평문 줄을 지운다.
 - 설정 파일이나 CLI로 비밀 변수의 값을 넣는 방법. 지금은 창에서만 입력한다.
-- 서버의 systemd 실행 설정.
 - OAuth를 창이나 `connector-set`에서 켜는 방법. 지금은 설정 파일로만 켠다.
 - 임베딩 검색의 제공 여부.
 - 라이선스.

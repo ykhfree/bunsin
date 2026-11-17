@@ -60,6 +60,22 @@ cargo test --workspace
 ```
 
 `rust-toolchain.toml` pins the Rust version. rustup installs it on first use.
+
+### Packages
+
+```sh
+packaging/linux/build-tarball.sh   # target/package/bunsin-server-<version>-<target>.tar.gz and its .sha256
+packaging/macos/build-app.sh       # target/package/Bunsin.app (macOS only)
+```
+
+- The server tarball holds `bunsind`, a systemd unit, a sysusers file, an environment template
+  without secret values, `INSTALL.md`, LICENSE and this README. [`packaging/linux/INSTALL.md`](packaging/linux/INSTALL.md)
+  says how to install it and which hardening options to change for `--allow-stdio-connectors`
+  and `--allow-coding`. The unit waits 330 seconds at a stop, so the server's 300-second drain is
+  not cut. CI builds the tarball on Ubuntu and keeps it as an artifact of the run; nothing is
+  published. Nobody has installed it on a real Linux server yet.
+- `Bunsin.app` is not signed with a Developer ID and has no icon (the repository has none).
+  [`packaging/macos/README.md`](packaging/macos/README.md) lists the manual steps to sign and notarize it.
 On Linux, build and test without the window: `cargo test --workspace --exclude bunsin-app`.
 The window uses GPUI through the `gpui-kit` crate.
 

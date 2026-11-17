@@ -54,6 +54,20 @@ cargo test --workspace
 ```
 
 `rust-toolchain.toml`이 Rust 버전을 고정합니다. rustup이 처음 사용할 때 그 버전을 설치합니다.
+
+### 배포 패키지
+
+```sh
+packaging/linux/build-tarball.sh   # target/package/bunsin-server-<버전>-<target>.tar.gz와 .sha256
+packaging/macos/build-app.sh       # target/package/Bunsin.app (macOS에서만)
+```
+
+- 서버 tarball에는 `bunsind`, systemd unit, sysusers 파일, 비밀 값이 없는 환경 파일 견본, `INSTALL.md`, LICENSE, README가 들어 있습니다.
+  설치 방법과 `--allow-stdio-connectors`, `--allow-coding`을 쓸 때 바꿀 보안 옵션은 [`packaging/linux/INSTALL.md`](packaging/linux/INSTALL.md)(영어)에 있습니다.
+  unit은 멈출 때 330초를 기다립니다. 그래서 서버가 실행 중인 요청을 기다리는 300초가 끊기지 않습니다.
+  CI가 Ubuntu에서 tarball을 만들고 실행 결과물로 보관합니다. 배포(release)는 하지 않습니다. 실제 Linux 서버에 설치해 보지는 않았습니다.
+- `Bunsin.app`은 Developer ID로 서명하지 않았고 아이콘이 없습니다(저장소에 아이콘이 없습니다).
+  서명과 공증은 손으로 합니다. 순서는 [`packaging/macos/README.md`](packaging/macos/README.md)(영어)에 있습니다.
 Linux에서는 창을 빼고 빌드와 테스트를 합니다: `cargo test --workspace --exclude bunsin-app`.
 창은 `gpui-kit` crate를 통해 GPUI를 씁니다.
 
