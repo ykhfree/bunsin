@@ -257,15 +257,33 @@ fn loopback(redirect_uri: &str) -> Result<Url, String> {
         )
     };
     let url = Url::parse(redirect_uri).map_err(|_| refused())?;
-    let local = match url.host() {
+    let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+    if url.scheme() != "http" || !on_this_computer(&url) || !plain {
+        return Err(refused());
+    }
+    Ok(url)
+}
+
+fn on_this_computer(url: &Url) -> bool {
+    match url.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
         Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
         None => false,
-    };
-    let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
-    if url.scheme() != "http" || !local || !plain {
-        return Err(refused());
+    }
+}
+
+/// Refuses an authorization address that the owner's browser must not open. The MCP server's
+/// metadata sets this address, and the window opens it, so a scheme such as `smb:` or `file:`
+/// would start a program on the owner's computer. Only https, or http on a loopback host, passes.
+fn browser_address(address: &str) -> Result<Url, String> {
+    let url = Url::parse(address).map_err(|_| "the authorization address is not a URL".to_owned())?;
+    let web = url.scheme() == "https" || (url.scheme() == "http" && on_this_computer(&url));
+    if !web {
+        return Err(format!(
+            "the authorization server gave an address with the scheme `{}`; only https is allowed",
+            url.scheme()
+        ));
     }
     Ok(url)
 }
@@ -328,10 +346,8 @@ impl SignIns {
             .await
             .map_err(|(_, e)| refusal.explain(&e))?;
         let address = session.get_authorization_url().to_owned();
-        let state = Url::parse(&address)
-            .ok()
-            .and_then(|url| query(&url, "state"))
-            .ok_or("the authorization address has no `state`")?;
+        let url = browser_address(&address)?;
+        let state = query(&url, "state").ok_or("the authorization address has no `state`")?;
         // Another start may have filled the room during the requests above.
         self.check_room(profile)?;
         self.waiting().push(Waiting {
@@ -425,5 +441,28 @@ mod tests {
         ] {
             assert!(loopback(bad).unwrap_err().contains("loopback"), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_browser_opens_only_a_web_address() {
+        for good in [
+            "https://auth.example.com/authorize?state=s",
+            "http://127.0.0.1:9000/authorize?state=s",
+            "http://localhost/authorize",
+        ] {
+            assert!(browser_address(good).is_ok(), "{good}");
+        }
+        for (bad, scheme) in [
+            ("smb://attacker.example.com/share?state=s", "smb"),
+            ("file:///Applications/Calculator.app?state=s", "file"),
+            ("ssh://attacker.example.com", "ssh"),
+            ("javascript:alert(1)", "javascript"),
+            ("http://auth.example.com/authorize?state=s", "http"),
+            ("http://localhost.example.com/authorize", "http"),
+        ] {
+            let error = browser_address(bad).unwrap_err();
+            assert!(error.contains(&format!("`{scheme}`")), "{bad}: {error}");
+        }
+        assert!(browser_address("not a url").is_err());
     }
 }

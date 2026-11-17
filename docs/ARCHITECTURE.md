@@ -674,6 +674,8 @@
   rmcp가 같은 origin 안에서 따라가는 발견의 redirect도 이 client로 다시 들어온다. 정책이 거부하면 그 이유가 오류 문구가 된다.
 - 제어 API `POST /v1/profiles/{p}/connectors/{c}/oauth/start`(`redirect_uri`) → 인가 주소, `.../oauth/finish`(`callback_url`).
   redirect 주소는 http의 loopback(127.0.0.1, ::1, localhost)만 받는다(RFC 8252 7.3).
+  - 인가 주소는 MCP 서버의 metadata가 정하고, 창이 그 주소를 연다. 그래서 서버와 창 모두 `https`와 loopback `http`만 받는다.
+    `smb:`, `file:`, 앱 전용 scheme을 열면 소유자의 Mac에서 프로그램이 실행되기 때문이다.
   시작한 로그인은 서버 메모리(`SignIns`)에서 10분 기다리고, 프로필당 3개까지이다. 서버를 다시 시작하면 잊는다.
   finish는 프로필, 커넥터, `state`가 맞는 로그인을 한 번만 꺼낸다. 거부, 틀린 code, 다른 redirect 위치도 그 로그인을 끝낸다.
   `OAuthFinishBody`의 Debug는 code를 담은 주소를 출력하지 않는다.

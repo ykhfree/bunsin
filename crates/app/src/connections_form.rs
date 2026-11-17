@@ -105,6 +105,27 @@ const KINDS: [(Kind, &str); 3] = [
     (Kind::Api, "REST API"),
 ];
 
+/// True for an https address, or an http address on this computer. Only such an address of a
+/// sign-in is opened: another scheme (`smb:`, `file:`, an app's own scheme) would start a program.
+fn is_web_address(address: &str) -> bool {
+    if address.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = address.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // A user part could hide the real host: `http://127.0.0.1@example.com`.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
+}
+
 /// The arguments in the text of the form: one in each line. Empty lines are no arguments.
 /// A line is used as it is, so an argument can hold spaces. Quotes are not removed.
 fn parse_args(text: &str) -> Vec<String> {
@@ -372,7 +393,8 @@ impl ConnectionsForm {
         }
         match result {
             // The page opens once, when the start arrives. The row shows the address too.
-            Some(ConnectionResult::SignInStarted { result: Ok(url), .. }) => cx.open_url(url),
+            // The server refuses other schemes; this check holds if the server does not.
+            Some(ConnectionResult::SignInStarted { result: Ok(url), .. }) if is_web_address(url) => cx.open_url(url),
             Some(ConnectionResult::LlmSaved(Err(SaveError::Conflict))) => self.llm_conflict = true,
             Some(ConnectionResult::ConnectorSaved {
                 name,
@@ -1531,6 +1553,31 @@ impl Shell {
 mod tests {
     use super::*;
     use bunsin_core::tool::{PinDiff, ToolSpec};
+
+    #[test]
+    fn a_sign_in_opens_only_a_web_address() {
+        for good in [
+            "https://auth.example.com/authorize?state=s",
+            "http://127.0.0.1:9000/authorize?state=s",
+            "http://[::1]:9000/authorize",
+            "http://localhost/authorize",
+        ] {
+            assert!(is_web_address(good), "{good}");
+        }
+        for bad in [
+            "smb://attacker.example.com/share",
+            "file:///Applications/Calculator.app",
+            "ssh://attacker.example.com",
+            "javascript:alert(1)",
+            "http://auth.example.com/authorize",
+            "http://localhost.example.com/authorize",
+            "http://127.0.0.1@attacker.example.com/authorize",
+            "HTTPS-like://x",
+            "",
+        ] {
+            assert!(!is_web_address(bad), "{bad}");
+        }
+    }
 
     fn report(tools: &[&str], diff: PinDiff) -> ToolsReport {
         let tools = tools
