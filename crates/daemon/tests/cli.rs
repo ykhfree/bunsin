@@ -54,25 +54,31 @@ struct Server {
 
 impl Server {
     fn start(data_dir: &Path) -> Self {
+        Self::start_with(data_dir, &[], 0).0
+    }
+
+    /// Starts the server with more options and returns the `more` lines it prints after the first.
+    fn start_with(data_dir: &Path, options: &[&str], more: usize) -> (Self, Vec<String>) {
         let mut child = bunsind()
             .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
             .arg(data_dir)
+            .args(options)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let line = lines.next().unwrap().unwrap();
         let url = line
             .trim()
             .strip_prefix("listening on ")
             .unwrap_or_else(|| panic!("unexpected: {line:?}"));
-        Self {
+        let more = lines.take(more).map(Result::unwrap).collect();
+        let server = Self {
             url: url.to_owned(),
             child,
-        }
+        };
+        (server, more)
     }
 
     /// Runs a remote command against this server.
@@ -148,6 +154,32 @@ fn an_owner_controls_only_the_own_profile_through_the_server() {
     let error = stderr_of_failure(server.run(&kim, &["llm-usage", "lee"]), "llm-usage for another profile");
     assert!(error.contains("not authorized"), "{error}");
     assert!(stdout_of(server.run(&lee, &["status", "lee"]), "status").starts_with("kill switch: off\n"));
+}
+
+#[test]
+fn the_server_opens_the_outer_listeners_it_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = [
+        "--internal-listen",
+        "127.0.0.1:0",
+        "--internal-url",
+        "http://127.0.0.1",
+        "--public-listen",
+        "127.0.0.1:0",
+        "--public-url",
+        "http://localhost",
+    ];
+    let (server, lines) = Server::start_with(dir.path(), &options, 2);
+    assert!(
+        lines[0].starts_with("internal listener on http://127.0.0.1:"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("public listener on http://127.0.0.1:"),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|line| line.contains(&server.url)));
+    server.stop();
 }
 
 #[test]
@@ -395,6 +427,22 @@ fn a_key_store_that_cannot_work_stops_the_start_before_any_key_is_read() {
     // A public address without TLS is refused before the key is made.
     let public = operator(dir.path(), &["serve", "--listen", "0.0.0.0:0"]);
     stderr_of_failure(public, "a public address without TLS");
+    // So are an outer listener without TLS and a listener on the address of the control API.
+    let serve = |extra: &[&str]| operator(dir.path(), &[&["serve", "--listen", "127.0.0.1:8790"], extra].concat());
+    let open = serve(&[
+        "--internal-listen",
+        "0.0.0.0:0",
+        "--internal-url",
+        "https://agents.example.com",
+    ]);
+    assert!(stderr_of_failure(open, "an internal listener without TLS").contains("--internal-tls-cert"));
+    let shared = serve(&[
+        "--public-listen",
+        "127.0.0.1:8790",
+        "--public-url",
+        "https://agents.example.com",
+    ]);
+    assert!(stderr_of_failure(shared, "a shared address").contains("cannot share the address"));
     assert!(!dir.path().join("master.key").exists() && !key_file.exists());
     assert!(!dir.path().join("keychain-id").exists());
 }

@@ -211,6 +211,15 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   permission settings: Bunsin passes no flag that turns off its prompts or its sandbox, and
   adds no sandbox of its own. A job keeps its worktree and transcript in
   `<data dir>/coding/<profile>/`; the server does not remove the worktrees.
+- **Listeners for other callers.** `--internal-listen <addr> --internal-url <address>` opens
+  a second listener for callers in your own network, and `--public-listen <addr> --public-url
+  <address>` a third one for callers on the internet. The URL is the address that callers use,
+  for example `https://agents.example.com`; it can differ from the listen address behind a
+  proxy. These listeners have no control API: an access token does nothing there, and the
+  control API is not reachable through them. Each needs TLS on a public address
+  (`--internal-tls-cert`/`--internal-tls-key`, `--public-tls-cert`/`--public-tls-key`), and no
+  two listeners may share an address. The server checks all of this before it reads the key.
+  The listeners serve nothing yet.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 

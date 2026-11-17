@@ -35,6 +35,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use url::Url;
 
 /// How long running requests may finish after a stop signal. One event can need two LLM
 /// calls of up to 120 s each, so the grace covers that. A request that is cut leaves its
@@ -659,6 +660,89 @@ pub struct ServeConfig {
     pub tls: Option<(PathBuf, PathBuf)>,
 }
 
+/// Who reaches an outer listener. The control API is on neither of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Callers in the operator's own network.
+    Internal,
+    /// Callers on the internet.
+    Public,
+}
+
+impl Reach {
+    /// The word in the options of this listener, for example `--internal-listen`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Reach::Internal => "internal",
+            Reach::Public => "public",
+        }
+    }
+}
+
+/// A listener for callers who are not profile owners. It has no `/v1` routes, so an access
+/// token is of no use on it, and a caller token is of no use on the control API.
+#[derive(Debug, Clone)]
+pub struct OuterConfig {
+    pub reach: Reach,
+    pub listen: SocketAddr,
+    /// The address that callers use, for example `https://agents.example.com`. It can differ from
+    /// `listen` behind a proxy. Server cards name it, and the inbound MCP endpoint accepts only its host.
+    pub url: Url,
+    /// PEM certificate chain and private key. Required unless `listen` is a loopback address.
+    pub tls: Option<(PathBuf, PathBuf)>,
+}
+
+impl OuterConfig {
+    /// Refuses an address that other computers reach without TLS, and an address for callers
+    /// that would send their tokens in clear text or carry more than a location.
+    pub fn check(&self) -> Result<(), ServeError> {
+        if self.tls.is_none() && !self.listen.ip().is_loopback() {
+            return Err(ServeError::OuterTlsRequired(self.reach.word(), self.listen));
+        }
+        let url = &self.url;
+        let bad = |why: &str| Err(ServeError::BadUrl(self.reach.word(), why.to_owned()));
+        let loopback = match url.host() {
+            Some(url::Host::Domain(name)) => name == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => return bad("it has no host"),
+        };
+        match url.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            _ => return bad("use https://, or http:// for this machine only"),
+        }
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+            return bad("it must not hold a user name, password, query or fragment");
+        }
+        Ok(())
+    }
+
+    /// The address that callers use for `path`, which starts with `/`.
+    pub fn url_of(&self, path: &str) -> String {
+        format!("{}{path}", self.url.as_str().trim_end_matches('/'))
+    }
+}
+
+/// Checks all listeners before the engine opens, so a refused start touches no key.
+/// Each outer reach is given once, and no two listeners share a fixed address.
+pub fn check_listeners(control: &ServeConfig, outer: &[OuterConfig]) -> Result<(), ServeError> {
+    control.check()?;
+    let mut fixed = vec![control.listen];
+    for (index, listener) in outer.iter().enumerate() {
+        listener.check()?;
+        if outer[..index].iter().any(|other| other.reach == listener.reach) {
+            return Err(ServeError::TwoListeners(listener.reach.word()));
+        }
+        // Port 0 asks the system for a free port, so such addresses never clash.
+        if listener.listen.port() != 0 && fixed.contains(&listener.listen) {
+            return Err(ServeError::SameAddress(listener.listen));
+        }
+        fixed.push(listener.listen);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
     #[error(
@@ -666,6 +750,17 @@ pub enum ServeError {
          or listen on 127.0.0.1 behind a TLS proxy"
     )]
     TlsRequired(SocketAddr),
+    #[error(
+        "{1} is reachable from other machines, so TLS is required: give --{0}-tls-cert and --{0}-tls-key, \
+         or listen on 127.0.0.1 behind a TLS proxy"
+    )]
+    OuterTlsRequired(&'static str, SocketAddr),
+    #[error("--{0}-url cannot be used: {1}")]
+    BadUrl(&'static str, String),
+    #[error("there is more than one {0} listener")]
+    TwoListeners(&'static str),
+    #[error("two listeners cannot share the address {0}: the control API must stay apart from the other callers")]
+    SameAddress(SocketAddr),
     #[error("the TLS certificate or key cannot be read: {0}")]
     Tls(std::io::Error),
     #[error("the server failed: {0}")]
@@ -689,8 +784,40 @@ impl Running {
     /// Stops taking new requests, lets running ones finish, then returns.
     pub async fn shutdown(self) -> Result<(), ServeError> {
         self.handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
+        self.finish().await
+    }
+
+    /// Waits until the server task ends after `graceful_shutdown`.
+    async fn finish(self) -> Result<(), ServeError> {
         self.task.await.map_err(std::io::Error::other)??;
         Ok(())
+    }
+}
+
+/// The listeners and the background work of a started server.
+pub struct Started {
+    pub control: Running,
+    /// In the order of the outer configs that `start` got.
+    pub outer: Vec<Running>,
+    pub poller: Poller,
+}
+
+impl Started {
+    /// Ends the background work, then lets the running requests of every listener finish.
+    pub async fn stop(self) -> Result<(), ServeError> {
+        self.poller.stop().await;
+        let listeners: Vec<Running> = std::iter::once(self.control).chain(self.outer).collect();
+        // All listeners stop taking requests at once, so the grace runs in parallel.
+        for listener in &listeners {
+            listener.handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
+        }
+        let mut result = Ok(());
+        for listener in listeners {
+            if let Err(error) = listener.finish().await {
+                result = Err(error);
+            }
+        }
+        result
     }
 }
 
@@ -708,20 +835,36 @@ impl ServeConfig {
 
 pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, ServeError> {
     config.check()?;
-    let app = router(engine).into_make_service();
+    bind(router(engine), config.listen, config.tls).await
+}
+
+/// The routes of an outer listener. Nothing of the control API is here.
+fn outer_router(_engine: Arc<Engine>, _config: &OuterConfig) -> Router {
+    Router::new()
+}
+
+/// Starts an outer listener and returns when it is listening.
+pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig) -> Result<Running, ServeError> {
+    config.check()?;
+    let router = outer_router(engine, &config);
+    bind(router, config.listen, config.tls).await
+}
+
+async fn bind(router: Router, listen: SocketAddr, tls: Option<(PathBuf, PathBuf)>) -> Result<Running, ServeError> {
+    let app = router.into_make_service();
     let handle = Handle::new();
-    let tls = config.tls.is_some();
-    let task = match config.tls {
+    let task = match &tls {
         Some((cert, key)) => {
             let rustls = RustlsConfig::from_pem_file(cert, key).await.map_err(ServeError::Tls)?;
             tokio::spawn(
-                axum_server::bind_rustls(config.listen, rustls)
+                axum_server::bind_rustls(listen, rustls)
                     .handle(handle.clone())
                     .serve(app),
             )
         }
-        None => tokio::spawn(axum_server::bind(config.listen).handle(handle.clone()).serve(app)),
+        None => tokio::spawn(axum_server::bind(listen).handle(handle.clone()).serve(app)),
     };
+    let tls = tls.is_some();
     match handle.listening().await {
         Some(addr) => Ok(Running {
             addr,
@@ -742,22 +885,31 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
 /// Starts the server and the poll task, after the work that the last stop cut is sorted out:
 ///
 /// 1. Each `executing` item becomes `unknown`. It is never run again.
-/// 2. The server takes requests.
+/// 2. The control API and the outer listeners take requests.
 /// 3. Each `approved` tool call that waited at step 1 runs if the policy allows it now.
 ///    Otherwise a pending copy asks the owner.
 /// 4. The poll task starts.
 ///
 /// A profile that fails at step 1 or 3 is written to stderr and does not stop the start.
-pub async fn start(engine: Arc<Engine>, config: ServeConfig) -> Result<(Running, Poller), ServeError> {
+pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterConfig>) -> Result<Started, ServeError> {
+    check_listeners(&config, &outer)?;
     let interrupted = engine.mark_interrupted();
     for (profile, error) in &interrupted.failures {
         eprintln!("cut calls of profile {profile} were not checked: {error}");
     }
-    let running = serve(engine.clone(), config).await?;
+    let control = serve(engine.clone(), config).await?;
+    let mut listeners = Vec::new();
+    for listener in outer {
+        listeners.push(serve_outer(engine.clone(), listener).await?);
+    }
     for (profile, error) in engine.resume_approved(interrupted).await {
         eprintln!("an approved call of profile {profile} was not resumed: {error}");
     }
-    Ok((running, Poller::start(engine)))
+    Ok(Started {
+        control,
+        outer: listeners,
+        poller: Poller::start(engine),
+    })
 }
 
 /// How often the server looks for polls that are due.

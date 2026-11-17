@@ -10,7 +10,7 @@ use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
 use bunsin_core::settings::Wire;
-use bunsin_daemon::server::{Running, ServeConfig, ServeError, serve, start};
+use bunsin_daemon::server::{OuterConfig, Reach, Running, ServeConfig, ServeError, check_listeners, serve, start};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::{Backends, Engine, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
@@ -958,7 +958,9 @@ async fn a_start_marks_cut_calls_unknown_and_runs_waiting_approved_calls_once() 
 
     let engine = open();
     let listen = "127.0.0.1:0".parse().unwrap();
-    let (running, poller) = start(engine.clone(), ServeConfig { listen, tls: None }).await.unwrap();
+    let started = start(engine.clone(), ServeConfig { listen, tls: None }, Vec::new())
+        .await
+        .unwrap();
     let states: Vec<_> = engine
         .snapshot("kim")
         .await
@@ -974,8 +976,7 @@ async fn a_start_marks_cut_calls_unknown_and_runs_waiting_approved_calls_once() 
     let calls = slack.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(calls[0].1["text"].as_str().unwrap().starts_with("waiting"));
-    poller.stop().await;
-    running.shutdown().await.unwrap();
+    started.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -1253,4 +1254,84 @@ async fn the_notes_are_preloaded_over_http() {
     };
     let refused = kim.preload_notes("kim", post).await;
     assert!(matches!(refused, Err(ApiError::NotAllowed(_))), "{refused:?}");
+}
+
+fn outer(reach: Reach, listen: &str, url: &str) -> OuterConfig {
+    OuterConfig {
+        reach,
+        listen: listen.parse().unwrap(),
+        url: url.parse().unwrap(),
+        tls: None,
+    }
+}
+
+#[test]
+fn listeners_are_checked_before_the_start() {
+    let control = ServeConfig {
+        listen: "127.0.0.1:8787".parse().unwrap(),
+        tls: None,
+    };
+    let internal = outer(Reach::Internal, "127.0.0.1:8788", "https://agents.corp.example");
+    let public = outer(Reach::Public, "127.0.0.1:8789", "https://agents.example.com/");
+    assert!(check_listeners(&control, &[internal.clone(), public.clone()]).is_ok());
+    // A proxy on this machine may serve the listener under plain http.
+    assert!(
+        check_listeners(
+            &control,
+            &[outer(Reach::Internal, "127.0.0.1:0", "http://localhost:9000")]
+        )
+        .is_ok()
+    );
+
+    let refused = |outer: &[OuterConfig]| check_listeners(&control, outer).unwrap_err().to_string();
+    let open = outer(Reach::Public, "0.0.0.0:8789", "https://agents.example.com");
+    assert!(refused(&[open]).contains("--public-tls-cert"));
+    for url in [
+        "http://agents.example.com",
+        "https://agents.example.com/?x=1",
+        "https://user:pw@agents.example.com",
+        "ftp://agents.example.com",
+    ] {
+        let error = refused(&[outer(Reach::Internal, "127.0.0.1:8788", url)]);
+        assert!(error.contains("--internal-url cannot be used"), "{url}: {error}");
+    }
+    let same = outer(Reach::Internal, "127.0.0.1:8787", "https://agents.corp.example");
+    assert!(refused(&[same]).contains("cannot share the address 127.0.0.1:8787"));
+    assert!(refused(&[internal.clone(), internal]).contains("more than one internal listener"));
+    // Port 0 gets a free port from the system, so two such addresses do not clash.
+    let any = |reach| outer(reach, "127.0.0.1:0", "http://127.0.0.1");
+    let control_any = ServeConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        tls: None,
+    };
+    assert!(check_listeners(&control_any, &[any(Reach::Internal), any(Reach::Public)]).is_ok());
+}
+
+#[tokio::test]
+async fn an_outer_listener_has_no_control_api() {
+    let rig = rig().await;
+    let internal = bunsin_daemon::server::serve_outer(
+        rig.engine.clone(),
+        outer(Reach::Internal, "127.0.0.1:0", "http://127.0.0.1"),
+    )
+    .await
+    .unwrap();
+    // The same access token works on the control API and finds nothing on the outer listener.
+    assert_eq!(rig.kim().list_profiles().await.unwrap().len(), 1);
+    let on_outer = RemoteEngine::new(
+        &RemoteConfig {
+            url: internal.url(),
+            ca_cert_pem: None,
+        },
+        &rig.kim_token,
+    )
+    .unwrap();
+    let refused = on_outer.list_profiles().await;
+    assert!(
+        matches!(&refused, Err(ApiError::Unreachable(text)) if text.contains("HTTP 404")),
+        "{refused:?}"
+    );
+    let refused = on_outer.snapshot("kim").await;
+    assert!(matches!(&refused, Err(ApiError::Unreachable(text)) if text.contains("HTTP 404")));
+    internal.shutdown().await.unwrap();
 }

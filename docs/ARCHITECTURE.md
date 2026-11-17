@@ -42,7 +42,16 @@
     그 사본을 `approve_item`으로 실행한다. 그래서 새 inbox ID로 한 번 실행되고, 정책을 다시 본다.
     정책이 거부하면 사본은 `pending`으로 남고, 오류가 사본의 번호를 알려 준다. 감사는 `unknown_resolved`이다.
   - 처음 설계는 `updated_at < started_at`으로 시작 전 항목을 골랐다. 시계가 초 단위라서 같은 초의 항목을 놓치므로, 1단계에서 ID를 적어 두는 방식으로 바꿨다.
-- 공개 리스너(ARD, 인바운드 MCP)는 아직 없다. 만들 때 제어 API와 분리한다.
+- **리스너 셋.** 리스너마다 router가 따로 있다.
+  - 제어(`--listen`): `/v1/...`만 있다. 접속 token을 받는다.
+  - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
+    인바운드 MCP, ARD, webhook의 경로를 여기에 둔다. 지금은 아무 경로도 없다.
+  - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
+    `https://`만 받고, `http://`는 host가 loopback일 때만 받는다. 사용자 이름, query, fragment는 거부한다.
+  - 리스너마다 제어 API의 TLS 규칙(loopback이 아니면 TLS)을 적용한다. 같은 주소를 두 리스너가 쓸 수 없다(포트 0은 예외).
+    이 검사(`check_listeners`)는 데이터 폴더의 잠금과 키 읽기 전에 한다.
+  - 기각: 리스너 하나를 Host로 나누기. 프록시 설정 하나로 경계가 사라진다.
+  - SIGTERM이면 모든 리스너가 함께 새 요청을 멈추고, 실행 중인 요청을 기다린다(`Started::stop`).
 - 기각한 안: GPUI 바이너리 하나에 엔진을 넣는 구조. 창을 닫으면 agent가 멈추고, Linux 서버에 디스플레이가 필요하다.
 
 ## 2. Crate

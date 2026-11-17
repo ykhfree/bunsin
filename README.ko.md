@@ -179,6 +179,13 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **sandbox 없음.** 코딩 작업은 서버 사용자로 실행됩니다. 코딩 CLI는 자기 권한 설정을 따릅니다.
   Bunsin은 확인 질문이나 sandbox를 끄는 플래그를 넘기지 않고, 자체 sandbox도 두지 않습니다.
   작업의 worktree와 기록 파일은 `<data dir>/coding/<프로필>/`에 남습니다. 서버는 worktree를 지우지 않습니다.
+- **다른 호출자를 위한 리스너.** `--internal-listen <주소> --internal-url <주소>`는 사내 호출자를 위한 두 번째 리스너를 엽니다.
+  `--public-listen <주소> --public-url <주소>`는 인터넷 호출자를 위한 세 번째 리스너를 엽니다.
+  URL은 호출자가 쓰는 주소입니다(예: `https://agents.example.com`). 프록시 뒤에서는 listen 주소와 다를 수 있습니다.
+  이 리스너에는 제어 API가 없습니다. 접속 token은 여기서 아무것도 하지 못하고, 이 리스너로 제어 API에 닿을 수 없습니다.
+  외부 주소에 뜨는 리스너는 TLS가 필요합니다(`--internal-tls-cert`/`--internal-tls-key`, `--public-tls-cert`/`--public-tls-key`).
+  두 리스너는 같은 주소를 쓸 수 없습니다. 서버는 키를 읽기 전에 이것을 모두 검사합니다.
+  이 리스너는 아직 아무것도 제공하지 않습니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
 ## agent 설정 (프로필 소유자)

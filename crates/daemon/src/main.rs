@@ -11,7 +11,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
 use bunsin_core::settings::Wire;
 use bunsin_daemon::keystore::KeyStore;
-use bunsin_daemon::server::{ServeConfig, start};
+use bunsin_daemon::server::{OuterConfig, Reach, ServeConfig, check_listeners, start};
 use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
 use bunsin_engine::Engine;
 use bunsin_engine::{KeyFile, KeySource};
@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use url::Url;
 
 #[derive(Parser)]
 #[command(name = "bunsind", about = "Runs and controls Bunsin persona agents")]
@@ -76,6 +77,57 @@ struct Remote {
     ca_cert: Option<PathBuf>,
 }
 
+/// The listeners for callers who are not profile owners.
+#[derive(Args)]
+struct OuterArgs {
+    /// A second listener for callers in your own network: the inbound MCP endpoints of the profiles
+    /// that turn them on. It has no control API, and access tokens do not work on it. Needs --internal-url.
+    #[arg(long, requires = "internal_url")]
+    internal_listen: Option<SocketAddr>,
+    /// The address callers use for the internal listener, for example https://agents.corp.example.
+    /// It can differ from --internal-listen behind a proxy.
+    #[arg(long, requires = "internal_listen")]
+    internal_url: Option<String>,
+    /// PEM certificate chain of the internal listener. Required unless it listens on a loopback address.
+    #[arg(long, requires_all = ["internal_tls_key", "internal_listen"])]
+    internal_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "internal_tls_cert")]
+    internal_tls_key: Option<PathBuf>,
+    /// A third listener for callers on the internet. It serves only the profiles whose inbound
+    /// scope is `public`. It has no control API. Needs --public-url.
+    #[arg(long, requires = "public_url")]
+    public_listen: Option<SocketAddr>,
+    /// The address callers use for the public listener, for example https://agents.example.com.
+    #[arg(long, requires = "public_listen")]
+    public_url: Option<String>,
+    /// PEM certificate chain of the public listener. Required unless it listens on a loopback address.
+    #[arg(long, requires_all = ["public_tls_key", "public_listen"])]
+    public_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "public_tls_cert")]
+    public_tls_key: Option<PathBuf>,
+}
+
+impl OuterArgs {
+    /// The configs of the listeners that the options ask for.
+    fn configs(self) -> Result<Vec<OuterConfig>, String> {
+        let outer = [
+            outer_config(
+                Reach::Internal,
+                self.internal_listen,
+                self.internal_url,
+                self.internal_tls_cert.zip(self.internal_tls_key),
+            )?,
+            outer_config(
+                Reach::Public,
+                self.public_listen,
+                self.public_url,
+                self.public_tls_cert.zip(self.public_tls_key),
+            )?,
+        ];
+        Ok(outer.into_iter().flatten().collect())
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Operator: run the server until it gets SIGTERM or Ctrl-C.
@@ -89,6 +141,8 @@ enum Command {
         tls_cert: Option<PathBuf>,
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        #[command(flatten)]
+        outer: Box<OuterArgs>,
         /// Let profile settings name commands that run on this machine as MCP servers.
         /// Every profile owner can then start any program as the user of this server.
         /// Use it only if you trust every profile owner.
@@ -800,17 +854,35 @@ fn key_source(store: &KeyStore, data_dir: &std::path::Path) -> Result<Box<dyn Ke
     }
 }
 
+/// The config of an outer listener from its options. `None` if the listener is not asked for.
+fn outer_config(
+    reach: Reach,
+    listen: Option<SocketAddr>,
+    url: Option<String>,
+    tls: Option<(PathBuf, PathBuf)>,
+) -> Result<Option<OuterConfig>, String> {
+    let (Some(listen), Some(url)) = (listen, url) else {
+        return Ok(None);
+    };
+    let url = Url::parse(&url).map_err(|e| format!("--{}-url is not an address: {e}", reach.word()))?;
+    Ok(Some(OuterConfig {
+        reach,
+        listen,
+        url,
+        tls,
+    }))
+}
+
 async fn run_server(
     local: Local,
-    listen: SocketAddr,
-    tls: Option<(PathBuf, PathBuf)>,
+    config: ServeConfig,
+    outer: Vec<OuterConfig>,
     backends: RealBackends,
     store: KeyStore,
     accept_new_key: bool,
 ) -> Result<(), String> {
-    let config = ServeConfig { listen, tls };
-    // A start that is refused for its address must not read or move the key.
-    config.check().map_err(|e| e.to_string())?;
+    // A start that is refused for its addresses must not read or move the key.
+    check_listeners(&config, &outer).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
     let source = key_source(&store, &local.data_dir)?;
@@ -822,22 +894,25 @@ async fn run_server(
     let engine =
         Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
     let engine = Arc::new(engine);
-    let (running, poller) = start(engine, config).await.map_err(|e| e.to_string())?;
+    let reaches: Vec<Reach> = outer.iter().map(|listener| listener.reach).collect();
+    let started = start(engine, config, outer).await.map_err(|e| e.to_string())?;
     // The handler is installed before the address is announced, so a stop request
     // that follows the announcement is never lost.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("cannot install the SIGTERM handler: {e}"))?;
     // Whoever started the server may have closed its output. That must not stop the server.
     let mut stdout = std::io::stdout();
-    let _ = writeln!(stdout, "listening on {}", running.url());
+    let _ = writeln!(stdout, "listening on {}", started.control.url());
+    for (reach, listener) in reaches.iter().zip(&started.outer) {
+        let _ = writeln!(stdout, "{} listener on {}", reach.word(), listener.url());
+    }
     let _ = stdout.flush();
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
     }
     let _ = writeln!(stdout, "stopping: waiting for running requests");
-    poller.stop().await;
-    running.shutdown().await.map_err(|e| e.to_string())
+    started.stop().await.map_err(|e| e.to_string())
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
@@ -848,6 +923,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             listen,
             tls_cert,
             tls_key,
+            outer,
             allow_stdio_connectors,
             allow_upstream_hosts,
             allow_coding,
@@ -882,7 +958,12 @@ async fn run(cli: Cli) -> Result<(), String> {
                 master_key_file,
                 &local.data_dir,
             )?;
-            run_server(local, listen, tls_cert.zip(tls_key), backends, store, accept_new_key).await?;
+            let config = ServeConfig {
+                listen,
+                tls: tls_cert.zip(tls_key),
+            };
+            let outer = outer.configs()?;
+            run_server(local, config, outer, backends, store, accept_new_key).await?;
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;
