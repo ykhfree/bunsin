@@ -783,7 +783,7 @@ impl Shell {
         let setup = (self.view == View::Agent).then(|| {
             Button::new("open-setup")
                 .outline()
-                .icon(icon("list-checks"))
+                .icon(icon("settings-2"))
                 .label("Set up the agent")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.open_setup();
