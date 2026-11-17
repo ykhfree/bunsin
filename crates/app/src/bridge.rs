@@ -5,16 +5,16 @@
 
 use bunsin_api::{
     AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
-    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate,
-    PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot, Resolution, ToolsReport,
-    WikiPageUpdate,
+    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
+    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot,
+    Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::{CorrectionRecord, ProfileInfo};
+use bunsin_core::records::{CallerToken, CorrectionRecord, ProfileInfo};
 use bunsin_core::tool::PinSet;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use std::sync::Arc;
@@ -171,6 +171,15 @@ pub enum UiCommand {
         profile: String,
         request: PreloadNotes,
     },
+    /// Creates a caller token for the inbound endpoint. The state then holds it until the next command.
+    AddCaller {
+        profile: String,
+        label: String,
+    },
+    RevokeCaller {
+        profile: String,
+        id: i64,
+    },
 }
 
 /// The page of the notes that the window has open.
@@ -242,7 +251,8 @@ pub enum ConnectionResult {
     },
 }
 
-/// What the window shows. Every field comes from the engine. No token is ever in it.
+/// What the window shows. Every field comes from the engine. No access token is ever in it, and
+/// a caller token only in `new_caller`, from its creation until the next command.
 /// The arguments and the plain environment variables of a command connector are in it. The value
 /// of a secret variable is not: the state holds only its name.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -310,6 +320,10 @@ pub struct UiState {
     pub lint_result: Option<Result<usize, String>>,
     /// How many page changes the last `PreloadNotes` put into the inbox, or why it failed. Not an `error`.
     pub preload_result: Option<Result<usize, String>>,
+    /// The caller tokens of the selected profile, revoked ones too.
+    pub callers: Option<Vec<CallerToken>>,
+    /// The token that the last command created. The server cannot show it again.
+    pub new_caller: Option<NewCallerToken>,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -370,6 +384,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.thresholds_result = None;
     state.lint_result = None;
     state.preload_result = None;
+    state.new_caller = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
     let result = match (command, selected) {
@@ -509,6 +524,14 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             state.preload_result = Some(result.map(|filed| filed.len()));
             Ok(())
         }
+        (UiCommand::AddCaller { profile, label }, _) => {
+            for_profile(selected, &profile, api.add_caller_token(&profile, &label))
+                .await
+                .map(|created| state.new_caller = Some(created))
+        }
+        (UiCommand::RevokeCaller { profile, id }, _) => {
+            for_profile(selected, &profile, api.revoke_caller_token(&profile, id)).await
+        }
         (UiCommand::DismissFinding { profile, id }, _) => {
             for_profile(selected, &profile, api.dismiss_finding(&profile, id)).await
         }
@@ -588,6 +611,7 @@ struct Loaded {
     replay_cases: Vec<ReplayCaseRecord>,
     eval_report: EvalReport,
     lint_findings: Vec<LintFinding>,
+    callers: Vec<CallerToken>,
     /// The open page. None if no page is open or the server has no such page.
     page: Option<WikiPage>,
     /// The revisions of the open page, if the window shows them.
@@ -610,6 +634,7 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bo
         replay_cases: api.replay_cases(profile).await?,
         eval_report: api.eval_report(profile).await?,
         lint_findings: api.lint_findings(profile).await?,
+        callers: api.caller_tokens(profile).await?,
         history: match open {
             Some((slug, true)) => Some(api.wiki_history(profile, slug).await?),
             _ => None,
@@ -640,6 +665,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.replay_cases = None;
     state.eval_report = None;
     state.lint_findings = None;
+    state.callers = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -680,6 +706,7 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.replay_cases = Some(loaded.replay_cases);
                 state.eval_report = Some(loaded.eval_report);
                 state.lint_findings = Some(loaded.lint_findings);
+                state.callers = Some(loaded.callers);
                 if let Some(open) = &mut state.open_note {
                     open.page = loaded.page;
                     open.history = loaded.history;

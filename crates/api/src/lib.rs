@@ -14,7 +14,7 @@ use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{
-    ArtifactMeta, AuditEntry, CorrectionRecord, DecisionCounts, InboxItem, LlmUsage, ProfileInfo,
+    ArtifactMeta, AuditEntry, CallerToken, CorrectionRecord, DecisionCounts, InboxItem, LlmUsage, ProfileInfo,
 };
 use bunsin_core::settings::{McpConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
@@ -415,6 +415,23 @@ pub struct CommandConnectorUpdate {
     pub expected: Expected<Option<ConnectorConnection>>,
 }
 
+/// A new caller token. The server shows the token this once and keeps only its hash.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewCallerToken {
+    pub id: i64,
+    pub token: String,
+}
+
+impl std::fmt::Debug for NewCallerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token value is left out on purpose.
+        f.debug_struct("NewCallerToken")
+            .field("id", &self.id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// What one test request to the LLM endpoint did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmTest {
@@ -520,7 +537,7 @@ pub enum ApiError {
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// What a profile owner can do. Profiles and access tokens are created on the
-/// server by its operator, so they are not part of this interface.
+/// server by its operator, so they are not part of this interface. Caller tokens are.
 pub trait EngineApi: Send + Sync {
     /// The profiles the caller may use.
     fn list_profiles(&self) -> BoxFuture<'_, ApiResult<Vec<ProfileInfo>>>;
@@ -660,4 +677,11 @@ pub trait EngineApi: Send + Sync {
     /// Calls one tool that reads, with the checks of a poll, and lets the agent propose pages from its result.
     /// Returns the inbox IDs of the page changes. Nothing else the agent proposes is run.
     fn preload_notes<'a>(&'a self, profile: &'a str, request: PreloadNotes) -> BoxFuture<'a, ApiResult<Vec<i64>>>;
+    /// The caller tokens of the profile, revoked ones too, oldest first. A caller token opens only the
+    /// inbound endpoint of this profile, never this interface.
+    fn caller_tokens<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CallerToken>>>;
+    /// Creates a caller token. The reply holds the token; it cannot be read again.
+    fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>>;
+    /// Revokes a caller token. The next request with it is refused.
+    fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
 }

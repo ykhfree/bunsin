@@ -4,7 +4,7 @@ mod common;
 
 use bunsin_api::{EngineApi, Expected, PrinciplesUpdate};
 use bunsin_app::shell::Shell;
-use common::window::{REFRESH, label, on_screen, open, runtime, wait_until};
+use common::window::{REFRESH, label, on_screen, open, runtime, value, wait_until};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{App, Entity, ScrollDelta, TestAppContext, Window, point, px};
 
@@ -351,5 +351,64 @@ fn the_server_reason_and_a_conflict_are_shown_and_nothing_is_saved(cx: &mut Test
     on_screen(cx, window, |window, _| {
         assert_eq!(label(window, "poll-0"), "slack/search every 300 s");
         assert_eq!(label(window, "polls-changes"), "");
+    });
+}
+
+#[gpui_kit::test]
+fn the_owner_creates_and_revokes_a_caller_token_in_the_agent_view(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // The callers card is below the principles and the polls. The window is tall enough for it.
+    let (window, shell) = common::window::open_sized(cx, &rt, &rig, (1280., 1800.));
+    on_screen(cx, window, |window, cx| window.click("tab-agent", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "caller-count"), "Caller tokens: 0");
+        assert!(label(window, "callers-help").contains("opens nothing else"));
+        // An empty label is refused in the window.
+        window.click("add-caller", cx);
+        assert_eq!(label(window, "callers-message"), "Enter who gets the token.");
+        window.click("new-caller", cx);
+        window.input("Lee's bot", cx);
+        window.click("add-caller", cx);
+    });
+    wait_until(cx, &shell, "the new token", |s| s.state.new_caller.is_some());
+    let token = shell.read_with(cx, |s, _| s.state.new_caller.clone().unwrap());
+    // The server stored the token for kim only, and the window lists it.
+    let stored = rt.block_on(rig.engine.caller_tokens("kim")).unwrap();
+    assert_eq!((stored.len(), stored[0].id), (1, token.id));
+    assert!(rt.block_on(rig.engine.caller_tokens("lee")).unwrap().is_empty());
+    assert_eq!(
+        rig.engine.app_store().caller(&token.token).unwrap().unwrap().label,
+        "Lee's bot"
+    );
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "caller-count"), "Caller tokens: 1");
+        assert!(label(window, "caller-shown-once").contains("cannot show it again"));
+        assert_eq!(token.id, 1);
+        assert!(label(window, "caller-1").starts_with("#1 Lee's bot · since"));
+        // No accessibility text holds the token.
+        assert!(
+            !common::window::screen_texts(window)
+                .iter()
+                .any(|text| text.contains(&token.token))
+        );
+        assert_eq!(value(window, "new-caller"), "");
+        // Revoke needs a second click.
+        window.click("revoke-caller-1", cx);
+        assert!(rig.engine.app_store().caller(&token.token).unwrap().is_some());
+        window.click("revoke-caller-1", cx);
+    });
+    wait_until(cx, &shell, "the revocation", |s| {
+        s.state
+            .callers
+            .as_ref()
+            .is_some_and(|callers| callers[0].revoked_at.is_some())
+    });
+    assert_eq!(rig.engine.app_store().caller(&token.token).unwrap(), None);
+    on_screen(cx, window, |window, _| {
+        // The next command ends the one showing of the token.
+        assert!(window.try_find("caller-shown-once").is_none());
+        assert!(window.try_find("revoke-caller-1").is_none());
+        assert!(label(window, "caller-1").contains("revoked"));
     });
 }

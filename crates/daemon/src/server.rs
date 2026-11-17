@@ -11,15 +11,15 @@ use axum::{Json, Router};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
-    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, DismissFindingBody,
-    DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody,
-    ResolveUnknownBody, RetireCorrectionBody, status_of,
+    AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody,
+    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections, ConnectorUpdate,
-    EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
-    PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
-    ToolsReport, WikiPageUpdate,
+    EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview,
+    PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
+    ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
@@ -28,7 +28,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::{CorrectionRecord, LlmUsage, ProfileInfo};
+use bunsin_core::records::{CallerToken, CorrectionRecord, LlmUsage, ProfileInfo};
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use bunsin_engine::Engine;
 use std::net::SocketAddr;
@@ -593,6 +593,34 @@ async fn wiki_history(
     Ok(Json(engine.wiki_history(&profile, &slug).await?))
 }
 
+async fn caller_tokens(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<CallerToken>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.caller_tokens(&profile).await?))
+}
+
+async fn add_caller_token(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(body): Json<AddCallerBody>,
+) -> Reply<NewCallerToken> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.add_caller_token(&profile, &body.label).await?))
+}
+
+async fn revoke_caller_token(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, id)): Path<(String, i64)>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.revoke_caller_token(&profile, id).await?))
+}
+
 pub fn router(engine: Arc<Engine>) -> Router {
     let profile = |rest: &str| format!("{PROFILES}/{{profile}}/{rest}");
     Router::new()
@@ -640,6 +668,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
             &profile("wiki/{slug}"),
             get(get_wiki_page).put(put_wiki_page).delete(delete_wiki_page),
         )
+        .route(&profile("callers"), get(caller_tokens).post(add_caller_token))
+        .route(&profile("callers/{id}"), axum::routing::delete(revoke_caller_token))
         .route(&profile("connections"), get(get_connections))
         .route(&profile("connections/llm"), put(put_llm))
         .route(

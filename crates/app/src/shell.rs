@@ -1,7 +1,8 @@
 //! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
-//! polls, learning, privacy settings and connections.
+//! polls, learning, privacy settings, connections and caller tokens.
 
 use crate::bridge::{UiCommand, UiState};
+use crate::callers_form::CallersForm;
 use crate::connections_form::ConnectionsForm;
 use crate::draft_editor::DraftEditor;
 use crate::learning_form::LearningForm;
@@ -30,6 +31,7 @@ pub struct Shell {
     pub state: UiState,
     commands: mpsc::UnboundedSender<UiCommand>,
     pub(crate) privacy: PrivacyForm,
+    pub(crate) callers: CallersForm,
     pub(crate) connections: ConnectionsForm,
     pub(crate) notes: NotesForm,
     pub(crate) permissions: PermissionsForm,
@@ -55,7 +57,8 @@ pub enum View {
     Notes,
     /// What the agent may do with each approved tool.
     Permissions,
-    /// How the agent works: the owner's principles and the searches that find events.
+    /// How the agent works: the owner's principles, the searches that find events, and the caller
+    /// tokens of its inbound endpoint.
     Agent,
     /// What the agent learns and how the owner checks it: corrections, principle candidates,
     /// evaluation and the thresholds of the autonomy suggestions.
@@ -97,6 +100,7 @@ impl Shell {
             state: UiState::default(),
             commands,
             privacy: PrivacyForm::new(window, cx),
+            callers: CallersForm::new(window, cx),
             connections: ConnectionsForm::new(window, cx),
             notes: NotesForm::new(window, cx),
             permissions: PermissionsForm::new(),
@@ -766,6 +770,7 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The forms are built first. They need `cx` for writing.
         let notes = (self.view == View::Notes).then(|| self.notes_section(cx).into_any_element());
+        let callers = (self.view == View::Agent).then(|| self.callers_section(cx).into_any_element());
         let forms = (self.view == View::Settings).then(|| {
             (
                 self.connections_section(cx).into_any_element(),
@@ -797,6 +802,7 @@ impl Render for Shell {
                 .overflow_y_scroll()
                 .child(self.principles_section(cx))
                 .child(self.polls_section(cx))
+                .children(callers)
                 .into_any_element()
         } else if let Some(notes) = notes {
             notes

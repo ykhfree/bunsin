@@ -12,6 +12,27 @@ pub struct ProfileInfo {
     pub display_name: String,
 }
 
+/// A token that lets one outside caller ask a profile's agent, as its owner lists it.
+/// The token value is not stored, so it is not here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallerToken {
+    pub id: i64,
+    /// Who the owner gave the token to, for example "Team Lee's bot".
+    pub label: String,
+    pub created_at: i64,
+    /// Unix seconds. A revoked token stays listed, so its past requests keep a name.
+    pub revoked_at: Option<i64>,
+}
+
+/// The caller behind a valid caller token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caller {
+    /// The ID of the caller token.
+    pub id: i64,
+    pub profile: String,
+    pub label: String,
+}
+
 /// What an inbox item asks the user to look at.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

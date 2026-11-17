@@ -126,7 +126,7 @@
     정책이 소유자 없이 실행한 항목(`executed`, `failed`)에는 "Report a problem" 버튼이 있다(`report_autonomous`). 도구가 보류 중이면 버튼을 감춘다.
   - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제, 오른쪽 열의 미리 읽기와 점검 결과(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
-  - Agent: 소유자의 원칙과 poll. 아래 "Agent 화면" 항목.
+  - Agent: 소유자의 원칙과 poll, 호출자 token(9절). 아래 "Agent 화면" 항목.
   - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
   - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인)과 개인정보 설정.
 - 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `remove_connector`, `privacy`, `set_privacy`).
@@ -404,7 +404,16 @@
   다른 프로필에 대한 요청과 없는 프로필에 대한 요청은 같은 오류(401)를 받는다.
 - token은 OS 난수 32바이트로 만든다. 저장소에는 SHA-256 해시만 저장한다. token은 발급할 때 한 번만 출력된다.
 - 서버는 요청마다 token 표를 읽는다. 운영자가 token을 폐기하면 다음 요청부터 거부된다.
-- 프로필 생성과 token 발급은 네트워크 API에 없다. 서버 운영자가 서버에서 명령으로 한다.
+- 프로필 생성과 접속 token 발급은 네트워크 API에 없다. 서버 운영자가 서버에서 명령으로 한다.
+- **호출자 token**은 다르다. 프로필 소유자가 제어 API로 발급하고 폐기한다
+  (`GET`/`POST /v1/profiles/{p}/callers`, `DELETE .../callers/{id}`, `bunsind callers`, `caller-add`, `caller-revoke`, 창의 Agent 화면).
+  - 호출자 token은 그 프로필의 인바운드 endpoint(`ask`, `get_request`)만 연다. 제어 API는 열지 못한다.
+  - 표가 다르다: 접속 token은 `tokens`, 호출자 token은 `caller_tokens`(app.db)에 있다. 그래서 한쪽 token은 다른 쪽 확인에서 언제나 "없는 token"이다.
+    접두어도 다르다(`bsn_`, `bsc_`).
+  - `caller_tokens`의 key는 정수 `id`이다. 해시는 unique 열이고, 어떤 응답에도 나오지 않는다. 목록과 폐기는 `id`로 한다.
+  - 발급한 token은 한 번만 보인다. 폐기는 행을 지우지 않고 `revoked_at`을 쓴다. 지난 요청이 호출자의 이름을 잃지 않게 하기 위해서이다.
+  - 다른 프로필의 `id`로 폐기하면 없는 `id`와 같은 오류(404)이다. label은 한 줄, 1~60자이다(agent에게 질문의 작성자로 보인다).
+  - 감사 로그는 `caller_token_added`(id, label)와 `caller_token_revoked`(id)이다. token 값은 남기지 않는다.
 - 관리자용 token은 없다. 네트워크로는 누구도 다른 사람의 프로필을 읽을 수 없다.
 
 **전송**

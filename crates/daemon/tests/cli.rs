@@ -154,6 +154,33 @@ fn an_owner_controls_only_the_own_profile_through_the_server() {
     let error = stderr_of_failure(server.run(&kim, &["llm-usage", "lee"]), "llm-usage for another profile");
     assert!(error.contains("not authorized"), "{error}");
     assert!(stdout_of(server.run(&lee, &["status", "lee"]), "status").starts_with("kill switch: off\n"));
+
+    // An owner gives out caller tokens of the own profile and revokes them.
+    let token = stdout_of(
+        server.run(&kim, &["caller-add", "kim", "--label", "Lee's bot"]),
+        "caller-add",
+    );
+    assert!(token.starts_with("bsc_"), "{token}");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["callers", "kim"]), "callers"),
+        "1\tvalid\tLee's bot\n"
+    );
+    let error = stderr_of_failure(
+        server.run(&lee, &["caller-revoke", "kim", "1"]),
+        "a revoke for another profile",
+    );
+    assert!(error.contains("not authorized"), "{error}");
+    stdout_of(server.run(&kim, &["caller-revoke", "kim", "1"]), "caller-revoke");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["callers", "kim"]), "callers"),
+        "1\trevoked\tLee's bot\n"
+    );
+    // The caller token is no access token.
+    let error = stderr_of_failure(
+        server.run(token.trim(), &["profile-list"]),
+        "a caller token on the control API",
+    );
+    assert!(error.contains("not authorized"), "{error}");
 }
 
 #[test]

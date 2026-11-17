@@ -723,6 +723,25 @@ name). It never writes code itself and never merges. Set it up in the settings f
 
 ![A coding call and the result of a job in the inbox](docs/screens/inbox-coding-light.png)
 
+### Let others ask your agent
+
+Other people's agents can ask your agent questions through its inbound endpoint. Each caller
+gets its own caller token from you:
+
+```sh
+bunsind caller-add kim --label "Team Lee's bot"   # prints the caller token once: bsc_...
+bunsind callers kim                                # 1	valid	Team Lee's bot
+bunsind caller-revoke kim 1                        # the next request with it is refused
+```
+
+- A caller token opens only the inbound endpoint of your profile. It opens nothing of the
+  control API, and an access token opens nothing of the inbound endpoint.
+- The server keeps only the hash of a caller token. A revoked token stays in the list with
+  the time of its revocation.
+- The window lists the caller tokens in the Agent view. There you create one (the window
+  shows it once) and revoke one with two clicks.
+- Not built yet: the inbound endpoint itself.
+
 ### Work with the agent
 
 ```sh

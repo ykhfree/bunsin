@@ -3,6 +3,7 @@
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
 mod autonomy;
+mod callers;
 mod candidates;
 mod coding;
 mod connections;
@@ -24,7 +25,7 @@ pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
-    ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, LlmTest, LlmUpdate, Outcome, Permissions,
+    ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
     PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
     ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
@@ -43,7 +44,9 @@ use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
-use bunsin_core::records::{CorrectionRecord, DecisionKind, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote};
+use bunsin_core::records::{
+    CallerToken, CorrectionRecord, DecisionKind, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote,
+};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
 use bunsin_core::wiki::{WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiPage, WikiSummary, WikiUpdate, is_notes_tool};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
@@ -1487,5 +1490,17 @@ impl EngineApi for Engine {
 
     fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>> {
         Box::pin(async move { self.store(profile)?.wiki_history(slug).map_err(store_error) })
+    }
+
+    fn caller_tokens<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CallerToken>>> {
+        Box::pin(async move { self.read_caller_tokens(profile) })
+    }
+
+    fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>> {
+        Box::pin(async move { self.new_caller_token(profile, label) })
+    }
+
+    fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.revoke_caller(profile, id) })
     }
 }

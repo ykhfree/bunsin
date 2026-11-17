@@ -58,6 +58,9 @@
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
 //! | DELETE | `/v1/profiles/{p}/wiki/{slug}` | | |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}/history` | | `[WikiPage or null]` |
+//! | GET | `/v1/profiles/{p}/callers` | | `[CallerToken]` |
+//! | POST | `/v1/profiles/{p}/callers` | `AddCallerBody` | `NewCallerToken` |
+//! | DELETE | `/v1/profiles/{p}/callers/{id}` | | |
 //!
 //! The newer calls use `POST /v1/profiles/{p}/<method name in kebab case>`, with the arguments
 //! as a JSON body.
@@ -71,6 +74,11 @@ pub const PROFILES: &str = "/v1/profiles";
 
 pub fn profile_path(profile: &str, rest: &str) -> String {
     format!("{PROFILES}/{profile}/{rest}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddCallerBody {
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

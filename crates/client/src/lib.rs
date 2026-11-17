@@ -1,15 +1,15 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
 use bunsin_api::http::{
-    AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody, DismissFindingBody,
-    DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody, ReportAutonomousBody,
-    ResolveUnknownBody, RetireCorrectionBody, profile_path,
+    AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody,
+    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
-    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, Outcome, Permissions, PermissionsUpdate,
-    PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
-    ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
+    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
@@ -19,7 +19,7 @@ use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::{CorrectionRecord, LlmUsage, ProfileInfo};
+use bunsin_core::records::{CallerToken, CorrectionRecord, LlmUsage, ProfileInfo};
 use bunsin_core::tool::PinSet;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -458,6 +458,31 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "preload-notes"), Some(&request))
                 .await
+        })
+    }
+
+    fn caller_tokens<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CallerToken>>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "callers"), NO_BODY).await })
+    }
+
+    fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>> {
+        Box::pin(async move {
+            let body = AddCallerBody {
+                label: label.to_owned(),
+            };
+            self.call(Method::POST, &profile_path(profile, "callers"), Some(&body))
+                .await
+        })
+    }
+
+    fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::DELETE,
+                &profile_path(profile, &format!("callers/{id}")),
+                NO_BODY,
+            )
+            .await
         })
     }
 

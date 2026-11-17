@@ -601,6 +601,29 @@ enum Command {
         profile: String,
         id: i64,
     },
+    /// List the caller tokens of a profile: the tokens that let others ask your agent through its
+    /// inbound endpoint. Token values are not stored and cannot be shown.
+    Callers {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Create a caller token and print it once. It opens only the inbound endpoint of this profile.
+    CallerAdd {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// Who gets the token, for example "Team Lee's bot". The agent sees it as the author of each question.
+        #[arg(long)]
+        label: String,
+    },
+    /// Revoke a caller token by the ID that `callers` shows. The next request with it is refused.
+    CallerRevoke {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -1509,6 +1532,33 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::DismissPrinciple { remote, profile, id } => {
             connect(&remote)?.dismiss_principle(&profile, id).await.map_err(text)?;
             println!("candidate {id} dismissed");
+        }
+        Command::Callers { remote, profile } => {
+            for caller in connect(&remote)?.caller_tokens(&profile).await.map_err(text)? {
+                let state = match caller.revoked_at {
+                    Some(_) => "revoked",
+                    None => "valid",
+                };
+                println!("{}\t{state}\t{}", caller.id, caller.label);
+            }
+        }
+        Command::CallerAdd { remote, profile, label } => {
+            let created = connect(&remote)?
+                .add_caller_token(&profile, &label)
+                .await
+                .map_err(text)?;
+            println!("{}", created.token);
+            eprintln!(
+                "Caller token {} lets its holder ask the agent of {profile}. It is shown once and is not stored.",
+                created.id
+            );
+        }
+        Command::CallerRevoke { remote, profile, id } => {
+            connect(&remote)?
+                .revoke_caller_token(&profile, id)
+                .await
+                .map_err(text)?;
+            println!("caller token {id} revoked");
         }
         Command::Reject {
             remote,

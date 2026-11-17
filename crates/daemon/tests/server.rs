@@ -1335,3 +1335,58 @@ async fn an_outer_listener_has_no_control_api() {
     assert!(matches!(&refused, Err(ApiError::Unreachable(text)) if text.contains("HTTP 404")));
     internal.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_owner_manages_the_caller_tokens_of_the_own_profile_only() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let lee = rig.client(&rig.lee_token);
+    let created = kim.add_caller_token("kim", "  Lee's bot ").await.unwrap();
+    assert!(created.token.starts_with("bsc_"));
+    assert!(!format!("{created:?}").contains(&created.token));
+    let listed = kim.caller_tokens("kim").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].id, listed[0].label.as_str()), (created.id, "Lee's bot"));
+    assert_eq!(listed[0].revoked_at, None);
+    for bad in ["", "two\nlines", &"x".repeat(61)] {
+        let refused = kim.add_caller_token("kim", bad).await;
+        assert!(matches!(refused, Err(ApiError::Invalid(_))), "{bad:?}: {refused:?}");
+    }
+
+    // Another owner can neither see nor revoke them.
+    assert!(matches!(lee.caller_tokens("kim").await, Err(ApiError::Unauthorized(_))));
+    assert!(matches!(
+        lee.revoke_caller_token("kim", created.id).await,
+        Err(ApiError::Unauthorized(_))
+    ));
+    let refused = lee.revoke_caller_token("lee", created.id).await;
+    assert!(matches!(refused, Err(ApiError::NotFound(_))), "{refused:?}");
+    assert!(lee.caller_tokens("lee").await.unwrap().is_empty());
+
+    // A caller token opens nothing of the control API.
+    let as_caller = rig.client(&created.token);
+    assert!(matches!(
+        as_caller.list_profiles().await,
+        Err(ApiError::Unauthorized(_))
+    ));
+    assert!(matches!(
+        as_caller.snapshot("kim").await,
+        Err(ApiError::Unauthorized(_))
+    ));
+
+    kim.revoke_caller_token("kim", created.id).await.unwrap();
+    assert!(kim.caller_tokens("kim").await.unwrap()[0].revoked_at.is_some());
+    assert!(matches!(
+        kim.revoke_caller_token("kim", created.id).await,
+        Err(ApiError::NotFound(_))
+    ));
+    let audit: Vec<String> = kim
+        .snapshot("kim")
+        .await
+        .unwrap()
+        .audit
+        .into_iter()
+        .map(|entry| entry.kind)
+        .collect();
+    assert!(audit.contains(&"caller_token_added".to_owned()) && audit.contains(&"caller_token_revoked".to_owned()));
+}

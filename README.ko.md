@@ -626,6 +626,21 @@ agent는 코드를 직접 쓰지 않고, 병합하지 않습니다. 설정 파�
 
 ![승인함의 코딩 호출과 작업 결과](docs/screens/inbox-coding-light.png)
 
+### 다른 사람이 내 agent에게 묻게 하기
+
+다른 사람의 agent는 내 agent의 인바운드 endpoint로 질문할 수 있습니다. 호출자마다 소유자가 호출자 token을 하나씩 줍니다.
+
+```sh
+bunsind caller-add kim --label "Team Lee's bot"   # 호출자 token을 한 번만 출력합니다: bsc_...
+bunsind callers kim                                # 1	valid	Team Lee's bot
+bunsind caller-revoke kim 1                        # 그 token의 다음 요청부터 거부됩니다
+```
+
+- 호출자 token은 내 프로필의 인바운드 endpoint만 엽니다. 제어 API는 열지 못합니다. 접속 token은 인바운드 endpoint를 열지 못합니다.
+- 서버는 호출자 token의 해시만 저장합니다. 폐기한 token은 폐기 시각과 함께 목록에 남습니다.
+- 창의 Agent 화면이 호출자 token을 보여 줍니다. 거기서 token을 만들고(창이 한 번만 보여 줍니다), 두 번 눌러 폐기합니다.
+- 아직 만들지 않은 것: 인바운드 endpoint 자체.
+
 ### agent와 일하기
 
 ```sh
