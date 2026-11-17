@@ -322,6 +322,8 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   브라우저가 돌아오는 요청을 127.0.0.1의 빈 port에서 받습니다.
   명령줄에서는 `connector-oauth`가 로그인 페이지 주소를 출력합니다. 그 주소를 열어 로그인한 뒤,
   브라우저가 이동한 주소를 붙여 넣습니다. 그 페이지는 열리지 않습니다.
+- 로그인 페이지의 주소는 MCP 서버의 metadata가 정합니다. 서버와 창은 `https` 주소와, 127.0.0.1, ::1, localhost의 `http` 주소만 받습니다.
+  다른 scheme(예: `smb:`, `file:`)은 거부합니다. 그런 주소를 열면 Mac에서 프로그램이 실행되기 때문입니다.
   `--redirect-uri`로 그 주소를 바꿉니다(기본값 `http://127.0.0.1:8976/callback`). 고정된 주소로 등록한 client ID에는 이 옵션이 필요할 수 있습니다.
   로그인은 10분 동안 기다립니다. 프로필 하나에 3개까지 기다릴 수 있고, 서버를 다시 시작하면 잊습니다.
 - 서버는 OAuth token을 봉인하고 MCP 서버 주소의 origin에 묶습니다. access token은 refresh token으로 스스로 갱신합니다.

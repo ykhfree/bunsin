@@ -376,6 +376,9 @@ bunsind connector-remove kim jira                # removes the connector and its
   the sign-in page in the browser and takes the browser's return on a free port of
   127.0.0.1. On the command line, `connector-oauth` prints the address of the page. Open it,
   sign in, then paste the address that the browser goes to; that page does not load.
+- The MCP server's metadata sets the address of the sign-in page. The server and the window
+  accept only an `https` address, or `http` on 127.0.0.1, ::1 or localhost. Another scheme,
+  for example `smb:` or `file:`, is refused, because opening it would start a program on your Mac.
   `--redirect-uri` sets that address (default `http://127.0.0.1:8976/callback`). A client ID
   that was registered with one fixed address may need it. A sign-in waits 10 minutes. A
   profile can have 3 sign-ins waiting, and a restart of the server forgets them.
