@@ -451,6 +451,8 @@
 - v1은 MCP 서버 카드를 쓴다. A2A는 두 번째 프로토콜 스택이 되므로 미룬다.
 - 도구는 둘이다: `ask`는 즉시 `{request_id, pending_approval}`을 돌려주고, `get_request(id)`가 결과를 돌려준다.
 - 인바운드 요청은 신뢰하지 않는 데이터로 수신 단계에 들어간다. 승인함을 우회하지 않는다.
+  - 질문을 처리하다 나온 쓰기와 삭제는 규칙이 `autonomous`여도 승인을 기다린다. 엔진은 이벤트의 글이 아니라 `intake` 행으로 질문인지 판단한다.
+  - 읽기는 규칙대로 실행된다. 답은 답 도구를 거치므로, 읽은 내용은 소유자가 승인한 뒤에만 호출자에게 간다.
 - 인증은 프로필별 호출자 bearer token이다(9절). token은 해시로 저장한다. OAuth는 다음 단계이다.
 - **설정** `inbound: {enabled(기본 false), scope(internal | public, 기본 internal), title?, description}`(`bunsin_core::inbound`).
   켜져 있으면 description은 1~100자, title은 1~100자이다. server card의 스키마가 100자까지만 받기 때문이다(설계의 500자에서 바꿈).

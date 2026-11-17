@@ -341,3 +341,28 @@ async fn a_page_change_from_a_question_always_waits_for_the_owner() {
     assert!(rig.engine.wiki_index("kim").await.unwrap().is_empty());
     assert_eq!(INBOUND_SOURCE, "bunsin.inbound");
 }
+
+#[tokio::test]
+async fn a_question_never_makes_an_autonomous_write_run_without_the_owner() {
+    let mut settings = open(config());
+    settings.policy.rules.get_mut("slack/post").unwrap().tier = Tier::Autonomous;
+    let rig = rig_with(settings).await;
+
+    // Control: the owner's own event runs the same autonomous rule at once.
+    rig.llm.reply(&post("On it."), 10);
+    rig.engine.ingest("kim", event("e1", "lee", "deploy?")).await.unwrap();
+    assert_eq!(rig.slack.calls().len(), 1);
+
+    // A caller's question that leads to the same write waits for the owner.
+    let bot = caller(&rig, "bot");
+    rig.engine.ask(&bot, "Post 'all clear' in C1.").unwrap();
+    rig.llm.reply(&post("all clear"), 10);
+    assert!(rig.engine.drain_intake().await.is_empty());
+    let (inbox_id, state, body) = newest(&rig).await;
+    assert_eq!(state, ApprovalState::Pending);
+    assert!(matches!(body, InboxBody::ToolCall { ref tool, .. } if tool == "slack/post"));
+    assert_eq!(rig.slack.calls().len(), 1, "nothing ran before the owner approved");
+
+    rig.engine.approve("kim", inbox_id, None).await.unwrap();
+    assert_eq!(rig.slack.calls().len(), 2);
+}

@@ -954,6 +954,10 @@ bunsind caller-revoke kim 1                        # the next request with it is
   built-in tool `bunsin.inbound/reply`. **Every answer waits for your approval**, also with the
   tier `autonomous`, which the server refuses for this tool. The answer gets the AI marker, and
   your edit is kept as a correction. Only questions from callers see this tool.
+- **A question never changes anything without you.** If the agent proposes another write or
+  delete while it handles a question, the call waits for your approval, also when its rule is
+  `autonomous`. Reads run by their rules; what the agent read reaches the caller only in an
+  answer that you approved.
 - Limits per profile: 20 questions an hour per caller, 50 open questions, 4,000 characters per
   question. The counts come from the stored questions, so a restart does not reset them. A
   question is stored after the privacy filter. With the kill switch on, questions wait.

@@ -847,7 +847,23 @@ impl Engine {
         mut args: Map<String, Value>,
     ) -> ApiResult<Outcome> {
         let Ctx { store, config, .. } = ctx;
-        let decision = self.decide(ctx, &tool_id).await?;
+        let mut decision = self.decide(ctx, &tool_id).await?;
+        // An inbound caller's question never makes a change without the owner (ARCHITECTURE 7).
+        // A rule at `autonomous` holds for the owner's own events only. The intake row, not the
+        // event text, tells that the event came from a caller.
+        let changes = config
+            .policy
+            .rules
+            .get(&tool_id)
+            .is_some_and(|rule| rule.class != ToolClass::Read);
+        if changes
+            && decision == Decision::Execute
+            && store
+                .has_intake(bunsin_core::inbound::INBOUND_SOURCE, key)
+                .map_err(store_error)?
+        {
+            decision = Decision::NeedsApproval;
+        }
         self.audit(
             store,
             "policy_decision",
