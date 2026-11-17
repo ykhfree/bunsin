@@ -146,7 +146,7 @@ fn rule_words(rule: Option<&DraftRule>) -> String {
 /// When a tool is suggested, as one line above the list.
 fn thresholds_text(thresholds: Option<&AutonomyThresholds>) -> String {
     match thresholds {
-        None => "Suggestions for Autonomous are off. Set `autonomy` in the settings file to get them.".to_owned(),
+        None => "Suggestions for Autonomous are off. Set the thresholds in the Learning view to get them.".to_owned(),
         Some(t) => format!(
             "Suggested for Autonomous: a write tool at Approve with {} or more reviewed calls and {}% or more \
              approved unchanged in the last {} days. A hold starts the counts again.",
