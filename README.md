@@ -195,6 +195,13 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   start any program, in the window or in the settings file. The program runs as the user
   of the server, so it can read the data of the other profiles and the key file. Use the
   flag only on a server whose profile owners you all trust, such as a server for yourself.
+- **Coding jobs.** A profile can start coding jobs (see [Delegate coding](#delegate-coding))
+  only if the server runs with `--allow-coding --coding-repo-root <dir>`. Each repository must
+  be a git repository under that directory; the server checks it when the settings are saved
+  and when a job starts, after it follows links. The coding CLI runs as the user of the server,
+  with its own permission settings: Bunsin passes no flag that turns off its prompts or its
+  sandbox. A job keeps its worktree and transcript in `<data dir>/coding/<profile>/`; the
+  server does not remove the worktrees.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 
@@ -689,6 +696,10 @@ name). It never writes code itself and never merges. Set it up in the settings f
   and a new item in the inbox names the branch, the changes and the test result. **Review the
   branch and merge it yourself.**
 - If the server stops while a job runs, the call becomes `unknown`, like any cut call.
+- Limits: no test runs a real Claude Code or Codex CLI; the tests use `/bin/sh` as the coding
+  agent. In their default modes both CLIs may ask before they edit a file and, with no one to
+  answer, change nothing: the job then ends with no change. Bunsin adds no flag to bypass that;
+  set the CLI's own configuration on the server if you want it to edit.
 
 ![A coding call and the result of a job in the inbox](docs/screens/inbox-coding-light.png)
 

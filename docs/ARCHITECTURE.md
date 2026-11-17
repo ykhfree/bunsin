@@ -332,7 +332,7 @@
 - 결과(`CodingResult`)는 브랜치, base/head, diff 요약, 테스트 명령과 출력, 종료 상태, 기록 파일을 가진다.
 - 백엔드는 Claude Code(`-p --output-format stream-json --verbose`), Codex(`exec --json -C <작업 폴더> -`), 사용자 지정 명령이다. 지시문은 stdin으로 넘긴다.
 - 백엔드 명령에는 권한 확인이나 sandbox를 끄는 플래그가 없다. 두 CLI의 기본 모드는 파일 수정을 막을 수 있다.
-  편집을 허용하는 opt-in 설정은 아직 없고, 실제 CLI로 실행해 보지 않았다.
+  편집을 허용하는 opt-in 설정은 두지 않았고, 실제 CLI로 실행해 보지 않았다. 운영자는 서버에서 CLI 자체의 설정을 바꿀 수 있다.
 - **엔진 연결**(core `coding`, engine `coding.rs`):
   - 설정 `coding: Option<{backend, program, args, timeout_secs, repos: {이름: {path, test_command}}}>`(`serde(default)`, `deny_unknown_fields`).
     프로그램과 저장소 경로는 절대 경로, `args`는 `command` 백엔드만, 시간 한도는 1초에서 24시간, 저장소 이름은 a-z, 0-9, `-`, `_` 40자까지이다.
@@ -346,6 +346,13 @@
     `executing`이 아닌 항목의 보고는 무시한다(감사 `coding_report_ignored`).
   - 설계는 coder가 `engine.finish_coding_job`을 부르는 방식이었다. engine에 tokio와 역참조가 들어오므로, coder가 보고를 쌓고 `background_tick`이 가져가는 방식으로 바꿨다. 끝난 뒤 최대 5초 늦게 기록된다.
   - 작업 중에 서버가 멈추면 항목은 `executing`으로 남고, 다음 시작이 `unknown`으로 옮긴다(1절의 재개). 자식 프로세스는 자기 process group이라 남을 수 있다(가정).
+  - **서버 쪽**(daemon `coding.rs`): 운영자 플래그 `--allow-coding`과 `--coding-repo-root <dir>`(둘은 서로를 요구한다)가 있어야
+    `RealBackends::with_coding`이 `RealCoder`를 만든다. 없으면 `validate`가 `coding` 설정의 저장을 거부하고, `coder()`는 Err이다.
+    저장소는 `canonicalize`(링크를 따라감)한 경로가 root 아래이고 `.git`이 있어야 한다. 저장할 때(`validate`)와 시작할 때(`start`) 모두 확인한다.
+  - `RealCoder::start`는 tokio task에서 `CodingRunner`를 돌린다. worktree는 `<data>/coding/<profile>/worktrees`, transcript는 `<data>/coding/<profile>/logs`이다.
+    끝나면 transcript 파일을 읽어 `CodingReport`를 쌓고, 엔진의 `background_tick`(5초마다)이 가져간다. 백엔드는 설정의 `backend`로 고른다(`command`는 `Generic`, `args` 그대로).
+  - 테스트는 임시 git 저장소와 `/bin/sh` 명령 백엔드로 끝까지 돈다. 실제 Claude Code와 Codex는 실행하지 않았다.
+  - 한계: 두 CLI의 기본 모드는 사람이 없으면 편집을 막을 수 있다. 그때 작업은 변경 없이 끝나고, Draft가 "no change"를 보인다. 우회 플래그는 넣지 않는다.
   - 창: 대기 중인 coding 호출의 카드는 "Approve and start the job"과 "Bunsin은 병합하지 않는다"는 안내를, 실행 중인 호출은 "결과는 새 항목으로 온다"는 안내를 보인다.
 
 ## 7. 인바운드 호출 인터페이스
@@ -708,7 +715,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 프로필별 저장소, 산출물 저장, 추가 전용 감사 로그 | 구현, 테스트 있음 |
 | 엔진 파이프라인(중복 제거, 수리 1회, 정책, 승인, 1회 실행, 정지 스위치, 재현 평가의 제안 단계) | 구현, 테스트 있음 |
 | LLM 어댑터, MCP 커넥터, 코딩 위임 실행기 | 구현, 로컬 stub으로만 테스트 |
-| 코딩 위임의 엔진 연결(설정, 내장 도구, 언제나 승인, 백그라운드 시작, 결과 산출물과 Draft) | 구현, 테스트 있음(core, 엔진, 창). 엔진 테스트는 대본 coder를 쓴다. |
+| 코딩 위임(설정, 내장 도구, 언제나 승인, 운영자 플래그와 root 검사, 백그라운드 실행, 결과 산출물과 Draft) | 구현, 테스트 있음(core, 엔진, 서버, 창). 서버 테스트는 임시 git 저장소와 `/bin/sh`를 쓴다. 실제 Claude Code와 Codex는 실행하지 않았다. |
 | GPUI 창(접속 화면, 프로필, 승인함, 감사 로그, 정지 스위치, notes 열람과 편집) | 구현, headless 테스트만. 실제 창은 띄워 보지 않았다. |
 | `bunsind serve`(HTTPS 서버), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. CI가 Linux(ubuntu)에서 빌드와 테스트를 돌린다. |
 | 이벤트 폴링, 실패한 이벤트의 재시도, 도구 목록 조회와 승인 | 구현, 가짜 커넥터로만 테스트 |

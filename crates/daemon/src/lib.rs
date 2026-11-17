@@ -7,13 +7,14 @@
 //! A profile owner chooses the LLM and MCP addresses, and the server sends the requests.
 //! [`UpstreamPolicy`] stops an owner from pointing the server at its own internal network.
 
+pub mod coding;
 pub mod keystore;
 pub mod rules;
 pub mod server;
 
 use bunsin_api::ProfileConfig;
 use bunsin_connectors::{McpConnector, TokenAuth};
-use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::settings::{
     ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key, env_secret_origin, origin_of,
     valid_env_name,
@@ -127,6 +128,8 @@ pub struct RealBackends {
     /// A stdio connector runs a command on this machine. Off unless the operator allows it.
     allow_stdio: bool,
     upstream: UpstreamPolicy,
+    /// Runs coding jobs. `None` unless the operator allows coding.
+    coder: Option<Arc<coding::RealCoder>>,
 }
 
 impl RealBackends {
@@ -139,7 +142,14 @@ impl RealBackends {
             secrets,
             allow_stdio,
             upstream,
+            coder: None,
         }
+    }
+
+    /// Lets profiles run coding jobs on repositories under the root of `access`.
+    pub fn with_coding(mut self, access: coding::CodingAccess) -> Self {
+        self.coder = Some(Arc::new(coding::RealCoder::new(access)));
+        self
     }
 
     /// The token for `key`, to be sent to `address`.
@@ -307,6 +317,15 @@ impl Backends for RealBackends {
         })
     }
 
+    fn coder(&self) -> Result<Arc<dyn Coder>, String> {
+        match &self.coder {
+            Some(coder) => Ok(coder.clone()),
+            None => {
+                Err("this server does not run coding jobs: its operator did not start it with --allow-coding".into())
+            }
+        }
+    }
+
     fn has_server_secret(&self, profile: &str, key: &str) -> bool {
         secret_env_name(profile, key).is_ok_and(|name| (self.secrets)(&name).is_some_and(|value| !value.is_empty()))
     }
@@ -314,6 +333,14 @@ impl Backends for RealBackends {
     /// Refuses settings that this server will not run. Empty `llm` settings are allowed,
     /// because a profile is set up step by step.
     fn validate(&self, profile: &str, config: &ProfileConfig) -> Result<(), String> {
+        if let Some(settings) = &config.coding {
+            let coder = self.coder.as_ref().ok_or(
+                "the settings have `coding`, but the server operator did not start the server with --allow-coding",
+            )?;
+            for (name, repo) in &settings.repos {
+                coder.check_repo(name, &repo.path)?;
+            }
+        }
         if !config.llm.is_null() {
             secret_env_name(profile, &self.llm_section(&config.llm)?.token_secret)?;
         }

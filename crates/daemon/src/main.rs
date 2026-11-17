@@ -100,6 +100,14 @@ enum Command {
         /// resolves to an internal address still passes. Give the list on a shared server.
         #[arg(long = "allow-upstream-host")]
         allow_upstream_hosts: Vec<String>,
+        /// Let profiles start coding jobs: a coding agent CLI changes a repository on a new branch,
+        /// after the profile owner approves each job. The CLI runs as the user of this server, with its
+        /// own permission settings. Needs --coding-repo-root.
+        #[arg(long, requires = "coding_repo_root")]
+        allow_coding: bool,
+        /// Every repository of a coding job must be a git repository under this directory.
+        #[arg(long, requires = "allow_coding")]
+        coding_repo_root: Option<PathBuf>,
         /// Where the key is kept that encrypts tokens which owners store on the server.
         /// `keychain`: the login Keychain of this Mac. `file`: a key file.
         /// The default is `keychain` on macOS and `file` on other systems. A server on a Mac
@@ -833,6 +841,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             tls_key,
             allow_stdio_connectors,
             allow_upstream_hosts,
+            allow_coding,
+            coding_repo_root,
             key_store,
             accept_new_key,
             master_key_file,
@@ -841,7 +851,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
-            let backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
+            let mut backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
+            if let (true, Some(repo_root)) = (allow_coding, coding_repo_root) {
+                let access = bunsin_daemon::coding::CodingAccess {
+                    repo_root,
+                    data_dir: local.data_dir.clone(),
+                };
+                backends = backends.with_coding(access);
+            }
             let store = bunsin_daemon::keystore::key_store(
                 std::env::consts::OS,
                 key_store.as_deref(),

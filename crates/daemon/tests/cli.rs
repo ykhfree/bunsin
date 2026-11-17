@@ -755,3 +755,16 @@ fn a_preload_needs_a_tool_with_a_read_rule() {
     );
     assert!(error.contains("has no rule with the class `read`"), "{error}");
 }
+
+#[test]
+fn coding_needs_both_operator_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    for flags in [vec!["--allow-coding"], vec!["--coding-repo-root", root]] {
+        let output = operator(dir.path(), &[["serve"].as_slice(), flags.as_slice()].concat());
+        // clap refuses the arguments before the server starts.
+        assert_eq!(output.status.code(), Some(2), "{flags:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("required"), "{error}");
+    }
+}
