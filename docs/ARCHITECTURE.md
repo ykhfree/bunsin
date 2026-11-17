@@ -6,11 +6,15 @@
 ## 1. 프로세스
 
 ```
-[서버]   bunsind serve ── engine ── llm, connectors, store, core
-              ▲
-              │  HTTPS + 프로필별 접속 token   (bunsin-api::http)
-              ▼
-[내 컴퓨터]  GPUI app, bunsind의 원격 명령   (bunsin-client)
+[서버]   bunsind serve ─┬─ engine ── store, ard, core
+                        └─ RealBackends ── llm, connectors, coding   (엔진은 Backends trait으로 받는다)
+            ▲                                    ▲
+            │ 제어 리스너 --listen                │ 내부·공개 리스너 --internal-listen, --public-listen
+            │ HTTPS + 프로필별 접속 token          │ 인바운드 MCP(호출자 token), server card,
+            │ (bunsin-api::http)                 │ ARD catalog, webhook(서명)
+            ▼                                    ▼
+[내 컴퓨터]  GPUI app, bunsind의 원격 명령        [다른 사람의 agent, ARD client, Slack, Jira Cloud]
+            (bunsin-client)
 ```
 
 - 엔진은 서버의 `bunsind serve` 프로세스 안에서만 돈다. 화면이 없는 서버에서 동작한다.
@@ -83,17 +87,20 @@
 
 | Crate | 역할 | 의존 |
 |---|---|---|
-| `bunsin-core` | 정책, 제안 검증, 승인 상태 머신, AI 표시, 도구 pin 비교, `LlmClient`와 `Connector` trait. IO가 없다. | 없음 |
-| `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그 | core |
+| `bunsin-core` | 정책, 제안 검증, 승인 상태 머신, AI 표시, 도구 pin 비교, 설정 형식, `LlmClient`·`Connector`·`Coder` trait. IO가 없다. | 없음 |
+| `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그, 봉인된 비밀 값의 행 | core |
 | `bunsin-llm` | LLM 어댑터 | core |
 | `bunsin-connectors` | MCP 커넥터, REST API 커넥터, webhook 서명 검사와 해석 | core |
-| `bunsin-coding` | 코딩 위임 실행기 | core |
-| `bunsin-engine` | 하네스 파이프라인 | core, store, llm, connectors, coding |
+| `bunsin-ard` | ARD 항목 검사, catalog, registry 검색 client | 없음 |
+| `bunsin-coding` | 코딩 위임 실행기(git worktree, 코딩 CLI 백엔드) | 없음 |
 | `bunsin-api` | `EngineApi` trait과 DTO, HTTP 경로와 요청 본문(`http` 모듈) | core |
-| `bunsin-client` | `RemoteEngine`: HTTPS로 서버에 접속하는 `EngineApi` 구현 | api |
-| `bunsin-daemon` | HTTP 서버, 프로필 설정으로 실제 LLM client와 커넥터를 만드는 `RealBackends`, 실행 파일 `bunsind` | engine, api, client, llm, connectors, store |
-| `bunsin-app` | GPUI 창 | api, client |
+| `bunsin-engine` | 하네스 파이프라인, `EngineApi`의 구현, 비밀 값 봉인(`secrets.rs`). LLM, 커넥터, 코딩 실행기는 `Backends` trait으로 받는다. | api, ard, core, store |
+| `bunsin-client` | `RemoteEngine`: HTTPS로 서버에 접속하는 `EngineApi` 구현 | api, core |
+| `bunsin-daemon` | HTTP 서버와 리스너, 프로필 설정으로 실제 LLM client, 커넥터, ARD 검색, 코딩 실행기를 만드는 `RealBackends`, 실행 파일 `bunsind` | api, ard, client, coding, connectors, core, engine, llm, store |
+| `bunsin-app` | GPUI 창 | api, client, core |
 | `bunsin-testkit` | 테스트용 가짜 LLM, 가짜 커넥터 | core |
+
+- 의존 열은 workspace crate만 적는다. 일반 의존이고, dev 의존은 뺐다 (검증: crate마다 `cargo tree -p <crate> --depth 1 -e normal`, 2026-11-17).
 
 - `bunsin-core`는 tokio, reqwest, rusqlite, gpui에 의존하지 않는다. 시각은 호출자가 넣는다.
 - `bunsin-daemon`의 의존성 트리에 gpui가 없어야 한다. CI가 이를 검사한다.
@@ -155,7 +162,8 @@
   - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
   - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인), 개인정보 설정, notes 설정, 평가 설정.
   - Setup: 새 agent의 구성 마법사. 아래 "Setup 화면" 항목.
-- 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `remove_connector`, `privacy`, `set_privacy`).
+- 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `set_command_connector`, `set_api_connector`, `remove_connector`,
+  `privacy`, `set_privacy`, 그리고 아래 "부분 저장 카드"의 `notes_settings`, `eval_settings`와 그 저장).
   app은 설정 전체를 읽거나 쓰지 않는다.
 - 설정 화면의 입력 내용은 사용자의 초안이다. 5초마다의 새로고침은 초안을 덮어쓰지 않는다. 프로필을 바꾸면 초안을 버린다.
 - token 입력칸은 가려져 있다. token은 입력칸에서 명령으로만 이동하고, 화면 상태나 label에 들어가지 않는다. 저장에 성공하면 입력칸을 비운다.
@@ -255,7 +263,8 @@
   - write/delete 규칙은 `--text`나 `--no-text`가 없으면 서버에 묻기 전에 거부된다. 창과 같은 규칙이다.
   - `--text`가 최상위 인자 하나이면 `arg` 형식, 그 밖에는 `paths` 형식으로 저장한다(8절). 창이 다른 값 안의 자리를 만들 수 없으므로 이 명령이 그 경로이다.
   - delete에 `autonomous`는 거부한다. 창도 그 버튼을 주지 않는다. 승인되지 않은 도구의 규칙도 저장된다(`rules`가 표시한다).
-- 한계: 다른 client가 같은 설정을 바꾼 뒤에 Save를 누르면 그 변경을 덮어쓴다. 충돌을 알리지 않는다.
+- 한계: 창의 모든 설정 저장은 읽은 값을 `Expected`로 보낸다(14절). 비교하는 값에 token은 없다.
+  그래서 다른 client가 token만 바꾼 뒤의 저장은 충돌로 알리지 않는다.
 - Disconnect는 Keychain의 token을 지우고 접속 화면으로 돌아간다.
 - 개발할 때는 환경 변수 `BUNSIN_SERVER`와 `BUNSIN_TOKEN`이 저장된 접속보다 우선한다.
 - 저장된 접속으로 시작했는데 서버가 응답하지 않으면 app은 접속 화면에 오류를 보여 준다. 저장된 token은 그대로 둔다.
@@ -941,18 +950,18 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 엔진 파이프라인(중복 제거, 수리 1회, 정책, 승인, 1회 실행, 정지 스위치, 재현 평가의 제안 단계) | 구현, 테스트 있음 |
 | LLM 어댑터, MCP 커넥터, 코딩 위임 실행기 | 구현, 로컬 stub으로만 테스트 |
 | 코딩 위임(설정, 내장 도구, 언제나 승인, 운영자 플래그와 root 검사, 백그라운드 실행, 결과 산출물과 Draft) | 구현, 테스트 있음(core, 엔진, 서버, 창). 서버 테스트는 임시 git 저장소와 `/bin/sh`를 쓴다. 실제 Claude Code와 Codex는 실행하지 않았다. |
-| GPUI 창(접속 화면, 프로필, 승인함, 감사 로그, 정지 스위치, notes 열람과 편집) | 구현, headless 테스트만. 실제 창은 띄워 보지 않았다. |
-| `bunsind serve`(HTTPS 서버), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. CI가 Linux(ubuntu)에서 빌드와 테스트를 돌린다. |
+| GPUI 창(접속 화면, 프로필, 정지 스위치, Inbox와 감사 로그, Notes, Permissions, Agent, Learning, Settings, Setup) | 구현, headless 테스트와 offscreen 그림만. 실제 창은 띄워 보지 않았다. |
+| `bunsind serve`(HTTPS 서버, 제어·내부·공개 리스너), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. CI가 Linux(ubuntu)에서 빌드와 테스트를 돌린다. Linux에서 서비스로 실행해 보지는 않았다. |
 | 이벤트 폴링, 실패한 이벤트의 재시도, 도구 목록 조회와 승인 | 구현, 가짜 커넥터로만 테스트 |
 | 개인정보 필터(기본 4종, 사용자 정의 패턴, 단어 목록) | 구현, 테스트 있음 |
-| 연결 설정과 token의 서버 저장(암호화, 주소 결합) | 구현, 테스트 있음 |
+| 연결 설정과 봉인 저장소(`secrets.rs`: 소유자가 넣은 token, 비밀 환경 변수, OAuth credentials, webhook secret. XChaCha20-Poly1305, 키 파일이나 Keychain, origin 결합) | 구현, 테스트 있음. 키의 Keychain 저장은 가짜 Keychain으로만 테스트했다. |
 | webhook 방식의 이벤트 수신(Slack, Jira Cloud: 서명, url_verification, 전달 ID 중복 제거, intake, 자기 글, 설정 검사, 봉인된 secret) | 구현, 테스트 있음(core, store, 서버, CLI 명령, 창). 실제 Slack과 Jira로는 보내 보지 않았다. |
 | 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 구현, 테스트 있음. 커넥터 문서의 색인과 순위는 없음. |
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
 | agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검, opt-in 자동 반영, 미리 읽기) | 구현, 테스트 있음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
-| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 Setup 화면에서만 사례를 추가한다. |
+| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 Setup 화면에서만 사례를 추가한다. 통과 기준과 심판은 Settings 화면에서 정한다. |
 | 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령과 Setup 화면에 있다. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
@@ -968,10 +977,10 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 
 ## 17. 미해결
 
-- 사용자의 LLM endpoint가 쓰는 wire 형식.
 - 코딩 백엔드의 편집 허용 설정(예: Claude Code의 permission mode, Codex의 sandbox 설정)을 opt-in으로 둘지.
 - 평문 `env`에 이미 들어 있는 비밀 값을 비밀 변수로 옮기는 기능. 지금은 사용자가 다시 입력하고 평문 줄을 지운다.
 - 설정 파일이나 CLI로 비밀 변수의 값을 넣는 방법. 지금은 창에서만 입력한다.
 - OAuth를 창이나 `connector-set`에서 켜는 방법. 지금은 설정 파일로만 켠다.
 - 임베딩 검색의 제공 여부.
-- 라이선스.
+- macOS 앱의 bundle ID와 Developer ID 서명의 주체. 지금은 서명하지 않고, bundle ID는 로컬용 기본값이다. 앱 아이콘도 없다.
+- 인바운드 호출자의 OAuth. 지금은 호출자 token만 있다.

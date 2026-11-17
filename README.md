@@ -35,8 +35,17 @@ Bunsin is in early development. Read this list before you use it.
 - **OAuth for MCP servers is turned on in the settings file only.** The window and the
   command line then sign in (see [LLM endpoint and connectors](#llm-endpoint-and-connectors)).
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
-  a real MCP server, a real OAuth provider, or the real Slack, Jira or Confluence API.
-- **The desktop window is tested headlessly.** The Keychain storage has no test.
+  a real MCP server, a real OAuth provider, a real ARD registry, or the real Slack, Jira or
+  Confluence API. No test runs a real coding CLI (Claude Code, Codex); the coding tests use
+  `/bin/sh` and temporary git repositories.
+- **The desktop window is tested headlessly.** Tests drive the views without a screen, and the
+  pictures in `docs/screens` are drawn offscreen. Nobody has opened the real window and used it.
+  The Keychain storage has no test. `Bunsin.app` is not signed.
+- **Linux runs only in CI.** CI builds and tests the server on Ubuntu and builds the server
+  package. Nobody has run the server on a Linux machine or started its systemd unit.
+- **Not built yet:** OAuth for callers of the inbound endpoint (they use caller tokens), the LLM
+  usage in the window (`bunsind llm-usage` only), a command-line setup wizard, turning OAuth for
+  MCP servers on outside the settings file, and a check of a note page when you lose access to its source.
 - **The server operator can read profile data.** Profiles are isolated from each other,
   not from a person with access to the server's files.
 
@@ -49,7 +58,7 @@ and [docs/PLAN.md](docs/PLAN.md) has the plan (both in Korean).
 |---|---|---|
 | `bunsind serve` | The server. It runs the agents and stores their data. | Linux or macOS |
 | `bunsind <command>` | The command line of an operator or a profile owner. | Linux or macOS |
-| `bunsin-app` | The desktop window: approval inbox, audit log, kill switch, notes, settings. | macOS |
+| `bunsin-app` | The desktop window: approval inbox, audit log, kill switch, notes, permissions, agent settings, learning, settings, setup. | macOS |
 
 ## Build and test
 
@@ -521,7 +530,8 @@ The server counts your decisions about each write or delete tool: calls you appr
 unchanged, edited or dismissed, and calls that ran without asking (and how many failed).
 The Permissions view shows the counts under each tool.
 
-- **Suggestions.** Set thresholds in the settings file. Without them nothing is suggested.
+- **Suggestions.** Set thresholds in the settings file or in the **Autonomy suggestions** card of the
+  Learning view. Without them nothing is suggested.
 
   ```json
   { "autonomy": { "min_reviewed": 20, "min_unchanged_percent": 90, "window_days": 30 } }
