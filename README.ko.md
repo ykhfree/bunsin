@@ -252,6 +252,7 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   REST API 커넥터에는 token이 있어야 하고, `--token-header`는 받지 않습니다.
   도구 승인과 도구별 규칙은 MCP 서버와 같습니다. AI 표시는 규칙이 글 자리로 정한 곳(예: `{"arg": "text"}`)에 붙습니다.
   주소 규칙과 token의 origin 결합은 base URL에 적용됩니다. 요청 모양은 공식 API 문서를 따랐고, 실제 서비스로는 시험하지 않았습니다.
+  요청 하나는 30초 안에 끝나야 합니다. 그 안에 답하지 않으면 오류가 됩니다.
 - 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token이나 주소 커넥터의 token을 읽습니다.
   항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.
   token은 서버로 한 번 복사됩니다. 이후 Keychain에서 값을 바꿔도 서버에는 반영되지 않습니다.

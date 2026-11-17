@@ -14,6 +14,8 @@ use std::time::Duration;
 
 const TOKEN: &str = "test-token-5f2c9a";
 const EMAIL: &str = "owner@example.com";
+/// The request time limit of the tests that expect an answer.
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One request as the stub received it.
 #[derive(Debug, Clone)]
@@ -94,7 +96,14 @@ fn pair(key: &str, value: &str) -> (String, String) {
 
 #[tokio::test]
 async fn lists_the_fixed_tools_and_the_same_list_each_time() {
-    let connector = ApiConnector::new("jira", ApiService::Jira, "https://example.atlassian.net", basic()).unwrap();
+    let connector = ApiConnector::new(
+        "jira",
+        ApiService::Jira,
+        "https://example.atlassian.net",
+        basic(),
+        TIMEOUT,
+    )
+    .unwrap();
     let first = connector.list_tools().await.unwrap();
     let names: Vec<&str> = first.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["search_issues", "get_issue", "add_comment"]);
@@ -112,7 +121,7 @@ async fn lists_the_fixed_tools_and_the_same_list_each_time() {
 async fn slack_post_message_sends_bearer_and_json_body() {
     let answer = json!({"ok": true, "channel": "C1", "ts": "1503435956.000247"});
     let (base, seen) = stub(ok(answer.clone())).await;
-    let connector = ApiConnector::new("slack", ApiService::Slack, &format!("{base}/api"), bearer()).unwrap();
+    let connector = ApiConnector::new("slack", ApiService::Slack, &format!("{base}/api"), bearer(), TIMEOUT).unwrap();
 
     let result = connector
         .call_tool(
@@ -141,7 +150,7 @@ async fn slack_post_message_sends_bearer_and_json_body() {
 #[tokio::test]
 async fn slack_reads_put_the_arguments_in_the_query() {
     let (base, seen) = stub(ok(json!({"ok": true, "messages": {"matches": []}}))).await;
-    let connector = ApiConnector::new("slack", ApiService::Slack, &format!("{base}/api/"), bearer()).unwrap();
+    let connector = ApiConnector::new("slack", ApiService::Slack, &format!("{base}/api/"), bearer(), TIMEOUT).unwrap();
 
     connector
         .call_tool(
@@ -176,7 +185,7 @@ async fn slack_ok_false_becomes_failed_with_the_error_code() {
         json!({"ok": false, "error": "missing_scope", "needed": "search:read"}),
     ))
     .await;
-    let connector = ApiConnector::new("slack", ApiService::Slack, &base, bearer()).unwrap();
+    let connector = ApiConnector::new("slack", ApiService::Slack, &base, bearer(), TIMEOUT).unwrap();
 
     let error = connector
         .call_tool("search_messages", args(json!({"query": "x"})))
@@ -192,7 +201,7 @@ async fn slack_ok_false_becomes_failed_with_the_error_code() {
 #[tokio::test]
 async fn jira_uses_basic_auth_and_sends_the_comment_as_adf() {
     let (base, seen) = stub(Arc::new(|_| (StatusCode::CREATED, json!({"id": "10000"}).to_string()))).await;
-    let connector = ApiConnector::new("jira", ApiService::Jira, &base, basic()).unwrap();
+    let connector = ApiConnector::new("jira", ApiService::Jira, &base, basic(), TIMEOUT).unwrap();
 
     let result = connector
         .call_tool(
@@ -224,7 +233,7 @@ async fn jira_uses_basic_auth_and_sends_the_comment_as_adf() {
 #[tokio::test]
 async fn jira_search_and_get_use_the_documented_paths() {
     let (base, seen) = stub(ok(json!({"issues": []}))).await;
-    let connector = ApiConnector::new("jira", ApiService::Jira, &base, bearer()).unwrap();
+    let connector = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
 
     connector
         .call_tool(
@@ -255,7 +264,7 @@ async fn jira_search_and_get_use_the_documented_paths() {
 #[tokio::test]
 async fn confluence_tools_use_the_wiki_paths_and_escape_the_page_text() {
     let (base, seen) = stub(ok(json!({"id": "123"}))).await;
-    let connector = ApiConnector::new("confluence", ApiService::Confluence, &base, basic()).unwrap();
+    let connector = ApiConnector::new("confluence", ApiService::Confluence, &base, basic(), TIMEOUT).unwrap();
 
     connector
         .call_tool(
@@ -314,8 +323,8 @@ async fn http_errors_become_failed_with_the_api_messages() {
         }
     }))
     .await;
-    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer()).unwrap();
-    let confluence = ApiConnector::new("confluence", ApiService::Confluence, &base, bearer()).unwrap();
+    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
+    let confluence = ApiConnector::new("confluence", ApiService::Confluence, &base, bearer(), TIMEOUT).unwrap();
 
     let error = jira
         .call_tool("get_issue", args(json!({"issue": "NO-1"})))
@@ -342,7 +351,7 @@ async fn http_errors_become_failed_with_the_api_messages() {
 #[tokio::test]
 async fn a_success_that_is_not_json_is_a_transport_error() {
     let (base, _) = stub(Arc::new(|_| (StatusCode::OK, "<html>login</html>".into()))).await;
-    let connector = ApiConnector::new("jira", ApiService::Jira, &base, bearer()).unwrap();
+    let connector = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
     let error = connector
         .call_tool("get_issue", args(json!({"issue": "PROJ-1"})))
         .await
@@ -365,7 +374,7 @@ async fn an_echoed_token_is_redacted_from_errors_and_debug() {
         (ApiService::Jira, basic(), "get_issue", json!({"issue": "PROJ-1"})),
         (ApiService::Confluence, bearer(), "get_page", json!({"page_id": "1"})),
     ] {
-        let connector = ApiConnector::new("svc", service, &base, auth).unwrap();
+        let connector = ApiConnector::new("svc", service, &base, auth, TIMEOUT).unwrap();
         let error = connector.call_tool(tool, args(tool_args)).await.unwrap_err();
         let text = error.to_string();
         assert!(text.contains("HTTP 401"), "{text}");
@@ -381,7 +390,7 @@ async fn an_echoed_token_is_redacted_from_errors_and_debug() {
 
     // A Slack error code that echoes the token is redacted too.
     let (base, _) = stub(ok(json!({"ok": false, "error": format!("invalid_auth {TOKEN}")}))).await;
-    let slack = ApiConnector::new("slack", ApiService::Slack, &base, bearer()).unwrap();
+    let slack = ApiConnector::new("slack", ApiService::Slack, &base, bearer(), TIMEOUT).unwrap();
     let error = slack
         .call_tool("get_thread", args(json!({"channel": "C1", "ts": "1.2"})))
         .await
@@ -402,7 +411,7 @@ async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/api", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, redirector).await });
-    let connector = ApiConnector::new("slack", ApiService::Slack, &base, bearer()).unwrap();
+    let connector = ApiConnector::new("slack", ApiService::Slack, &base, bearer(), TIMEOUT).unwrap();
 
     let error = tokio::time::timeout(
         Duration::from_secs(10),
@@ -422,8 +431,8 @@ async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host(
 #[tokio::test]
 async fn bad_arguments_and_unknown_tools_send_no_request() {
     let (base, seen) = stub(ok(json!({"ok": true}))).await;
-    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer()).unwrap();
-    let slack = ApiConnector::new("slack", ApiService::Slack, &base, bearer()).unwrap();
+    let jira = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), TIMEOUT).unwrap();
+    let slack = ApiConnector::new("slack", ApiService::Slack, &base, bearer(), TIMEOUT).unwrap();
 
     let error = jira.call_tool("delete_issue", Map::new()).await.unwrap_err();
     assert_eq!(error, ConnectorError::UnknownTool("delete_issue".into()));
@@ -495,7 +504,7 @@ async fn a_dead_address_is_a_transport_error_without_the_token() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
-    let connector = ApiConnector::new("jira", ApiService::Jira, &base, basic()).unwrap();
+    let connector = ApiConnector::new("jira", ApiService::Jira, &base, basic(), TIMEOUT).unwrap();
 
     let error = connector
         .call_tool("get_issue", args(json!({"issue": "PROJ-1"})))
@@ -509,10 +518,10 @@ async fn a_dead_address_is_a_transport_error_without_the_token() {
 #[test]
 fn new_rejects_a_bad_base_url_and_basic_auth_for_slack() {
     for url in ["ftp://example.com", "not a url", "https://example.com/?a=1"] {
-        let error = ApiConnector::new("jira", ApiService::Jira, url, bearer()).unwrap_err();
+        let error = ApiConnector::new("jira", ApiService::Jira, url, bearer(), TIMEOUT).unwrap_err();
         assert!(matches!(error, ConnectorError::Transport(_)), "{url}: {error:?}");
     }
-    let error = ApiConnector::new("slack", ApiService::Slack, SLACK_BASE_URL, basic()).unwrap_err();
+    let error = ApiConnector::new("slack", ApiService::Slack, SLACK_BASE_URL, basic(), TIMEOUT).unwrap_err();
     assert_eq!(
         error,
         ConnectorError::Transport("Slack accepts only a bearer token".into())
@@ -522,7 +531,43 @@ fn new_rejects_a_bad_base_url_and_basic_auth_for_slack() {
         ApiService::Slack,
         SLACK_BASE_URL,
         ApiAuth::Bearer("a\nb".into()),
+        TIMEOUT,
     )
     .unwrap_err();
     assert!(!error.to_string().contains("a\nb"));
+}
+
+/// A stub that accepts connections and reads requests, but never answers.
+async fn silent_stub() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            // Keep the socket open, so the client waits for an answer.
+            held.push(socket);
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_server_that_never_answers_ends_the_call_at_the_time_limit() {
+    let base = silent_stub().await;
+    let limit = Duration::from_millis(300);
+    let connector = ApiConnector::new("jira", ApiService::Jira, &base, bearer(), limit).unwrap();
+
+    let started = std::time::Instant::now();
+    // The outer limit only stops a hung test. The connector must end the call first.
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        connector.call_tool("get_issue", args(json!({"issue": "PROJ-1"}))),
+    )
+    .await
+    .expect("the call must end at the connector's time limit")
+    .unwrap_err();
+
+    assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+    assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
+    assert!(!error.to_string().contains(TOKEN));
 }

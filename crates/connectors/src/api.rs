@@ -13,6 +13,7 @@ use reqwest::Url;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::{Map, Value, json};
 use std::fmt;
+use std::time::Duration;
 
 /// The longest API error detail that goes into an error text, in characters.
 const MAX_DETAIL_CHARS: usize = 300;
@@ -40,11 +41,13 @@ pub struct ApiConnector {
 
 impl ApiConnector {
     /// Checks the base URL and the credentials. It sends no request.
+    /// `timeout` limits each request, from the connect to the last byte of the answer.
     pub fn new(
         name: impl Into<String>,
         service: ApiService,
         base_url: &str,
         auth: ApiAuth,
+        timeout: Duration,
     ) -> Result<Self, ConnectorError> {
         let base = Url::parse(base_url)
             .ok()
@@ -66,8 +69,11 @@ impl ApiConnector {
         header.set_sensitive(true);
         // A redirect could carry the token to another host, and could reach a host
         // that the server's address rules refused. The client therefore follows none.
+        // A server that never answers must not hold the event that called the tool.
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(timeout)
+            .timeout(timeout)
             .build()
             .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))?;
         Ok(Self {
@@ -594,6 +600,7 @@ mod tests {
             ApiService::Jira,
             "https://x.example",
             ApiAuth::Bearer("t".into()),
+            Duration::from_secs(1),
         )
         .unwrap();
         let long = "가".repeat(MAX_DETAIL_CHARS + 10);

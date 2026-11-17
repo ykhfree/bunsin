@@ -590,6 +590,7 @@
   창의 종류 **REST API**(서비스, base URL, 인증 방식, email, token). 창은 Slack을 고르면 `https://slack.com/api`를 채운다.
   REST API 커넥터의 token은 창에서 지울 수 없다. token이 없으면 쓸 수 없기 때문이다.
 - HTTP client는 redirect를 따르지 않는다. 오류 문구에서 token과 basic 인코딩 값을 지운다.
+- 요청 하나는 30초 안에 끝나야 한다(MCP 커넥터의 연결 한도와 같은 `CONNECT_TIMEOUT`). 답하지 않는 서버는 이벤트 처리를 막지 못하고 transport 오류가 된다.
 - 요청 모양은 공식 API 문서를 따랐다. 테스트는 로컬 stub(daemon `tests/api_connectors.rs`)으로 도구 목록, 승인, 규칙, 읽기, 승인 뒤 쓰기와 AI 표시를 끝까지 돈다.
   실제 서비스로는 실행하지 않았다.
 

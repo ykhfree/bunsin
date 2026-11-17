@@ -293,7 +293,8 @@ bunsind connector-remove kim jira                # removes the connector and its
   `--token-header`. You approve its tools and give each a rule, as for an MCP server; the
   AI marker goes where the rule names the text, for example `{"arg": "text"}`. The address
   rules and the binding of the token to the origin apply to the base URL. The request
-  shapes follow the official API docs; no test ran against the real services.
+  shapes follow the official API docs; no test ran against the real services. Each request
+  must end in 30 seconds; a service that does not answer in time gives an error.
 - In the window, **Copy the token from the Keychain** reads the LLM token or the token of
   an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.

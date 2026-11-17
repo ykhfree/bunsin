@@ -328,7 +328,8 @@ impl RealBackends {
                     (ApiAuthMethod::Basic, Some(email)) => ApiAuth::Basic { email, token },
                     _ => ApiAuth::Bearer(token),
                 };
-                let connector = ApiConnector::new(name, api.service, &api.base_url, auth)
+                // Each request gets the time limit of an MCP connect.
+                let connector = ApiConnector::new(name, api.service, &api.base_url, auth, CONNECT_TIMEOUT)
                     .map_err(|e| format!("connector `{name}` cannot start: {e}"))?;
                 return Ok(Arc::new(connector));
             }
