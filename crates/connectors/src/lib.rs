@@ -19,8 +19,13 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 pub use bunsin_core::settings::McpConfig;
+
+/// How long a tool call of an MCP connector may take, with the tool list that comes first.
+/// Tools can be slow, so the limit is generous. A call that runs out is cancelled on the server.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The token of an HTTP connector and the header that carries it.
 #[derive(Clone, Copy)]
@@ -42,6 +47,8 @@ pub struct McpConnector {
     name: String,
     config: McpConfig,
     client: RunningService<RoleClient, ()>,
+    /// The time limit of one tool call. `CALL_TIMEOUT` unless changed.
+    call_timeout: Duration,
 }
 
 impl McpConnector {
@@ -137,7 +144,18 @@ impl McpConnector {
         client
             .set_response_cache_config(rmcp::ClientCacheConfig::disabled())
             .await;
-        Self { name, config, client }
+        Self {
+            name,
+            config,
+            client,
+            call_timeout: CALL_TIMEOUT,
+        }
+    }
+
+    /// The same connector with another time limit for each tool call.
+    pub fn with_call_timeout(mut self, limit: Duration) -> Self {
+        self.call_timeout = limit;
+        self
     }
 
     async fn list_all(&self) -> Result<Vec<ToolSpec>, ConnectorError> {
@@ -172,9 +190,19 @@ impl Connector for McpConnector {
         Box::pin(self.list_all())
     }
 
+    /// A server that never answers must not hold the event that called the tool. At the time
+    /// limit the request is dropped, and rmcp tells the server that it is cancelled.
     fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>> {
         let tool = tool.to_owned();
-        Box::pin(async move { self.call(&tool, args).await })
+        Box::pin(async move {
+            match tokio::time::timeout(self.call_timeout, self.call(&tool, args)).await {
+                Ok(result) => result,
+                Err(_) => Err(ConnectorError::Transport(format!(
+                    "the call of `{tool}` did not end in {} s and was cancelled; the server may have done it anyway",
+                    self.call_timeout.as_secs_f64()
+                ))),
+            }
+        })
     }
 }
 

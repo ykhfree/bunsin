@@ -21,6 +21,10 @@ pub struct TestServer {
     pub calls: Arc<Mutex<Vec<Call>>>,
     /// The number of `tools/list` requests.
     pub list_requests: Arc<Mutex<usize>>,
+    /// While true, a call does not answer until the client cancels it.
+    pub hang: Arc<Mutex<bool>>,
+    /// The number of calls that the client cancelled.
+    pub cancelled: Arc<Mutex<usize>>,
 }
 
 fn object(value: Value) -> JsonObject {
@@ -77,12 +81,18 @@ impl ServerHandler for TestServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         self.calls
             .lock()
             .unwrap()
             .push((request.name.to_string(), request.arguments.clone()));
+        let hang = *self.hang.lock().unwrap();
+        if hang {
+            context.ct.cancelled().await;
+            *self.cancelled.lock().unwrap() += 1;
+            return Err(McpError::internal_error("cancelled", None));
+        }
         let result = match request.name.as_ref() {
             "echo" => CallToolResult::structured(Value::Object(request.arguments.unwrap_or_default())),
             "plain" => CallToolResult::success(vec![ContentBlock::text("first"), ContentBlock::text("second")]),

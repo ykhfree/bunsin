@@ -565,6 +565,9 @@
 - stdio 명령은 절대 경로만 받는다.
 - rmcp의 도구 목록 cache를 끈다. cache된 목록은 서버의 변경을 숨겨 pin 검사를 무력하게 만들기 때문이다.
 - 연결은 30초 안에 끝나야 한다. 시간이 지나면 `RealBackends`가 오류를 돌려준다.
+- 도구 호출 하나는 앞의 도구 목록 조회까지 120초(`CALL_TIMEOUT`) 안에 끝나야 한다. 도구가 느릴 수 있어 넉넉히 잡았다.
+  시간이 지나면 요청을 버리고, rmcp가 서버에 `notifications/cancelled`를 보낸다. 오류는 transport 오류이다.
+  쓰기 도구라면 서버가 이미 실행했을 수 있다. 엔진은 다른 호출 오류처럼 `failed`로 둔다. OAuth 커넥터도 같다.
 - 커넥터는 권한을 판단하지 않는다. 엔진이 호출 전에 정책과 pin을 검사한다.
 - HTTP transport는 token을 `Authorization: Bearer <token>`으로 보내거나, OAuth로 받은 access token을 보낸다(아래 **OAuth**).
   커넥터 설정의 `token_header`가 있으면 그 헤더가 token을 그대로 담는다(예: `X-API-Key`).

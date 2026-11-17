@@ -245,6 +245,8 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - 커넥터에는 token이 없어도 됩니다. token을 빼고 저장하면 됩니다. token은 `Authorization: Bearer <token>`으로 갑니다.
   MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
   그 커넥터에 `connector-set`을 실행할 때마다 `--token-header`를 주십시오. 빼면 `Authorization: Bearer`로 돌아갑니다.
+- MCP 커넥터의 도구 호출 하나는 2분 안에 끝나야 합니다. 더 걸리면 호출을 취소하고 오류가 됩니다.
+  다만 MCP 서버가 그 호출을 이미 실행했을 수 있습니다.
 - **OAuth.** 주소로 접속하는 MCP 서버는 token 대신 OAuth 로그인을 쓸 수 있습니다.
   설정 파일에서 켭니다: 커넥터에 `"oauth": {}`를 넣고 token은 빼고 `config-set`을 실행합니다. 예:
   `"docs": {"mcp": {"transport": "http", "url": "https://mcp.example.com/docs"}, "oauth": {}}`.

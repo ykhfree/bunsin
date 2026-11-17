@@ -368,3 +368,44 @@ async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host(
     assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
     assert_eq!(with_token.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn a_call_that_does_not_end_in_time_is_cancelled_on_the_server() {
+    let server = TestServer::default();
+    *server.hang.lock().unwrap() = true;
+    let limit = Duration::from_millis(300);
+    let connector = connect_http(&server).await.with_call_timeout(limit);
+
+    let started = std::time::Instant::now();
+    // The outer limit only stops a hung test. The connector must end the call first.
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        connector.call_tool("echo", args(json!({"text": "hi"}))),
+    )
+    .await
+    .expect("the call must end at the connector's time limit")
+    .unwrap_err();
+    assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+    match &error {
+        ConnectorError::Transport(text) => assert!(
+            text.contains("`echo` did not end in 0.3 s") && text.contains("may have done it"),
+            "{text}"
+        ),
+        other => panic!("expected a transport error, got {other:?}"),
+    }
+
+    // The server hears that the client gave up on the call.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while *server.cancelled.lock().unwrap() == 0 {
+        assert!(std::time::Instant::now() < deadline, "the server was not told");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The session stays usable.
+    *server.hang.lock().unwrap() = false;
+    let result = connector
+        .call_tool("echo", args(json!({"text": "again"})))
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"text": "again"}));
+}

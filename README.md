@@ -285,6 +285,8 @@ bunsind connector-remove kim jira                # removes the connector and its
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every
   `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
+- A tool call of an MCP connector must end in 2 minutes. A call that runs longer is
+  cancelled and gives an error, but the MCP server may have done it anyway.
 - **OAuth.** An MCP server at an address can take a sign-in with OAuth instead of a token.
   Turn it on in the settings file: give the connector `"oauth": {}` and no token, then
   `config-set`. For example:
