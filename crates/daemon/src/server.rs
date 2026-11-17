@@ -13,7 +13,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
     AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
     DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody,
-    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
+    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, WebhookSecretBody, status_of,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate,
@@ -633,6 +633,16 @@ async fn inbound_status(
     Ok(Json(engine.inbound_status(&profile).await?))
 }
 
+async fn put_webhook_secret(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, name)): Path<(String, String)>,
+    Json(body): Json<WebhookSecretBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_webhook_secret(&profile, &name, body.secret).await?))
+}
+
 async fn revoke_caller_token(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -692,6 +702,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("callers"), get(caller_tokens).post(add_caller_token))
         .route(&profile("callers/{id}"), axum::routing::delete(revoke_caller_token))
         .route(&profile("inbound"), get(inbound_status))
+        .route(&profile("webhooks/{name}/secret"), put(put_webhook_secret))
         .route(&profile("connections"), get(get_connections))
         .route(&profile("connections/llm"), put(put_llm))
         .route(
@@ -900,7 +911,7 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
 }
 
 /// Starts an outer listener and returns when it is listening. Nothing of the control API is on it.
-/// A question that a caller asks there signals `wake`.
+/// A question that a caller asks there, or a stored webhook delivery, signals `wake`.
 pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig, wake: Arc<Notify>) -> Result<Running, ServeError> {
     config.check()?;
     // The catalogs and the owner's inbound status name the address that callers use.
@@ -908,7 +919,8 @@ pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig, wake: Arc<Not
         scope: config.reach.scope(),
         url: config.url.as_str().to_owned(),
     });
-    let router = crate::inbound::routes(engine, &config, wake);
+    let router = crate::inbound::routes(engine.clone(), &config, wake.clone())
+        .merge(crate::webhooks::routes(engine, &config, wake));
     bind(router, config.listen, config.tls).await
 }
 

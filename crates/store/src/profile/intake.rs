@@ -1,4 +1,5 @@
-//! Events that arrived from outside and wait for the agent: the questions of inbound callers.
+//! Events that arrived from outside and wait for the agent: the questions of inbound callers and the
+//! deliveries of webhooks.
 //! The caller gets its answer at once; a worker hands each row to the agent later.
 
 use super::{INBOX_COLUMNS, ProfileStore, inbox_from_row, inbox_item};
@@ -90,13 +91,22 @@ impl ProfileStore {
         )?)
     }
 
-    /// How many events wait for the agent.
-    pub fn open_intake_count(&self) -> Result<u32> {
-        Ok(self
-            .db()
-            .query_row("SELECT COUNT(*) FROM intake WHERE outcome IS NULL", [], |row| {
-                row.get(0)
-            })?)
+    /// How many events of `channel` wait for the agent.
+    pub fn open_intake_count(&self, channel: &str) -> Result<u32> {
+        Ok(self.db().query_row(
+            "SELECT COUNT(*) FROM intake WHERE channel = ?1 AND outcome IS NULL",
+            [channel],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Deletes the handled rows of `channel` that arrived before `before`. A delivery repeated after
+    /// that is stored again; the event key still keeps it from being handled twice.
+    pub fn prune_intake(&self, channel: &str, before: i64) -> Result<usize> {
+        Ok(self.db().execute(
+            "DELETE FROM intake WHERE channel = ?1 AND outcome IS NOT NULL AND received_at < ?2",
+            (channel, before),
+        )?)
     }
 
     /// The events that wait and whose next try is due, oldest first, at most `limit`.
@@ -230,7 +240,15 @@ mod tests {
         store.finish_intake(row.id, "ignored").unwrap();
         let row = store.caller_intake("bunsin.inbound", "req_1", 7).unwrap().unwrap();
         assert_eq!((row.attempts, row.outcome.as_deref()), (2, Some("ignored")));
-        assert_eq!(store.open_intake_count().unwrap(), 2);
+        assert_eq!(store.open_intake_count("bunsin.inbound").unwrap(), 1);
+        assert_eq!(store.open_intake_count("hook").unwrap(), 1);
         assert!(store.due_intake(10_000, 10).unwrap().iter().all(|due| due.id != row.id));
+
+        // Only the handled rows of the channel go, and only the old ones.
+        assert_eq!(store.prune_intake("hook", 10_000).unwrap(), 0);
+        assert_eq!(store.prune_intake("bunsin.inbound", 100).unwrap(), 0);
+        assert_eq!(store.prune_intake("bunsin.inbound", 101).unwrap(), 1);
+        assert!(store.caller_intake("bunsin.inbound", "req_1", 7).unwrap().is_none());
+        assert!(store.caller_intake("bunsin.inbound", "req_2", 7).unwrap().is_some());
     }
 }

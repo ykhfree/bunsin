@@ -20,6 +20,7 @@ use bunsin_core::records::{
 };
 use bunsin_core::settings::{ApiConfig, ConnectorKind, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
+use bunsin_core::webhook::WebhookConfig;
 use bunsin_core::wiki::{NotesConfig, WikiPage, WikiSummary, WikiText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -68,6 +69,9 @@ pub struct ProfileConfig {
     /// The ARD registries that the agent may search with `bunsin.ard/search`. Empty: no search.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ard_registries: Vec<ArdRegistry>,
+    /// The webhooks that Slack or Jira Cloud sends events to, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub webhooks: BTreeMap<String, WebhookConfig>,
 }
 
 impl ProfileConfig {
@@ -92,6 +96,7 @@ impl ProfileConfig {
             coding: None,
             inbound: InboundConfig::default(),
             ard_registries: Vec::new(),
+            webhooks: BTreeMap::new(),
         }
     }
 }
@@ -447,6 +452,20 @@ pub struct InboundStatus {
     pub endpoints: Vec<InboundEndpoint>,
     /// `None` if the settings have no `inbound.ard`.
     pub ard: Option<ArdStatus>,
+    /// The webhooks of the settings.
+    #[serde(default)]
+    pub webhooks: Vec<WebhookStatus>,
+}
+
+/// Where Slack or Jira sends the events of one webhook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookStatus {
+    pub name: String,
+    pub connector: String,
+    /// One for each listener for callers that takes its deliveries now.
+    pub urls: Vec<String>,
+    /// False until the owner stores the signing secret. Without it every delivery is refused.
+    pub secret_stored: bool,
 }
 
 /// The addresses of the endpoint on one listener for callers.
@@ -750,4 +769,11 @@ pub trait EngineApi: Send + Sync {
     fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
     /// Where the inbound endpoint is served, and whether the ARD catalogs list it or why not.
     fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>>;
+    /// Stores the signing secret of a webhook in the settings. The server never sends it back.
+    fn set_webhook_secret<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        secret: String,
+    ) -> BoxFuture<'a, ApiResult<()>>;
 }

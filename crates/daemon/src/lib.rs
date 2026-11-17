@@ -13,6 +13,7 @@ pub mod inbound;
 pub mod keystore;
 pub mod rules;
 pub mod server;
+pub mod webhooks;
 
 use bunsin_api::ProfileConfig;
 use bunsin_connectors::{ApiAuth, ApiConnector, McpConnector, TokenAuth};

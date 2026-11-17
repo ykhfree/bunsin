@@ -63,6 +63,7 @@
 //! | POST | `/v1/profiles/{p}/callers` | `AddCallerBody` | `NewCallerToken` |
 //! | DELETE | `/v1/profiles/{p}/callers/{id}` | | |
 //! | GET | `/v1/profiles/{p}/inbound` | | `InboundStatus` |
+//! | PUT | `/v1/profiles/{p}/webhooks/{name}/secret` | `WebhookSecretBody` | |
 //!
 //! The newer calls use `POST /v1/profiles/{p}/<method name in kebab case>`, with the arguments
 //! as a JSON body.
@@ -89,6 +90,23 @@ pub fn inbound_mcp_path(profile: &str) -> String {
 /// The server card of the inbound endpoint: the endpoint address and `/server-card`.
 pub fn server_card_path(profile: &str) -> String {
     format!("{}/server-card", inbound_mcp_path(profile))
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookSecretBody {
+    pub secret: String,
+}
+
+impl std::fmt::Debug for WebhookSecretBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The secret is left out on purpose.
+        f.write_str("WebhookSecretBody([REDACTED])")
+    }
+}
+
+/// The webhook of a profile on a listener for callers.
+pub fn hook_path(profile: &str, name: &str) -> String {
+    format!("/hooks/{profile}/{name}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

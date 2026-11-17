@@ -506,6 +506,67 @@ fn a_rest_api_connector_is_saved_with_its_token_from_standard_input() {
 }
 
 #[test]
+fn the_owner_stores_a_webhook_secret_from_standard_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let options = ["--public-listen", "127.0.0.1:0", "--public-url", "http://localhost"];
+    let (server, _) = Server::start_with(dir.path(), &options, 1);
+    let piped = |args: &[&str], input: &str| {
+        let mut child = bunsind()
+            .arg(args[0])
+            .arg("--server")
+            .arg(&server.url)
+            .args(&args[1..])
+            .env("BUNSIN_TOKEN", &kim)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let set = [
+        "connector-set",
+        "kim",
+        "slack-api",
+        "--url",
+        "https://slack.com/api",
+        "--api",
+        "slack",
+        "--token-stdin",
+    ];
+    stdout_of(piped(&set, "xoxb-1\n"), "connector-set --api slack");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show")).unwrap();
+    config["webhooks"] = serde_json::json!({"slack-events": {"connector": "slack-api", "scope": "public"}});
+    let file = dir.path().join("kim.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    let line = |shown: String| shown.lines().find(|l| l.starts_with("webhook")).unwrap().to_owned();
+    assert_eq!(
+        line(stdout_of(server.run(&kim, &["inbound", "kim"]), "inbound")),
+        "webhook\tslack-events\tslack-api\tno secret\thttp://localhost/hooks/kim/slack-events"
+    );
+    stdout_of(
+        piped(&["webhook-secret", "kim", "slack-events"], "signing-secret-7\n"),
+        "webhook-secret",
+    );
+    let shown = stdout_of(server.run(&kim, &["inbound", "kim"]), "inbound");
+    assert!(line(shown.clone()).contains("\tsecret stored\t"), "{shown}");
+    assert!(!shown.contains("signing-secret-7"));
+    let error = stderr_of_failure(
+        piped(&["webhook-secret", "kim", "nothing"], "s\n"),
+        "an unknown webhook",
+    );
+    assert!(error.contains("webhook `nothing`"), "{error}");
+    server.stop();
+}
+
+#[test]
 fn llm_test_reports_why_the_endpoint_does_not_work() {
     let dir = tempfile::tempdir().unwrap();
     let kim = add_profile(dir.path(), "kim", "Kim");

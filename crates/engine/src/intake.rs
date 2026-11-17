@@ -110,7 +110,7 @@ impl Engine {
                 "a caller may ask {MAX_ASKS_PER_HOUR} questions an hour; ask again later"
             )));
         }
-        if store.open_intake_count().map_err(store_error)? >= MAX_OPEN_REQUESTS {
+        if store.open_intake_count(INBOUND_SOURCE).map_err(store_error)? >= MAX_OPEN_REQUESTS {
             return Err(ApiError::NotAllowed(
                 "too many questions wait for this agent; ask again later".into(),
             ));

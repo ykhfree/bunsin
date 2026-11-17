@@ -1,15 +1,16 @@
 //! ARD publishing: the `/.well-known/ard.json` catalog of each listener for callers, and the
-//! owner's view of where the endpoint is served and why a catalog leaves it out.
+//! owner's view of where the endpoint and the webhooks are served and why a catalog leaves the endpoint out.
 //!
 //! A listener lists only the profiles that it serves (`InboundConfig::served_on`). Each entry points
 //! at the server card on the same listener. Only a publisher domain that the server operator allows
 //! can be published.
 
-use crate::Engine;
-use bunsin_api::http::{ARD_CATALOG, inbound_mcp_path, server_card_path};
-use bunsin_api::{ApiError, ApiResult, ArdStatus, InboundEndpoint, InboundStatus, ProfileConfig};
+use crate::{Engine, store_error};
+use bunsin_api::http::{ARD_CATALOG, hook_path, inbound_mcp_path, server_card_path};
+use bunsin_api::{ApiError, ApiResult, ArdStatus, InboundEndpoint, InboundStatus, ProfileConfig, WebhookStatus};
 use bunsin_ard::{AgentListing, Catalog, Level, PublishedProfile, Scope, Violation, build_entry, catalog};
 use bunsin_core::inbound::{ArdListing, InboundScope};
+use bunsin_core::webhook::hook_secret_key;
 
 /// A placeholder address. The settings check builds an entry before any listener is known.
 const PLACEHOLDER_URL: &str = "https://placeholder.invalid/server-card";
@@ -132,11 +133,27 @@ impl Engine {
             .ard
             .as_ref()
             .map(|ard| self.ard_status(&config, ard, &endpoints));
+        let mut webhooks = Vec::new();
+        for (name, hook) in &config.webhooks {
+            let urls = [InboundScope::Internal, InboundScope::Public]
+                .into_iter()
+                .filter(|scope| hook.served_on(*scope))
+                .filter_map(|scope| self.outer_listener(scope))
+                .map(|listener| listener.url_of(&hook_path(profile, name)))
+                .collect();
+            webhooks.push(WebhookStatus {
+                name: name.clone(),
+                connector: hook.connector.clone(),
+                urls,
+                secret_stored: store.secret(&hook_secret_key(name)).map_err(store_error)?.is_some(),
+            });
+        }
         Ok(InboundStatus {
             enabled: inbound.enabled,
             scope: inbound.scope,
             endpoints,
             ard,
+            webhooks,
         })
     }
 

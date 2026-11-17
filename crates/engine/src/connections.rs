@@ -14,6 +14,7 @@ use bunsin_core::settings::{
     ConnectorKind, ConnectorSection, ENV_SECRET_PREFIX, LLM_SECRET_KEY, LlmSection, McpConfig, check_token_header,
     connector_secret_key, env_secret_key, env_secret_origin, origin_of, valid_connector_name,
 };
+use bunsin_core::webhook::{HOOK_SECRET_PREFIX, hook_secret_key};
 use bunsin_store::ProfileStore;
 use serde_json::{Value, json};
 
@@ -300,10 +301,10 @@ impl Engine {
         Ok(Some(earlier))
     }
 
-    /// Deletes every stored value of a secret environment variable that `config` no longer names.
-    /// Every path that stores settings calls this, so a removed variable or connector leaves
-    /// no value behind, whichever way it was removed.
-    pub(crate) fn prune_env_secrets(&self, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
+    /// Deletes every stored value of a secret environment variable, and every webhook secret, that
+    /// `config` no longer names. Every path that stores settings calls this, so a removed variable,
+    /// connector or webhook leaves no value behind, whichever way it was removed.
+    pub(crate) fn prune_secrets(&self, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
         let mut named = std::collections::BTreeSet::new();
         for (name, value) in &config.connectors {
             // Settings that cannot be read name no variable. Validation refused them before.
@@ -311,9 +312,11 @@ impl Engine {
                 named.extend(section.secret_env.iter().map(|variable| env_secret_key(name, variable)));
             }
         }
+        named.extend(config.webhooks.keys().map(|name| hook_secret_key(name)));
         let mut removed = 0;
         for key in store.secret_keys().map_err(store_error)? {
-            if key.starts_with(ENV_SECRET_PREFIX) && !named.contains(&key) {
+            let pruned = key.starts_with(ENV_SECRET_PREFIX) || key.starts_with(HOOK_SECRET_PREFIX);
+            if pruned && !named.contains(&key) {
                 store.delete_secret(&key).map_err(store_error)?;
                 removed += 1;
             }
@@ -389,7 +392,7 @@ impl Engine {
         }
         self.commit_connections(profile, &store, &loaded, &config)?;
         // The values of removed variables go only after the settings are stored.
-        self.prune_env_secrets(&store, &config)?;
+        self.prune_secrets(&store, &config)?;
         // The arguments and the variables can hold secrets. The log names only the connector.
         self.audit(
             &store,
@@ -408,7 +411,7 @@ impl Engine {
         // The token goes with the connector. The server stores a connector's token only under this key.
         store.delete_secret(&connector_secret_key(name)).map_err(store_error)?;
         self.commit_connections(profile, &store, &loaded, &config)?;
-        self.prune_env_secrets(&store, &config)?;
+        self.prune_secrets(&store, &config)?;
         self.audit(&store, "connection_removed", None, json!({"target": name}))
     }
 }

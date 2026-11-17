@@ -3,7 +3,7 @@
 use bunsin_api::http::{
     AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
     DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody,
-    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
+    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, WebhookSecretBody, profile_path,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
@@ -478,6 +478,19 @@ impl EngineApi for RemoteEngine {
 
     fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>> {
         Box::pin(async move { self.call(Method::GET, &profile_path(profile, "inbound"), NO_BODY).await })
+    }
+
+    fn set_webhook_secret<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        secret: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("webhooks/{name}/secret"));
+            self.send_only(Method::PUT, &path, Some(&WebhookSecretBody { secret }))
+                .await
+        })
     }
 
     fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {

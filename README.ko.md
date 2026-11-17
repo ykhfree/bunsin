@@ -19,7 +19,8 @@ LLM은 제안만 합니다. 무엇을 실행할지는 하네스가 결정합니�
 Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 읽으십시오.
 
 - **이벤트 수신은 사용하는 MCP 서버에 달려 있습니다.** 서버는 설정에 적힌 검색 도구를 반복 호출합니다
-  ([이벤트 찾기](#이벤트-찾기-폴링) 참고). 이 기능은 테스트 서버로만 실행해 보았습니다. webhook 수신은 없습니다.
+  ([이벤트 찾기](#이벤트-찾기-폴링) 참고). Slack과 Jira Cloud는 webhook으로 이벤트를 보낼 수도 있습니다([Webhook](#webhook) 참고).
+  두 방식 모두 테스트 서버로만 실행해 보았습니다.
 - **agent는 허용한 도구로만 읽습니다.** 제안하기 전에 `read` 도구(예: 검색)를 최대 5번 호출하고, notes의 페이지를 최대 5번 읽고, 그 결과를 씁니다.
   ARD registry 검색은 도구 읽기로 셉니다.
   오래 쓸 사실은 notes에 정리하고, 사용자가 한 쪽씩 승인합니다([Notes](#notes) 참고).
@@ -28,7 +29,7 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
   원칙과 poll도 창에서 정합니다.
-- **아직 만들지 않은 것:** MCP 서버용 OAuth, webhook 수신.
+- **아직 만들지 않은 것:** MCP 서버용 OAuth.
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
@@ -485,6 +486,41 @@ bunsind rule-remove kim slack/search
   자기 ID를 가진 댓글이나 변경 이력을 검색하십시오.
 - 정지 스위치가 켜져 있는 동안 폴링은 쉽니다.
 - `bunsind status kim`은 각 poll의 마지막 결과를 보여 줍니다. "none usable"은 mapping이 결과와 맞지 않는다는 뜻입니다.
+
+### Webhook
+
+Slack(Events API)과 Jira Cloud는 poll 대신 서버로 이벤트를 보낼 수 있습니다.
+webhook은 같은 서비스의 REST API 커넥터에 속하고, 이벤트의 source는 그 커넥터입니다.
+
+```json
+"webhooks": {
+  "slack-events": {"connector": "slack-api", "scope": "public", "skip_authors": ["U012AB3CD"]},
+  "jira-events": {"connector": "jira-api", "scope": "public"}
+}
+```
+
+```sh
+bunsind webhook-secret kim slack-events      # 서명 secret을 입력하거나 파이프로 넘긴 뒤 Enter
+bunsind inbound kim                          # webhook마다 주소와 secret 저장 여부
+```
+
+- 주소는 `<리스너 URL>/hooks/<프로필>/<이름>`입니다. `scope`(기본 `internal`)는 인바운드 endpoint처럼 리스너를 고릅니다.
+  내부 리스너는 두 범위를, 공개 리스너는 `public`만 받습니다. Slack과 Jira Cloud에는 공개 리스너가 필요합니다.
+- `webhook-secret`으로 Slack 앱의 signing secret이나 Jira webhook의 secret을 넣습니다.
+  서버는 암호화해 저장하고 다시 보내지 않습니다. webhook을 지우면 secret도 지워집니다. secret이 없으면 모든 전달을 거부합니다.
+- 서버는 먼저 원래 본문의 서명을 확인합니다(Slack `v0`, Jira `X-Hub-Signature: sha256=`).
+  Slack의 timestamp는 5분 안이어야 하고, Jira 본문의 `timestamp`는 2시간 안이어야 합니다.
+  프로필, webhook, 리스너, 서명의 모든 거부는 같은 `401`입니다. 1 MiB를 넘는 본문은 `413`입니다.
+  서명된 Slack `url_verification`에는 challenge를 돌려줍니다.
+- Slack은 `message`(새 메시지, 스레드 답글, 파일 공유, bot 메시지)와 `app_mention`을 받습니다.
+  Jira는 `comment_created`, `comment_updated`, `jira:issue_created`, `jira:issue_updated`를 받습니다. 다른 이벤트는 `200`을 받고 버려집니다.
+- 서버는 바로 `200`을 주고, 이벤트는 나중에 agent에게 넘깁니다(인바운드 질문과 같은 방식).
+  전달은 ID(Slack `event_id`, Jira `X-Atlassian-Webhook-Identifier`)로 한 번만 저장합니다. 같은 전달이 다시 오면 `200`만 받습니다.
+  처리한 전달은 7일 둡니다. `message`와 `app_mention`으로 두 번 온 Slack 메시지 하나는 한 번만 처리합니다.
+- agent 자신의 글(AI 표시가 있는 글)과 `skip_authors`의 작성자가 쓴 글은 버립니다.
+- webhook 이벤트는 외부에서 온 것입니다. 채널이나 프로젝트에 글을 쓰는 누구나 agent를 움직일 수 있습니다.
+  그래서 그 이벤트에서 나온 notes 변경은 `notes.auto_apply`가 켜져 있어도 소유자를 기다립니다.
+- 한 커넥터에 poll과 webhook을 함께 둘 수 없습니다. 이벤트 ID가 달라 메시지 하나가 두 번 처리되기 때문입니다. 서버가 그런 설정을 거부합니다.
 
 ### 개인정보 필터
 

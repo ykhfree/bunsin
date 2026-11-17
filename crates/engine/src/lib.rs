@@ -20,11 +20,13 @@ mod preload;
 mod principles;
 mod resume;
 mod secrets;
+mod webhooks;
 
 pub use ard::OuterListener;
 pub use preload::PRELOAD_SOURCE;
 pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
+pub use webhooks::WebhookTarget;
 
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
@@ -341,6 +343,7 @@ impl Engine {
         Self::check_inbound(config)?;
         Self::check_ard(config)?;
         bunsin_core::ard::check_registries(&config.ard_registries).map_err(ApiError::Invalid)?;
+        Self::check_webhooks(config)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -1264,8 +1267,8 @@ impl EngineApi for Engine {
             self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
             Self::check_config(&config)?;
             Self::save_config(&store, &config)?;
-            // A settings file can drop a secret variable or its connector. Its value goes too.
-            self.prune_env_secrets(&store, &config)?;
+            // A settings file can drop a secret variable, its connector or a webhook. Its value goes too.
+            self.prune_secrets(&store, &config)?;
             // The next use builds the clients again from the new settings.
             self.runtimes.lock().expect("engine lock").remove(profile);
             self.audit(&store, "config_changed", None, json!({}))
@@ -1556,5 +1559,14 @@ impl EngineApi for Engine {
 
     fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>> {
         Box::pin(async move { self.read_inbound_status(profile) })
+    }
+
+    fn set_webhook_secret<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        secret: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_webhook_secret(profile, name, &secret) })
     }
 }

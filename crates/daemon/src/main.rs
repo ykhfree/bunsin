@@ -631,6 +631,14 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Store the signing secret of a webhook in the settings, read from standard input.
+    /// Slack calls it the signing secret; Jira the secret of the webhook.
+    WebhookSecret {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        name: String,
+    },
     /// Create a caller token and print it once. It opens only the inbound endpoint of this profile.
     CallerAdd {
         #[command(flatten)]
@@ -1620,6 +1628,19 @@ async fn run(cli: Cli) -> Result<(), String> {
                     endpoint.catalog_url
                 );
             }
+            for hook in &status.webhooks {
+                let secret = if hook.secret_stored {
+                    "secret stored"
+                } else {
+                    "no secret"
+                };
+                println!(
+                    "webhook\t{}\t{}\t{secret}\t{}",
+                    hook.name,
+                    hook.connector,
+                    hook.urls.join(" ")
+                );
+            }
             match &status.ard {
                 None => println!("ard\tnot listed"),
                 Some(ard) => {
@@ -1634,6 +1655,17 @@ async fn run(cli: Cli) -> Result<(), String> {
                     }
                 }
             }
+        }
+        Command::WebhookSecret { remote, profile, name } => {
+            let mut secret = String::new();
+            std::io::stdin()
+                .read_line(&mut secret)
+                .map_err(|e| format!("cannot read the secret: {e}"))?;
+            connect(&remote)?
+                .set_webhook_secret(&profile, &name, secret.trim().to_owned())
+                .await
+                .map_err(text)?;
+            println!("the signing secret of webhook {name} of {profile} is stored");
         }
         Command::CallerAdd { remote, profile, label } => {
             let created = connect(&remote)?

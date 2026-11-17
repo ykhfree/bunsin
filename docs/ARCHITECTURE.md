@@ -45,7 +45,7 @@
 - **리스너 셋.** 리스너마다 router가 따로 있다.
   - 제어(`--listen`): `/v1/...`만 있다. 접속 token을 받는다.
   - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
-    인바운드 MCP와 server card, ARD catalog(7절)가 여기에 있다. webhook의 경로도 여기에 둔다(아직 없음).
+    인바운드 MCP와 server card, ARD catalog(7절), webhook(11절)이 여기에 있다.
   - 리스너 L은 `InboundConfig::served_on(L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
     MCP 경로, card, ARD catalog가 이 함수 하나를 쓴다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다). daemon의 `served_on(config, Reach)`는 이 함수를 부른다.
   - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
@@ -426,7 +426,7 @@
   - 엔진은 `serve_outer`가 등록한 리스너 주소(`add_outer_listener`)로 URL을 만든다.
   - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 ARD identifier,
     싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고.
-- 아직 없는 것: webhook intake(같은 `intake` 표를 쓸 예정), 호출자용 OAuth.
+- 아직 없는 것: 호출자용 OAuth.
 
 ## 8. AI 표시
 
@@ -619,6 +619,23 @@
   변경마다 다른 ID를 주는 검색(예: 댓글이나 변경 이력)을 써야 한다. `mapping`의 한 경로는 필드 두 개를 합칠 수 없다.
 - 자율 단계의 쓰기는 호출을 시작하기 전에 이벤트를 닫는다. 호출 뒤의 저장 단계가 실패해도 재시도가 같은 글을 다시 보내지 않는다.
 - 한계: 실제 Slack, Jira, Confluence MCP 서버의 검색 도구와 결과 모양은 확인하지 않았다.
+
+**Webhook**(core `webhook`, engine `webhooks.rs`, daemon `webhooks.rs`, 해석과 서명은 `bunsin-connectors::webhook`)
+
+- 설정 `webhooks: {name: {connector, scope(기본 internal), skip_authors}}`. 설계의 `service`, `source`, `event_types`, `mapping`은 두지 않았다.
+  병합된 고정 해석기(`parse_slack`, `parse_jira`)가 이벤트 ID와 종류를 정하고, 서비스는 connector(같은 서비스의 REST API connector)가 정한다.
+  `check_webhooks`: 이름 규칙, connector가 Slack이나 Jira의 REST API connector, 같은 connector에 poll이 없을 것(이벤트 ID가 달라 두 번 처리된다).
+- secret: `PUT /v1/profiles/{p}/webhooks/{name}/secret`(CLI `webhook-secret`, 표준 입력). key `HOOK_<NAME>`, origin 문구 `webhook of <name>`.
+  주소가 아니므로 `RealBackends::token`이 보내지 않는다. `prune_secrets`(이름이 바뀜)가 `ENV_`와 `HOOK_` 중 설정이 이름을 대지 않는 값을 지운다.
+- `POST /hooks/{p}/{name}`(외부 리스너, `scope`가 고른다. `served_on`은 인바운드와 같은 `reaches`): 1 MiB 넘으면 413(`DefaultBodyLimit`).
+  `webhook_target`이 없으면(프로필, webhook, 리스너, secret, origin) 같은 401이다. 서명 확인이 본문 해석보다 먼저이다.
+  Slack은 `verify_slack`(timestamp 300초), Jira는 `verify_atlassian`과 서명된 본문 `timestamp`(ms)가 2시간 안. 시각은 엔진의 clock이다.
+  `url_verification`은 서명이 맞을 때만 `200 text/plain <challenge>`이다.
+- 전달 ID(Slack `event_id`, Jira `X-Atlassian-Webhook-Identifier`, 없으면 이벤트 ID)로 `intake(channel = webhook 이름)`에 `INSERT OR IGNORE`한다.
+  저장 전에 자기 글(`own_post`: poll과 같은 함수)을 버리고 필터를 적용한다. 처리가 끝난 행은 7일 뒤 지운다(`prune_intake`).
+  저장하면 intake task를 깨우고 바로 200을 준다. 처리는 `drain_intake`가 한다(재시작 뒤에도 남는다). 같은 메시지의 다른 전달은 이벤트 key로 한 번만 처리된다.
+- 이벤트는 `outside`이다. notes 변경은 자동 반영하지 않는다. `ask`의 미처리 한도 50은 이제 `bunsin.inbound` 채널만 센다.
+- 한계: 실제 Slack과 Jira가 보내는 요청으로 시험하지 않았다. Jira의 재시도가 원래 본문을 보낸다는 것은 가정이다.
 
 **도구 목록과 승인**
 
@@ -827,7 +844,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 이벤트 폴링, 실패한 이벤트의 재시도, 도구 목록 조회와 승인 | 구현, 가짜 커넥터로만 테스트 |
 | 개인정보 필터(기본 4종, 사용자 정의 패턴, 단어 목록) | 구현, 테스트 있음 |
 | 연결 설정과 token의 서버 저장(암호화, 주소 결합) | 구현, 테스트 있음 |
-| webhook 방식의 이벤트 수신 | 없음 |
+| webhook 방식의 이벤트 수신(Slack, Jira Cloud: 서명, url_verification, 전달 ID 중복 제거, intake, 자기 글, 설정 검사, 봉인된 secret) | 구현, 테스트 있음(core, store, 서버, CLI 명령). 실제 Slack과 Jira로는 보내 보지 않았다. |
 | 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 구현, 테스트 있음. 커넥터 문서의 색인과 순위는 없음. |
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |

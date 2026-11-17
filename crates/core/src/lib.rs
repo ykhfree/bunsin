@@ -21,6 +21,7 @@ pub mod records;
 pub mod search;
 pub mod settings;
 pub mod tool;
+pub mod webhook;
 pub mod wiki;
 
 use sha2::{Digest, Sha256};

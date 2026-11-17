@@ -40,6 +40,12 @@ pub enum InboundScope {
     Public,
 }
 
+/// True if a listener of `listener` serves something of `scope`: the internal listener serves both
+/// scopes, the public listener only `public`.
+pub fn reaches(scope: InboundScope, listener: InboundScope) -> bool {
+    listener == InboundScope::Internal || scope == InboundScope::Public
+}
+
 /// The settings of the inbound endpoint. It is off by default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundConfig {
@@ -78,7 +84,7 @@ impl InboundConfig {
     /// every endpoint that is on, the public listener only the public ones. The routes, the server card
     /// and the ARD catalog use this one check.
     pub fn served_on(&self, listener: InboundScope) -> bool {
-        self.enabled && (listener == InboundScope::Internal || self.scope == InboundScope::Public)
+        self.enabled && reaches(self.scope, listener)
     }
 
     /// Refuses a title or a description that the server card cannot hold, and an ARD listing of an

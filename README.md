@@ -18,9 +18,9 @@ The LLM only proposes. The harness decides what runs:
 
 Bunsin is in early development. Read this list before you use it.
 
-- **Finding events depends on your MCP servers.** The server repeats a search tool that
-  you name in the settings (see [Find events](#find-events-polling)). It has run only
-  against test servers. There is no webhook intake.
+- **Finding events depends on your connectors.** The server repeats a search tool that
+  you name in the settings (see [Find events](#find-events-polling)), or Slack and Jira Cloud
+  send events to a webhook (see [Webhooks](#webhooks)). Both have run only against test servers.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
   tools with the class `read` (for example a search) up to five times, and read up to
   five pages of its notes, and use the results. A search of your ARD registries counts as a tool read. Facts it keeps go into its notes, which you approve page by page (see
@@ -31,7 +31,7 @@ Bunsin is in early development. Read this list before you use it.
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
-- **Not built yet:** OAuth for MCP servers, webhook intake.
+- **Not built yet:** OAuth for MCP servers.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
   a real MCP server, or the real Slack, Jira or Confluence API.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
@@ -566,6 +566,48 @@ shows the events it would hand over, after the privacy filter, like `bunsind pol
 - Polling pauses while the kill switch is on.
 - `bunsind status kim` shows the last result of each poll. "none usable" means the
   mapping does not fit the result.
+
+### Webhooks
+
+Slack (Events API) and Jira Cloud can send events to the server instead of a poll. A webhook
+belongs to a REST API connector of the same service (see
+[LLM endpoint and connectors](#llm-endpoint-and-connectors)); its events have that connector
+as their source.
+
+```json
+"webhooks": {
+  "slack-events": {"connector": "slack-api", "scope": "public", "skip_authors": ["U012AB3CD"]},
+  "jira-events": {"connector": "jira-api", "scope": "public"}
+}
+```
+
+```sh
+bunsind webhook-secret kim slack-events      # type or pipe the signing secret, then Enter
+bunsind inbound kim                          # the address of each webhook, and whether its secret is stored
+```
+
+- The address is `<listener URL>/hooks/<profile>/<name>`. `scope` (default `internal`) picks
+  the listeners as for the inbound endpoint: the internal listener takes both scopes, the public
+  listener only `public`. Slack and Jira Cloud need a public listener.
+- Give Slack the signing secret of the app, and Jira the secret of the webhook, with
+  `webhook-secret`. The server stores it encrypted and never sends it back. A removed webhook
+  loses its secret. Without a secret, every delivery is refused.
+- The server checks the signature over the raw body first (Slack `v0`, Jira `X-Hub-Signature:
+  sha256=`). Slack's timestamp must be within 5 minutes; a Jira body's `timestamp` within 2 hours.
+  Every refusal of the profile, the webhook, the listener and the signature is the same `401`.
+  A body over 1 MiB gets `413`. A signed Slack `url_verification` gets its challenge back.
+- Slack takes `message` (new messages, thread replies, file shares, bot messages) and
+  `app_mention`; Jira takes `comment_created`, `comment_updated`, `jira:issue_created` and
+  `jira:issue_updated`. Other events get `200` and are dropped.
+- The server answers `200` at once and hands the event to the agent later, like a question of
+  an inbound caller. A delivery is stored once by its ID (Slack `event_id`, Jira
+  `X-Atlassian-Webhook-Identifier`); a repeated delivery gets `200`. Handled deliveries are kept
+  for 7 days. One Slack message that arrives as `message` and as `app_mention` is handled once.
+- The agent's own posts (with the AI marker) and the authors in `skip_authors` are dropped.
+- A webhook event is from outside: anyone who writes in the channel or the project can steer it.
+  A page change from it always waits for you, also with `notes.auto_apply`.
+- A connector cannot have a poll and a webhook: their event IDs differ, so one message would be
+  handled twice. The server refuses such settings.
 
 ### Privacy filter
 
