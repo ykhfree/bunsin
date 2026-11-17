@@ -160,11 +160,15 @@ pub struct RequestState {
 
 /// The status of a request from the outcome of its handling and the inbox items of its event.
 /// `outcome` is `None` while the agent has not handled it. The first rule that fits wins.
+/// Past `working`, only the owner's decisions show. The agent's own choice (ignore, a refused
+/// call, giving up) shows as `pending_approval`: a caller could make that choice depend on what
+/// the agent read, and so learn it without the owner.
 pub fn request_status(outcome: Option<&str>, items: &[InboxItem]) -> (RequestStatus, Option<String>) {
-    let Some(outcome) = outcome else {
+    if outcome.is_none() {
         return (RequestStatus::Working, None);
-    };
-    if outcome == "failed" || items.iter().any(|item| item.state == ApprovalState::Failed) {
+    }
+    // Only an approved answer can fail in the run, so this state follows the owner's approval.
+    if items.iter().any(|item| item.state == ApprovalState::Failed) {
         return (RequestStatus::Failed, None);
     }
     let answer = items.iter().find_map(|item| match &item.body {
@@ -176,9 +180,7 @@ pub fn request_status(outcome: Option<&str>, items: &[InboxItem]) -> (RequestSta
     if let Some(answer) = answer {
         return (RequestStatus::Answered, Some(answer));
     }
-    let declined = ["ignored", "denied", "recorded"].contains(&outcome)
-        || items.iter().any(|item| item.state == ApprovalState::Rejected);
-    if declined {
+    if items.iter().any(|item| item.state == ApprovalState::Rejected) {
         return (RequestStatus::Declined, None);
     }
     (RequestStatus::PendingApproval, None)
@@ -229,7 +231,17 @@ mod tests {
         use RequestStatus::*;
         let status = |outcome: Option<&str>, items: &[InboxItem]| request_status(outcome, items).0;
         assert_eq!(status(None, &[reply("hi", Executed)]), Working);
-        assert_eq!(status(Some("failed"), &[]), Failed);
+        // The agent's own choices do not show: giving up, ignoring, a refused or recorded call.
+        for outcome in ["failed", "ignored", "denied", "recorded"] {
+            assert_eq!(status(Some(outcome), &[]), PendingApproval, "{outcome}");
+            assert_eq!(
+                status(Some(outcome), &[escalation(Draft)]),
+                PendingApproval,
+                "{outcome}"
+            );
+            // The owner dismisses the item: now the caller sees the decision.
+            assert_eq!(status(Some(outcome), &[escalation(Rejected)]), Declined, "{outcome}");
+        }
         // A failed item wins over an answer.
         assert_eq!(
             status(
@@ -242,9 +254,6 @@ mod tests {
             request_status(Some("pending_approval"), &[reply("Friday.", Executed)]),
             (Answered, Some("Friday.".into()))
         );
-        for outcome in ["ignored", "denied", "recorded"] {
-            assert_eq!(status(Some(outcome), &[]), Declined, "{outcome}");
-        }
         assert_eq!(status(Some("pending_approval"), &[reply("a", Rejected)]), Declined);
         assert_eq!(
             status(Some("pending_approval"), &[reply("a", Pending)]),

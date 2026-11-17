@@ -465,8 +465,12 @@
     행마다 `ingest_event`를 부른다. `Failed`나 `Err`이면 `60초 × 시도 수` 뒤에 다시 한다(이벤트는 `events`에서 열린 채이다).
     `MAX_EVENT_ATTEMPTS`+1번째 호출은 포기 항목을 넣고 `Failed`를 돌려주므로, 그 뒤 `outcome`을 `failed`로 쓴다. 그 밖의 결과는 `Outcome`의 이름이 `outcome`이 된다.
   - SIGTERM이면 intake task도 폴링 task처럼 진행 중인 주기를 끝내고 멈춘다(`Poller::stop`).
-- **요청 상태**(`request_status`, 처음 맞는 규칙): `outcome`이 없으면 `working`. `failed`이거나 항목이 failed이면 `failed`.
-  답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). ignored, denied, recorded이거나 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
+- **요청 상태**(`request_status`, 처음 맞는 규칙): `outcome`이 없으면 `working`. 항목이 failed이면 `failed`.
+  답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
+  - 호출자는 소유자의 결정만 본다. agent의 선택(무시, 거부된 호출, 기록만, 포기)은 `pending_approval`로 보인다.
+    질문이 그 선택을 agent가 읽은 내용에 따르게 만들면, 호출자가 승인 없이 1비트씩 알아내기 때문이다.
+  - 그래서 agent가 답하지 않은 질문(ignored, denied, recorded)에는 넘김 항목이 생긴다. 소유자가 기각하면 `declined`가 된다.
+  - 한계: 처리에 걸린 시간은 여전히 약한 신호이다. 상태가 바뀌는 시각은 읽기 횟수에 따라 다르다.
   `get_request`는 `(channel, request ID, caller_id)`로 찾는다. 다른 호출자의 ID와 없는 ID는 같은 오류이다.
 - **답 도구 `bunsin.inbound/reply {text}`**
   - source가 `bunsin.inbound`인 이벤트에만 보인다. 다른 이벤트의 제안은 수리 요청으로 돌린다.

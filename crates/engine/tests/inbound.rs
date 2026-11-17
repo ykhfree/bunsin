@@ -124,10 +124,18 @@ async fn a_declined_question_and_the_kill_switch() {
     let rig = inbound_rig().await;
     let bot = caller(&rig, "bot");
 
-    // The agent ignores one question.
+    // The agent ignores one question. The caller does not learn that choice: the owner decides.
     let ignored = rig.engine.ask(&bot, "Hello?").unwrap();
     rig.llm.reply(&ignore(), 10);
     rig.engine.drain_intake().await;
+    assert_eq!(
+        status(&rig, &bot, &ignored.request_id).status,
+        RequestStatus::PendingApproval
+    );
+    let (inbox_id, state, body) = newest(&rig).await;
+    assert_eq!(state, ApprovalState::Draft);
+    assert!(matches!(body, InboxBody::Escalation { ref summary } if summary.contains("no answer")));
+    rig.engine.reject("kim", inbox_id, "not for them").await.unwrap();
     assert_eq!(status(&rig, &bot, &ignored.request_id).status, RequestStatus::Declined);
 
     // The owner dismisses an answer to another.
@@ -239,7 +247,7 @@ async fn the_reply_rule_never_lets_an_answer_go_without_the_owner() {
 }
 
 #[tokio::test]
-async fn a_question_that_fails_three_times_ends_as_failed() {
+async fn a_question_that_fails_three_times_waits_for_the_owner() {
     let rig = inbound_rig().await;
     let bot = caller(&rig, "bot");
     let asked = rig.engine.ask(&bot, "When?").unwrap();
@@ -253,17 +261,22 @@ async fn a_question_that_fails_three_times_ends_as_failed() {
         assert_eq!(rig.llm.requests().len(), tries, "a try waits for its time");
     }
     assert_eq!(rig.llm.requests().len(), 3);
-    // The fourth call gives up: no LLM call, a note to the owner, and the request fails.
+    // The fourth call gives up: no LLM call and a note to the owner. The caller sees only
+    // that the owner has not decided; the owner's dismissal declines the question.
     rig.advance(180);
     rig.engine.drain_intake().await;
     assert_eq!(rig.llm.requests().len(), 3);
-    assert_eq!(status(&rig, &bot, &asked.request_id).status, RequestStatus::Failed);
-    let (_, state, body) = newest(&rig).await;
+    let pending = RequestStatus::PendingApproval;
+    assert_eq!(status(&rig, &bot, &asked.request_id).status, pending);
+    let (inbox_id, state, body) = newest(&rig).await;
     assert_eq!(state, ApprovalState::Draft);
     assert!(matches!(body, InboxBody::Escalation { summary } if summary.contains("could not handle")));
     rig.advance(10_000);
     rig.engine.drain_intake().await;
-    assert_eq!(status(&rig, &bot, &asked.request_id).status, RequestStatus::Failed);
+    assert_eq!(rig.llm.requests().len(), 3);
+    assert_eq!(status(&rig, &bot, &asked.request_id).status, pending);
+    rig.engine.reject("kim", inbox_id, "").await.unwrap();
+    assert_eq!(status(&rig, &bot, &asked.request_id).status, RequestStatus::Declined);
 }
 
 #[tokio::test]
@@ -318,7 +331,10 @@ async fn a_question_is_stored_after_the_filter_and_only_while_the_endpoint_is_on
     rig.engine.drain_intake().await;
     assert!(!all_requests(&rig).contains(EMAIL));
     assert!(!rig.stores(EMAIL));
-    assert_eq!(status(&rig, &bot, &asked.request_id).status, RequestStatus::Declined);
+    assert_eq!(
+        status(&rig, &bot, &asked.request_id).status,
+        RequestStatus::PendingApproval
+    );
     let audit = rig.engine.snapshot("kim").await.unwrap().audit;
     assert!(audit.iter().any(|entry| entry.kind == "inbound_asked"));
 }
@@ -335,9 +351,12 @@ async fn a_page_change_from_a_question_always_waits_for_the_owner() {
     reply["wiki_updates"] = json!([{"slug": "deploy", "title": "Deploy", "summary": "When", "body": "Fridays."}]);
     rig.llm.reply(&reply.to_string(), 10);
     rig.engine.drain_intake().await;
-    let (_, state, body) = newest(&rig).await;
-    assert!(matches!(body, InboxBody::WikiChange { .. }));
-    assert_eq!(state, ApprovalState::Pending);
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    let change = inbox
+        .iter()
+        .find(|item| matches!(item.body, InboxBody::WikiChange { .. }))
+        .expect("the page change is in the inbox");
+    assert_eq!(change.state, ApprovalState::Pending);
     assert!(rig.engine.wiki_index("kim").await.unwrap().is_empty());
     assert_eq!(INBOUND_SOURCE, "bunsin.inbound");
 }

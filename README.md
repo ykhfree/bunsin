@@ -977,6 +977,10 @@ bunsind caller-revoke kim 1                        # the next request with it is
   `{request_id, pending_approval: true}` at once, and `get_request {request_id}` returns
   `{request_id, status, answer?}` with the status `working`, `pending_approval`, `answered`,
   `declined` or `failed`. The caller sends `Authorization: Bearer <caller token>`.
+  The caller sees only your decisions: `declined` means that you dismissed the item, `failed`
+  that an answer you approved could not be delivered. If the agent gives no answer, you get an
+  item to dismiss, and the caller sees `pending_approval` until you do. Otherwise a question
+  could make the agent's choice depend on what it read, and the caller would learn it.
 - Every refusal of the token, the profile or the listener is the same `401`. A `Host` other than
   the listener's URL gets `403`, a body over 64 KiB `413`, and more than 64 requests at once on a
   listener `503`. A caller may call `get_request` 120 times a minute; this count is in memory.

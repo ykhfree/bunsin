@@ -17,7 +17,7 @@ use bunsin_core::inbound::{
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::privacy::RedactionCounts;
 use bunsin_core::proposal::Proposal;
-use bunsin_core::records::{Caller, InboxItem};
+use bunsin_core::records::{Caller, InboxBody, InboxItem};
 use bunsin_store::ProfileStore;
 use serde_json::json;
 
@@ -177,6 +177,7 @@ impl Engine {
             return Ok(());
         }
         for row in store.due_intake(self.now(), DRAIN_BATCH).map_err(store_error)? {
+            let from_caller = row.event.source == INBOUND_SOURCE;
             let outcome = self.ingest_event(profile, row.event).await;
             match outcome {
                 Ok(Outcome::Failed { .. }) | Err(_) => {
@@ -197,6 +198,24 @@ impl Engine {
                 Ok(outcome) => {
                     let word = serde_json::to_value(&outcome).map_err(internal)?;
                     let word = word["outcome"].as_str().unwrap_or("handled").to_owned();
+                    // The caller sees only the owner's decisions. If the agent gave no answer, the owner
+                    // decides; otherwise the LLM's choice after its reads would tell the caller one bit.
+                    if from_caller && matches!(outcome, Outcome::Ignored | Outcome::Denied { .. } | Outcome::Recorded) {
+                        let summary = format!(
+                            "The agent gave no answer to a caller's question ({word}). Dismiss this item to \
+                             decline the question."
+                        );
+                        store
+                            .add_inbox_item(
+                                &row.event_key,
+                                &InboxBody::Escalation { summary },
+                                "a caller waits for your decision",
+                                &[],
+                                ApprovalState::Draft,
+                                self.now(),
+                            )
+                            .map_err(store_error)?;
+                    }
                     store.finish_intake(row.id, &word).map_err(store_error)?;
                 }
             }

@@ -833,6 +833,9 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 - **endpoint**는 MCP 서버(streamable HTTP, 무상태)이고 주소는 `<리스너 URL>/agents/<프로필>/mcp`입니다. 도구는 둘입니다.
   `ask {question}`은 즉시 `{request_id, pending_approval: true}`를 돌려줍니다.
   `get_request {request_id}`는 `{request_id, status, answer?}`를 돌려줍니다. status는 `working`, `pending_approval`, `answered`, `declined`, `failed` 중 하나입니다.
+  호출자는 소유자의 결정만 봅니다. `declined`는 소유자가 항목을 기각했다는 뜻이고, `failed`는 승인한 답을 전하지 못했다는 뜻입니다.
+  agent가 답하지 않으면 소유자에게 기각할 항목이 생기고, 호출자는 소유자가 결정할 때까지 `pending_approval`을 봅니다.
+  그렇지 않으면 질문이 agent의 선택을 읽은 내용에 따르게 만들어, 호출자가 그 내용을 알아낼 수 있기 때문입니다.
   호출자는 `Authorization: Bearer <호출자 token>`을 보냅니다.
 - token, 프로필, 리스너의 모든 거부는 같은 `401`입니다. 리스너 URL과 다른 `Host`는 `403`, 64 KiB를 넘는 본문은 `413`,
   리스너 하나에서 동시에 64개를 넘는 요청은 `503`을 받습니다. 호출자는 `get_request`를 1분에 120번까지 부를 수 있습니다. 이 횟수는 메모리에서만 셉니다.

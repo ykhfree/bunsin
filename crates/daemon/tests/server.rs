@@ -1747,7 +1747,8 @@ async fn a_started_server_hands_a_question_from_its_listener_to_the_agent_at_onc
             .call_tool("get_request", args(json!({"request_id": id})))
             .await
             .unwrap();
-        if state["status"] == "declined" {
+        // A handled question that the agent ignored waits for the owner's decision.
+        if state["status"] == "pending_approval" {
             break;
         }
         assert!(Instant::now() < deadline, "the question was not handled: {state}");
