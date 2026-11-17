@@ -63,12 +63,101 @@ pub fn default_timeout_secs() -> u64 {
     120
 }
 
-/// One entry of the `connectors` section of the profile settings.
+/// The base URL of the Slack Web API.
+pub const SLACK_BASE_URL: &str = "https://slack.com/api";
+
+/// The service of a REST API connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiService {
+    /// Base URL: `SLACK_BASE_URL`.
+    Slack,
+    /// Base URL: the site, for example `https://your-domain.atlassian.net`.
+    Jira,
+    /// Base URL: the site, for example `https://your-domain.atlassian.net`. The paths add `/wiki`.
+    Confluence,
+}
+
+/// How a REST API connector sends its token.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiAuthMethod {
+    /// `Authorization: Bearer <token>`.
+    #[default]
+    Bearer,
+    /// `Authorization: Basic <base64(email:token)>`, for an Atlassian API token.
+    Basic,
+}
+
+/// How to reach a REST API. The token is not in here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ApiConfig {
+    pub service: ApiService,
+    pub base_url: String,
+    #[serde(default)]
+    pub auth: ApiAuthMethod,
+    /// The account email of basic auth. Bearer auth has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl ApiConfig {
+    /// Refuses an auth method that the service or the email does not fit.
+    pub fn check(&self) -> Result<(), String> {
+        let email = self.email.as_deref().map(str::trim).unwrap_or_default();
+        match self.auth {
+            ApiAuthMethod::Basic if self.service == ApiService::Slack => {
+                Err("Slack accepts only a bearer token".into())
+            }
+            ApiAuthMethod::Basic if email.is_empty() => Err("basic auth needs the account email".into()),
+            // Basic auth joins the email and the token with `:`.
+            ApiAuthMethod::Basic if email.contains(':') || email.chars().any(char::is_whitespace) => {
+                Err(format!("`{email}` is not an email address"))
+            }
+            ApiAuthMethod::Bearer if self.email.is_some() => Err("bearer auth has no email".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What a connector reaches: an MCP server or a REST API.
+/// In the settings it is the key `mcp` or the key `api`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorKind {
+    Mcp(McpConfig),
+    Api(ApiConfig),
+}
+
+impl ConnectorKind {
+    /// What the connector does, for messages: "has an address", "runs a command on the server"
+    /// or "calls a REST API". Two connectors are of the same kind if this text is the same.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            ConnectorKind::Mcp(McpConfig::Http { .. }) => "has an address",
+            ConnectorKind::Mcp(McpConfig::Stdio { .. }) => "runs a command on the server",
+            ConnectorKind::Api(_) => "calls a REST API",
+        }
+    }
+
+    /// The address that a stored token is bound to. A command has none.
+    pub fn address(&self) -> Option<&str> {
+        match self {
+            ConnectorKind::Mcp(McpConfig::Http { url }) => Some(url),
+            ConnectorKind::Mcp(McpConfig::Stdio { .. }) => None,
+            ConnectorKind::Api(api) => Some(&api.base_url),
+        }
+    }
+}
+
+/// One entry of the `connectors` section of the profile settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredConnector")]
 pub struct ConnectorSection {
-    pub mcp: McpConfig,
-    /// The key of the secret that holds the token, if the MCP server needs one.
+    #[serde(flatten)]
+    pub kind: ConnectorKind,
+    /// The key of the secret that holds the token, if the server needs one.
     pub token_secret: Option<String>,
     /// The HTTP header that carries the token as it is, for example `X-API-Key`.
     /// `None`: the token goes as `Authorization: Bearer <token>`.
@@ -78,6 +167,42 @@ pub struct ConnectorSection {
     /// The values are not in the settings. A connector with an address has none.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub secret_env: BTreeSet<String>,
+}
+
+/// The stored form of a connector. It refuses unknown fields, so a token written into the
+/// settings, or an old field, is never accepted.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredConnector {
+    #[serde(default)]
+    mcp: Option<McpConfig>,
+    #[serde(default)]
+    api: Option<ApiConfig>,
+    #[serde(default)]
+    token_secret: Option<String>,
+    #[serde(default)]
+    token_header: Option<String>,
+    #[serde(default)]
+    secret_env: BTreeSet<String>,
+}
+
+impl TryFrom<StoredConnector> for ConnectorSection {
+    type Error = String;
+
+    fn try_from(stored: StoredConnector) -> Result<Self, String> {
+        let kind = match (stored.mcp, stored.api) {
+            (Some(mcp), None) => ConnectorKind::Mcp(mcp),
+            (None, Some(api)) => ConnectorKind::Api(api),
+            (Some(_), Some(_)) => return Err("a connector has `mcp` or `api`, not both".into()),
+            (None, None) => return Err("a connector needs `mcp` or `api`".into()),
+        };
+        Ok(Self {
+            kind,
+            token_secret: stored.token_secret,
+            token_header: stored.token_header,
+            secret_env: stored.secret_env,
+        })
+    }
 }
 
 /// True if `name` can name an environment variable: a letter or `_`, then letters, digits and `_`,
@@ -234,6 +359,68 @@ mod tests {
             "https://user@host",
         ] {
             assert_eq!(origin_of(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_connector_is_either_an_mcp_server_or_a_rest_api() {
+        use serde_json::json;
+        let parse = |value: serde_json::Value| serde_json::from_value::<ConnectorSection>(value);
+        // Settings from before REST API connectors existed still load, and are written back the same.
+        let stored = json!({"mcp": {"transport": "http", "url": "https://mcp.example/x"}, "token_secret": "MCP_X"});
+        let section = parse(stored.clone()).unwrap();
+        assert!(matches!(section.kind, ConnectorKind::Mcp(McpConfig::Http { .. })));
+        assert_eq!(serde_json::to_value(&section).unwrap(), stored);
+
+        let api = json!({"api": {"service": "jira", "base_url": "https://acme.atlassian.net", "auth": "basic",
+            "email": "kim@acme.com"}, "token_secret": "MCP_JIRA"});
+        let section = parse(api.clone()).unwrap();
+        let ConnectorKind::Api(config) = &section.kind else {
+            panic!("expected an API connector, got {section:?}")
+        };
+        assert_eq!((config.service, config.auth), (ApiService::Jira, ApiAuthMethod::Basic));
+        assert_eq!(section.kind.address(), Some("https://acme.atlassian.net"));
+        assert_eq!(serde_json::to_value(&section).unwrap(), api);
+        // `auth` defaults to bearer.
+        let slack =
+            parse(json!({"api": {"service": "slack", "base_url": SLACK_BASE_URL}, "token_secret": "MCP_S"})).unwrap();
+        assert!(matches!(&slack.kind, ConnectorKind::Api(c) if c.auth == ApiAuthMethod::Bearer));
+
+        let both = json!({"mcp": {"transport": "http", "url": "https://x"}, "api": {"service": "slack", "base_url": SLACK_BASE_URL}});
+        assert!(parse(both).unwrap_err().to_string().contains("not both"));
+        assert!(
+            parse(json!({"token_secret": "X"}))
+                .unwrap_err()
+                .to_string()
+                .contains("needs")
+        );
+        // A token in the settings is refused, also inside `api`.
+        let inline = json!({"api": {"service": "slack", "base_url": SLACK_BASE_URL, "token": "xoxb-1"}});
+        assert!(parse(inline).is_err());
+        assert!(parse(json!({"mcp": {"transport": "http", "url": "https://x"}, "token_env": "HOME"})).is_err());
+    }
+
+    #[test]
+    fn the_auth_method_must_fit_the_service_and_the_email() {
+        let config = |service, auth, email: Option<&str>| ApiConfig {
+            service,
+            base_url: SLACK_BASE_URL.into(),
+            auth,
+            email: email.map(str::to_owned),
+        };
+        use ApiAuthMethod::{Basic, Bearer};
+        assert_eq!(config(ApiService::Slack, Bearer, None).check(), Ok(()));
+        assert_eq!(config(ApiService::Jira, Basic, Some("kim@acme.com")).check(), Ok(()));
+        assert_eq!(config(ApiService::Confluence, Bearer, None).check(), Ok(()));
+        for (bad, why) in [
+            (config(ApiService::Slack, Basic, Some("kim@acme.com")), "only a bearer"),
+            (config(ApiService::Jira, Basic, None), "needs the account email"),
+            (config(ApiService::Jira, Basic, Some("  ")), "needs the account email"),
+            (config(ApiService::Jira, Basic, Some("kim:x@acme.com")), "not an email"),
+            (config(ApiService::Jira, Bearer, Some("kim@acme.com")), "has no email"),
+        ] {
+            let error = bad.check().unwrap_err();
+            assert!(error.contains(why), "{bad:?}: {error}");
         }
     }
 

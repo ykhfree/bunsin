@@ -6,10 +6,10 @@ use bunsin_api::http::{
     ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, profile_path,
 };
 use bunsin_api::{
-    AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
-    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
-    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate,
+    NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
@@ -542,6 +542,18 @@ impl EngineApi for RemoteEngine {
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connections/connectors/{name}/command"));
+            self.send_only(Method::PUT, &path, Some(&update)).await
+        })
+    }
+
+    fn set_api_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ApiConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connections/connectors/{name}/api"));
             self.send_only(Method::PUT, &path, Some(&update)).await
         })
     }

@@ -3,7 +3,7 @@
 [한국어](README.ko.md)
 
 Bunsin hosts persona AI agents. Each agent holds one person's work principles and
-acts for that person in Slack, Jira and Confluence through MCP servers.
+acts for that person in Slack, Jira and Confluence through MCP servers or their REST APIs.
 One server holds several isolated agent profiles.
 
 The LLM only proposes. The harness decides what runs:
@@ -31,10 +31,9 @@ Bunsin is in early development. Read this list before you use it.
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
-- **Not built yet:** ARD publishing and search, the REST API
-  connector, OAuth for MCP servers, webhook intake.
-- **Tested only against local test servers.** No test runs against a real LLM endpoint or
-  a real MCP server.
+- **Not built yet:** ARD publishing and search, OAuth for MCP servers, webhook intake.
+- **Tested only against local test servers.** No test runs against a real LLM endpoint,
+  a real MCP server, or the real Slack, Jira or Confluence API.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
 - **The server operator can read profile data.** Profiles are isolated from each other,
   not from a person with access to the server's files.
@@ -253,6 +252,9 @@ bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
 bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # an MCP server that needs no token
 bunsind connector-set kim crm --url https://mcp.example.com/crm \
     --token-header X-API-Key --token-stdin       # the token goes as `X-API-Key: <token>`
+bunsind connector-set kim slack-api --api slack --url https://slack.com/api --token-stdin
+bunsind connector-set kim jira-api --api jira --url https://your-domain.atlassian.net \
+    --auth basic --email you@example.com --token-stdin   # an Atlassian API token
 bunsind llm-test kim                             # one test request to the saved LLM endpoint
 bunsind llm-usage kim                            # LLM calls and tokens of the last 90 days
 bunsind connections kim                          # addresses and where each token comes from
@@ -277,6 +279,17 @@ bunsind connector-remove kim jira                # removes the connector and its
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every
   `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
+- With `--api slack|jira|confluence` (in the window: the kind **REST API**), the server calls
+  the service's REST API itself instead of an MCP server. The tools are fixed in the code:
+  Slack `search_messages`, `get_thread`, `post_message`; Jira `search_issues`, `get_issue`,
+  `add_comment`; Confluence `search_pages`, `get_page`, `create_page`. No tool deletes.
+  `--url` is the base URL: `https://slack.com/api`, or your Atlassian site. Slack takes a
+  bearer token. Jira and Confluence take a bearer token, or `--auth basic --email <account>`
+  with an Atlassian API token. A REST API connector needs a token and takes no
+  `--token-header`. You approve its tools and give each a rule, as for an MCP server; the
+  AI marker goes where the rule names the text, for example `{"arg": "text"}`. The address
+  rules and the binding of the token to the origin apply to the base URL. The request
+  shapes follow the official API docs; no test ran against the real services.
 - In the window, **Copy the token from the Keychain** reads the LLM token or the token of
   an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
@@ -742,6 +755,8 @@ bunsind caller-revoke kim 1                        # the next request with it is
   the time of its revocation.
 - The window lists the caller tokens in the Agent view. There you create one (the window
   shows it once) and revoke one with two clicks.
+
+  ![The callers card in the agent view](docs/screens/agent-callers-light.png)
 - Turn the endpoint on in the settings file. Turning it on adds the rule of the reply tool:
 
   ```json

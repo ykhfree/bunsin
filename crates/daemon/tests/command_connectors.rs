@@ -4,7 +4,7 @@
 use bunsin_api::{
     ApiError, CommandConnectorUpdate, ConnectorUpdate, EngineApi, Expected, ProfileConfig, SecretChange, TokenChange,
 };
-use bunsin_core::settings::McpConfig;
+use bunsin_core::settings::{ConnectorKind, McpConfig};
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
 use bunsin_engine::Engine;
 use serde_json::json;
@@ -52,12 +52,12 @@ async fn an_allowed_command_connector_is_stored_and_not_started() {
         .unwrap();
     let shown = engine.connections("kim").await.unwrap().connectors["local"].clone();
     assert_eq!(
-        shown.mcp,
-        McpConfig::Stdio {
+        shown.kind,
+        ConnectorKind::Mcp(McpConfig::Stdio {
             command: "/opt/mcp/does-not-exist".into(),
             args: vec!["-y".into(), "some-mcp-server".into()],
             env: [("API_TOKEN".to_owned(), SECRET.to_owned())].into(),
-        }
+        })
     );
     // The audit log names the connector. It holds no argument and no value of a variable.
     let audit = engine.snapshot("kim").await.unwrap().audit;
@@ -165,8 +165,8 @@ async fn a_name_keeps_its_kind_until_the_connector_is_removed() {
         "{error:?}"
     );
     assert!(matches!(
-        engine.connections("kim").await.unwrap().connectors["wiki"].mcp,
-        McpConfig::Http { .. }
+        engine.connections("kim").await.unwrap().connectors["wiki"].kind,
+        ConnectorKind::Mcp(McpConfig::Http { .. })
     ));
 
     engine
@@ -182,8 +182,8 @@ async fn a_name_keeps_its_kind_until_the_connector_is_removed() {
         "{error:?}"
     );
     assert!(matches!(
-        engine.connections("kim").await.unwrap().connectors["local"].mcp,
-        McpConfig::Stdio { .. }
+        engine.connections("kim").await.unwrap().connectors["local"].kind,
+        ConnectorKind::Mcp(McpConfig::Stdio { .. })
     ));
     // After a removal the name is free for the other kind.
     engine.remove_connector("kim", "local").await.unwrap();

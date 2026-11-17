@@ -199,6 +199,12 @@ async fn fixture() -> (common::Rig, UiState, UiState, UiState) {
     notes_checks(&rig).await;
     let mut state = UiState::default();
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    // Two caller tokens, one of them revoked, for the callers card. They are added after the refresh,
+    // so the audit log of the inbox pictures stays the same.
+    rig.engine.add_caller_token("kim", "Lee's agent").await.unwrap();
+    let old = rig.engine.add_caller_token("kim", "Park's old agent").await.unwrap();
+    rig.engine.revoke_caller_token("kim", old.id).await.unwrap();
+    state.callers = Some(rig.engine.caller_tokens("kim").await.unwrap());
 
     // The inbox pictures use the state from before these decisions.
     let mut config = rig.engine.profile_config("kim").await.unwrap();
@@ -651,6 +657,13 @@ fn draw(
     click(&mut cx, "principle-edit-1");
     shot(&mut cx, window, dir, &name("agent"));
     click(&mut cx, "cancel-principle-edit");
+    // The callers card is below the polls.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll("principle-edit-1", ScrollDelta::Pixels(point(px(0.), px(-1400.))), cx);
+    })
+    .unwrap();
+    shot(&mut cx, window, dir, &name("agent-callers"));
 
     // What the agent learns: corrections and candidates, then the evaluation and the thresholds.
     states.send(learning.clone()).unwrap();

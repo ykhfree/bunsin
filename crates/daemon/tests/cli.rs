@@ -1,6 +1,6 @@
 //! Runs the real `bunsind` binary: one server process and separate command processes.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
@@ -382,6 +382,79 @@ fn a_connector_takes_a_header_for_its_token_and_needs_no_token() {
     let reserved = [&set[..], &["--token-header", "Content-Type"]].concat();
     let error = stderr_of_failure(server.run(&kim, &reserved), "a reserved header");
     assert!(error.contains("cannot carry a token"), "{error}");
+}
+
+#[test]
+fn a_rest_api_connector_is_saved_with_its_token_from_standard_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let set = [
+        "connector-set",
+        "kim",
+        "jira",
+        "--url",
+        "https://acme.atlassian.net",
+        "--api",
+        "jira",
+        "--auth",
+        "basic",
+        "--email",
+        "kim@acme.example",
+        "--token-stdin",
+    ];
+    let run = |args: &[&str], token: &str| {
+        let mut child = bunsind()
+            .arg(args[0])
+            .arg("--server")
+            .arg(&server.url)
+            .args(&args[1..])
+            .env("BUNSIN_TOKEN", &kim)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(token.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    stdout_of(run(&set, "atlassian-token-41\n"), "connector-set --api");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        "llm\tnot set\njira\tapi jira https://acme.atlassian.net basic kim@acme.example\ttoken stored on the server\n"
+    );
+    // Slack takes only a bearer token. The server refuses the save.
+    let slack = [
+        "connector-set",
+        "kim",
+        "slack",
+        "--url",
+        "https://slack.com/api",
+        "--api",
+        "slack",
+        "--auth",
+        "basic",
+        "--email",
+        "kim@acme.example",
+        "--token-stdin",
+    ];
+    let error = stderr_of_failure(run(&slack, "xoxb-1\n"), "slack with basic auth");
+    assert!(error.contains("only a bearer token"), "{error}");
+    // A REST API takes its token in Authorization, so a token header is refused by the command line.
+    let header = [
+        "connector-set",
+        "kim",
+        "x",
+        "--url",
+        "https://slack.com/api",
+        "--api",
+        "slack",
+        "--token-header",
+        "X",
+    ];
+    let refused = server.run(&kim, &header);
+    assert_eq!(refused.status.code(), Some(2), "a usage error");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("cannot be used with"));
 }
 
 #[test]

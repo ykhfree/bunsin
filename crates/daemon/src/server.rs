@@ -16,10 +16,10 @@ use bunsin_api::http::{
     ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, status_of,
 };
 use bunsin_api::{
-    AdoptPrinciple, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections, ConnectorUpdate,
-    EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview,
-    PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate,
+    Connections, ConnectorUpdate, EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
+    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
@@ -340,6 +340,16 @@ async fn put_command_connector(
 ) -> Reply<()> {
     authorize(&engine, &headers, &profile)?;
     Ok(Json(engine.set_command_connector(&profile, &name, update).await?))
+}
+
+async fn put_api_connector(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, name)): Path<(String, String)>,
+    Json(update): Json<ApiConnectorUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_api_connector(&profile, &name, update).await?))
 }
 
 async fn put_connector(
@@ -681,6 +691,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
             &profile("connections/connectors/{name}/command"),
             put(put_command_connector),
         )
+        .route(&profile("connections/connectors/{name}/api"), put(put_api_connector))
         .with_state(engine)
 }
 

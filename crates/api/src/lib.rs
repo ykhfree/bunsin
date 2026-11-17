@@ -17,7 +17,7 @@ use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{
     ArtifactMeta, AuditEntry, CallerToken, CorrectionRecord, DecisionCounts, InboxItem, LlmUsage, ProfileInfo,
 };
-use bunsin_core::settings::{McpConfig, Wire};
+use bunsin_core::settings::{ApiConfig, ConnectorKind, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use bunsin_core::wiki::{NotesConfig, WikiPage, WikiSummary, WikiText};
 use serde::{Deserialize, Serialize};
@@ -334,7 +334,9 @@ pub struct LlmConnection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorConnection {
-    pub mcp: McpConfig,
+    /// The MCP server or the REST API. In JSON it is the key `mcp` or `api`.
+    #[serde(flatten)]
+    pub kind: ConnectorKind,
     pub token: TokenSource,
     /// The header that carries the token as it is. `None`: `Authorization: Bearer <token>`.
     #[serde(default)]
@@ -415,6 +417,17 @@ pub struct CommandConnectorUpdate {
     /// A stored variable that is not named here is removed with its value.
     #[serde(default)]
     pub secret_env: BTreeMap<String, SecretChange>,
+    /// The connector the caller loaded, or `None` for a new connector.
+    #[serde(default)]
+    pub expected: Expected<Option<ConnectorConnection>>,
+}
+
+/// A connector that calls the REST API of Slack, Jira Cloud or Confluence Cloud with a fixed set of tools.
+/// The token is bound to the origin of `api.base_url`, like the token of an MCP address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiConnectorUpdate {
+    pub api: ApiConfig,
+    pub token: TokenChange,
     /// The connector the caller loaded, or `None` for a new connector.
     #[serde(default)]
     pub expected: Expected<Option<ConnectorConnection>>,
@@ -582,6 +595,13 @@ pub trait EngineApi: Send + Sync {
         profile: &'a str,
         name: &'a str,
         update: CommandConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>>;
+    /// Saves a REST API connector and its token in one step. Check it with `connector_tools`.
+    fn set_api_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ApiConnectorUpdate,
     ) -> BoxFuture<'a, ApiResult<()>>;
     /// Removes a connector and its stored token.
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;

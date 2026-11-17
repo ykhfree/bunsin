@@ -35,6 +35,8 @@ rmcp = { version = "=3.10.0", default-features = false, features = ["server", "t
 keyring = "4"
 
 [dev-dependencies]
+# Already in Cargo.lock. A test writes the basic auth header that it expects.
+base64 = "0.22"
 bunsin-testkit.workspace = true
 rcgen = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

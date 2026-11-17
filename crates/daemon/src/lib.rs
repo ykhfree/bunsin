@@ -14,11 +14,11 @@ pub mod rules;
 pub mod server;
 
 use bunsin_api::ProfileConfig;
-use bunsin_connectors::{McpConnector, TokenAuth};
+use bunsin_connectors::{ApiAuth, ApiConnector, McpConnector, TokenAuth};
 use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::settings::{
-    ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key, env_secret_origin, origin_of,
-    valid_env_name,
+    ApiAuthMethod, ConnectorKind, ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key,
+    env_secret_origin, origin_of, valid_env_name,
 };
 use bunsin_engine::{Backends, ProfileSecrets, Runtime};
 use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig};
@@ -205,15 +205,15 @@ impl RealBackends {
         if let Some(header) = &section.token_header {
             check_token_header(header).map_err(|e| format!("connector `{name}`: {e}"))?;
         }
-        match &section.mcp {
-            McpConfig::Stdio { .. } if !self.allow_stdio => {
+        match &section.kind {
+            ConnectorKind::Mcp(McpConfig::Stdio { .. }) if !self.allow_stdio => {
                 return Err(format!(
                     "connector `{name}` uses the stdio transport, which runs a command on the server. \
                      The server operator must start the server with --allow-stdio-connectors"
                 ));
             }
             // Every way to store settings and every start of the command passes these checks.
-            McpConfig::Stdio { command, env, .. } => {
+            ConnectorKind::Mcp(McpConfig::Stdio { command, env, .. }) => {
                 if !command.is_absolute() {
                     return Err(format!(
                         "connector `{name}`: the command must be an absolute path, got `{}`",
@@ -232,14 +232,27 @@ impl RealBackends {
                     ));
                 }
             }
-            McpConfig::Http { .. } if !section.secret_env.is_empty() => {
+            _ if !section.secret_env.is_empty() => {
                 return Err(format!(
                     "connector `{name}` has an address. Secret environment variables are for a command"
                 ));
             }
-            McpConfig::Http { url } => self
+            ConnectorKind::Mcp(McpConfig::Http { url }) => self
                 .upstream
                 .check(&format!("the address of connector `{name}`"), url)?,
+            ConnectorKind::Api(api) => {
+                api.check().map_err(|e| format!("connector `{name}`: {e}"))?;
+                if section.token_header.is_some() {
+                    return Err(format!(
+                        "connector `{name}` calls a REST API, which takes its token in `Authorization`"
+                    ));
+                }
+                if section.token_secret.is_none() {
+                    return Err(format!("connector `{name}` calls a REST API, which needs a token"));
+                }
+                self.upstream
+                    .check(&format!("the base URL of connector `{name}`"), &api.base_url)?;
+            }
         }
         Ok(section)
     }
@@ -264,26 +277,35 @@ impl RealBackends {
         name: &str,
         section: &Value,
         secrets: &ProfileSecrets,
-    ) -> Result<McpConnector, String> {
+    ) -> Result<Arc<dyn Connector>, String> {
         let section = self.connector_section(name, section)?;
-        let address = match &section.mcp {
-            McpConfig::Http { url } => Some(url.as_str()),
-            McpConfig::Stdio { .. } => None,
-        };
         let token = section
             .token_secret
             .as_deref()
-            .map(|key| self.token(profile, key, address, secrets))
+            .map(|key| self.token(profile, key, section.kind.address(), secrets))
             .transpose()?;
+        let secret_env = stored_env(name, &section, secrets)?;
+        let mcp = match section.kind {
+            ConnectorKind::Mcp(mcp) => mcp,
+            ConnectorKind::Api(api) => {
+                let token = token.expect("connector_section refuses an API connector without a token");
+                let auth = match (api.auth, api.email) {
+                    (ApiAuthMethod::Basic, Some(email)) => ApiAuth::Basic { email, token },
+                    _ => ApiAuth::Bearer(token),
+                };
+                let connector = ApiConnector::new(name, api.service, &api.base_url, auth)
+                    .map_err(|e| format!("connector `{name}` cannot start: {e}"))?;
+                return Ok(Arc::new(connector));
+            }
+        };
         // A server that starts but never answers must not block the profile forever.
         let auth = token.as_deref().map(|token| TokenAuth {
             token,
             header: section.token_header.as_deref(),
         });
-        let secret_env = stored_env(name, &section, secrets)?;
-        let connect = McpConnector::connect_with_env(name, section.mcp, auth, &secret_env);
+        let connect = McpConnector::connect_with_env(name, mcp, auth, &secret_env);
         match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
-            Ok(Ok(connector)) => Ok(connector),
+            Ok(Ok(connector)) => Ok(Arc::new(connector)),
             Ok(Err(error)) => Err(format!("connector `{name}` cannot connect: {error}")),
             Err(_) => Err(format!(
                 "connector `{name}` did not answer in {} s",
@@ -311,8 +333,7 @@ impl Backends for RealBackends {
                 .map(|client| Arc::new(client) as Arc<dyn LlmClient>);
             let mut connectors = BTreeMap::new();
             for (name, section) in &config.connectors {
-                let connector = self.connector(profile, name, section, secrets).await;
-                connectors.insert(name.clone(), connector.map(|c| Arc::new(c) as Arc<dyn Connector>));
+                connectors.insert(name.clone(), self.connector(profile, name, section, secrets).await);
             }
             Ok(Runtime { llm, connectors })
         })

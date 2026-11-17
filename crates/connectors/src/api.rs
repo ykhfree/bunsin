@@ -7,28 +7,15 @@
 
 use base64::Engine;
 use bunsin_core::ports::{BoxFuture, Connector, ConnectorError};
+pub use bunsin_core::settings::{ApiService, SLACK_BASE_URL};
 use bunsin_core::tool::ToolSpec;
 use reqwest::Url;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::{Map, Value, json};
 use std::fmt;
 
-/// The base URL of the Slack Web API.
-pub const SLACK_BASE_URL: &str = "https://slack.com/api";
-
 /// The longest API error detail that goes into an error text, in characters.
 const MAX_DETAIL_CHARS: usize = 300;
-
-/// The service that an `ApiConnector` calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiService {
-    /// Base URL: `SLACK_BASE_URL`.
-    Slack,
-    /// Base URL: the site, for example `https://your-domain.atlassian.net`.
-    Jira,
-    /// Base URL: the site, for example `https://your-domain.atlassian.net`. The paths add `/wiki`.
-    Confluence,
-}
 
 /// The credentials of an API connector.
 #[derive(Clone)]

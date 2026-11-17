@@ -5,7 +5,10 @@ mod common;
 use bunsin_api::{ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, TokenSource};
 use bunsin_app::bridge::ConnectionResult;
 use bunsin_app::shell::Shell;
-use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ConnectorSection, McpConfig, Wire};
+use bunsin_core::settings::{
+    ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ApiAuthMethod, ApiConfig, ApiService, ConnectorKind, ConnectorSection,
+    McpConfig, Wire,
+};
 use bunsin_testkit::tool;
 use common::window::{REFRESH, label, on_screen, open_settings, runtime, screen_texts, value, wait_until};
 use gpui_kit::test::TestWindowExt;
@@ -105,13 +108,13 @@ fn set_connector_from_outside(
 ) {
     rt.block_on(rig.engine.set_connector("kim", name, connector(url, TokenChange::Keep)))
         .unwrap();
-    let shown = McpConfig::Http { url: url.into() };
+    let shown = ConnectorKind::Mcp(McpConfig::Http { url: url.into() });
     wait_until(cx, shell, "the outside change", |s| {
         s.state
             .connections
             .as_ref()
             .and_then(|c| c.connectors.get(name))
-            .is_some_and(|c| c.mcp == shown)
+            .is_some_and(|c| c.kind == shown)
     });
 }
 
@@ -238,8 +241,8 @@ fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut 
     });
     wait_for_commands(cx, &shell, 1);
     let jira = || rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"].clone();
-    let url = |url: &str| McpConfig::Http { url: url.into() };
-    assert_eq!(jira().mcp, url("https://mcp.example/jira"));
+    let url = |url: &str| ConnectorKind::Mcp(McpConfig::Http { url: url.into() });
+    assert_eq!(jira().kind, url("https://mcp.example/jira"));
     assert_eq!(jira().token, TokenSource::Stored);
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-result"), "Saved: jira");
@@ -270,7 +273,7 @@ fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut 
         window.click("save-connector", cx);
     });
     wait_for_commands(cx, &shell, 3);
-    assert_eq!(jira().mcp, url("https://mcp.example/jira/v2"));
+    assert_eq!(jira().kind, url("https://mcp.example/jira/v2"));
     assert_eq!(jira().token, TokenSource::Stored);
 
     // Another host with an empty token field is refused by the server.
@@ -291,7 +294,7 @@ fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut 
             Some("https://mcp.example/jira/v2")
         );
     });
-    assert_eq!(jira().mcp, url("https://mcp.example/jira/v2"));
+    assert_eq!(jira().kind, url("https://mcp.example/jira/v2"));
     assert_eq!(jira().token, TokenSource::Stored);
 }
 
@@ -683,7 +686,7 @@ fn another_profile_discards_the_drafts_and_saves_only_to_itself(cx: &mut TestApp
 /// Stores a command connector through the settings, as `config-set` does.
 fn store_command(rt: &tokio::runtime::Runtime, rig: &common::Rig, name: &str, mcp: McpConfig) {
     let section = ConnectorSection {
-        mcp,
+        kind: ConnectorKind::Mcp(mcp),
         token_secret: None,
         token_header: None,
         secret_env: Default::default(),
@@ -719,6 +722,90 @@ fn choose_command(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle) {
 const ENV_SECRET: &str = "env-secret-9d04";
 
 #[gpui_kit::test]
+fn a_rest_api_connector_is_saved_and_edited_in_the_window(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.within("connector-kind").click(2usize, cx)
+    });
+    on_screen(cx, window, |window, cx| {
+        // Slack is the first service. It has one base URL and takes only a bearer token.
+        assert!(window.try_find("connector-address").is_none());
+        assert!(label(window, "api-help").contains("No tool deletes"));
+        assert_eq!(value(window, "api-base-url"), "https://slack.com/api");
+        assert!(window.try_find("api-auth").is_none());
+        assert!(window.try_find("api-email").is_none());
+        window.within("api-service").click(1usize, cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        // The Slack address does not fit Jira, so it goes. Jira offers basic auth.
+        assert_eq!(value(window, "api-base-url"), "");
+        window.within("api-auth").click(1usize, cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "api-base-url", "https://acme.atlassian.net");
+        fill(window, cx, "api-email", "kim@acme.example");
+        fill(window, cx, "connector-token", SLACK_TOKEN);
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let jira = || rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"].clone();
+    let expected = ConnectorKind::Api(ApiConfig {
+        service: ApiService::Jira,
+        base_url: "https://acme.atlassian.net".into(),
+        auth: ApiAuthMethod::Basic,
+        email: Some("kim@acme.example".into()),
+    });
+    assert_eq!(jira().kind, expected);
+    assert_eq!(jira().token, TokenSource::Stored);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-result"), "Saved: jira");
+        assert_eq!(
+            row(window, "jira", "address").as_deref(),
+            Some("calls the Jira Cloud REST API at https://acme.atlassian.net")
+        );
+        assert_eq!(
+            row(window, "jira", "token").as_deref(),
+            Some("token stored on the server for kim@acme.example")
+        );
+        assert_not_on_screen(window, SLACK_TOKEN, "calls the Jira Cloud REST API");
+        click_row(window, cx, "jira", "edit");
+    });
+    on_screen(cx, window, |window, cx| {
+        // Edit shows the stored settings. The token stays on the server and cannot be removed here:
+        // a REST API connector needs it.
+        assert_eq!(value(window, "api-base-url"), "https://acme.atlassian.net");
+        assert_eq!(value(window, "api-email"), "kim@acme.example");
+        assert_eq!(value(window, "connector-token"), "");
+        assert_eq!(window.within("api-service").find(1usize).checked(), Some(true));
+        assert_eq!(window.within("api-auth").find(1usize).checked(), Some(true));
+        assert!(window.try_find("remove-connector-token").is_none());
+        fill(window, cx, "api-base-url", "https://acme.atlassian.net/x");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    // The same origin keeps the token.
+    let ConnectorKind::Api(saved) = jira().kind else {
+        panic!("expected a REST API connector")
+    };
+    assert_eq!(saved.base_url, "https://acme.atlassian.net/x");
+    assert_eq!(jira().token, TokenSource::Stored);
+    // A name keeps its kind: the window refuses an address under this name before it sends.
+    on_screen(cx, window, |window, cx| {
+        window.within("connector-kind").click(0usize, cx);
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "connector-address", "https://mcp.example/jira");
+        window.click("save-connector", cx);
+        assert_eq!(
+            label(window, "connector-message"),
+            "A connector with this name is of another kind. Remove it first, or use another name."
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
@@ -749,7 +836,7 @@ fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut T
     on_screen(cx, window, |window, _| {
         assert_eq!(
             label(window, "connector-message"),
-            "A connector with this name is of the other kind. Remove it first, or use another name."
+            "A connector with this name is of another kind. Remove it first, or use another name."
         );
         assert_eq!(value(window, "connector-address"), "https://mcp.example/local");
         assert!(window.try_find("connector-save-anyway").is_none());
@@ -758,7 +845,7 @@ fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut T
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
     let connectors = rt.block_on(rig.engine.connections("kim")).unwrap().connectors;
-    assert_eq!(connectors["local"].mcp, stdio);
+    assert_eq!(connectors["local"].kind, ConnectorKind::Mcp(stdio));
 }
 
 #[gpui_kit::test]
@@ -771,7 +858,7 @@ fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAp
             .unwrap()
             .connectors
             .get("local")
-            .map(|c| c.mcp.clone())
+            .map(|c| c.kind.clone())
     };
     choose_command(cx, window);
     on_screen(cx, window, |window, cx| {
@@ -810,7 +897,7 @@ fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAp
         ]
         .into(),
     };
-    assert_eq!(local(), Some(stored));
+    assert_eq!(local(), Some(ConnectorKind::Mcp(stored)));
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-result"), "Saved: local");
         // A successful save empties the form. The kind stays for the next connector.
@@ -842,7 +929,7 @@ fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAp
     });
     wait_for_commands(cx, &shell, 2);
     match local() {
-        Some(McpConfig::Stdio { args, env, .. }) => {
+        Some(ConnectorKind::Mcp(McpConfig::Stdio { args, env, .. })) => {
             assert_eq!(args, vec!["--stdio".to_owned()]);
             assert_eq!(env.len(), 2);
         }
@@ -941,8 +1028,8 @@ fn a_command_the_form_cannot_show_is_not_loaded_for_editing(cx: &mut TestAppCont
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
     assert_eq!(
-        rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"].mcp,
-        unusual
+        rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"].kind,
+        ConnectorKind::Mcp(unusual)
     );
 }
 
@@ -960,7 +1047,7 @@ fn a_command_draft_follows_the_draft_rules_of_the_form(cx: &mut TestAppContext) 
     let server_arg = |cx: &mut TestAppContext, shell: &Entity<Shell>, arg: &'static str| {
         wait_until(cx, shell, "the outside change", move |s| {
             s.state.connections.as_ref().is_some_and(
-                |c| matches!(&c.connectors["local"].mcp, McpConfig::Stdio { args, .. } if args == &[arg.to_owned()]),
+                |c| matches!(&c.connectors["local"].kind, ConnectorKind::Mcp(McpConfig::Stdio { args, .. }) if args == &[arg.to_owned()]),
             )
         });
     };
@@ -1069,10 +1156,10 @@ fn unchanged_connection_forms_follow_the_server(cx: &mut TestAppContext) {
     let saved = rt.block_on(rig.engine.connections("kim")).unwrap();
     assert_eq!(saved.llm.unwrap().model, "my-model");
     assert_eq!(
-        saved.connectors["jira"].mcp,
-        McpConfig::Http {
+        saved.connectors["jira"].kind,
+        ConnectorKind::Mcp(McpConfig::Http {
             url: "https://mcp.example/jira/mine".into()
-        }
+        })
     );
 }
 
@@ -1101,10 +1188,10 @@ fn a_connector_save_over_an_outside_change_warns_and_save_anyway_overwrites(cx: 
     wait_for_commands(cx, &shell, 1);
     let jira = || {
         rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"]
-            .mcp
+            .kind
             .clone()
     };
-    let url = |url: &str| McpConfig::Http { url: url.into() };
+    let url = |url: &str| ConnectorKind::Mcp(McpConfig::Http { url: url.into() });
     assert_eq!(jira(), url("https://mcp.example/jira/outside"));
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-conflict"), CONFLICT);
@@ -1152,11 +1239,11 @@ fn a_second_new_connector_with_the_same_name_warns_and_load_shows_the_first(cx: 
     wait_for_commands(cx, &shell, 1);
     let wiki = rt.block_on(rig.engine.connections("kim")).unwrap().connectors["wiki"].clone();
     assert_eq!(
-        (wiki.mcp, wiki.token),
+        (wiki.kind, wiki.token),
         (
-            McpConfig::Http {
+            ConnectorKind::Mcp(McpConfig::Http {
                 url: "https://mcp.example/wiki/first".into()
-            },
+            }),
             TokenSource::None
         )
     );
@@ -1307,10 +1394,10 @@ fn the_header_of_a_token_is_saved_shown_and_kept_by_an_edit(cx: &mut TestAppCont
     wait_for_commands(cx, &shell, 2);
     assert_eq!(wiki().token_header.as_deref(), Some("X-API-Key"));
     assert_eq!(
-        wiki().mcp,
-        McpConfig::Http {
+        wiki().kind,
+        ConnectorKind::Mcp(McpConfig::Http {
             url: "https://mcp.example/wiki/v2".into()
-        }
+        })
     );
 
     // An emptied header field goes back to `Authorization: Bearer`.
@@ -1918,7 +2005,7 @@ fn a_secret_draft_follows_the_draft_rules_and_the_server_reason_is_shown(cx: &mu
     let server_arg = |cx: &mut TestAppContext, shell: &Entity<Shell>, arg: &'static str| {
         wait_until(cx, shell, "the outside change", move |s| {
             s.state.connections.as_ref().is_some_and(
-                |c| matches!(&c.connectors["local"].mcp, McpConfig::Stdio { args, .. } if args == &[arg.to_owned()]),
+                |c| matches!(&c.connectors["local"].kind, ConnectorKind::Mcp(McpConfig::Stdio { args, .. }) if args == &[arg.to_owned()]),
             )
         });
     };
@@ -2039,11 +2126,11 @@ fn a_secret_variable_without_a_value_is_not_shown_as_stored(cx: &mut TestAppCont
     let rig = rt.block_on(common::rig());
     // The settings file names a secret variable. It cannot give the value.
     let section = ConnectorSection {
-        mcp: McpConfig::Stdio {
+        kind: ConnectorKind::Mcp(McpConfig::Stdio {
             command: "/opt/mcp/does-not-exist".into(),
             args: vec![],
             env: Default::default(),
-        },
+        }),
         token_secret: None,
         token_header: None,
         secret_env: ["API_TOKEN".to_owned()].into(),

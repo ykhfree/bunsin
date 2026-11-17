@@ -63,7 +63,7 @@
 | `bunsin-core` | 정책, 제안 검증, 승인 상태 머신, AI 표시, 도구 pin 비교, `LlmClient`와 `Connector` trait. IO가 없다. | 없음 |
 | `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그 | core |
 | `bunsin-llm` | LLM 어댑터 | core |
-| `bunsin-connectors` | MCP 커넥터, API 커넥터 | core |
+| `bunsin-connectors` | MCP 커넥터, REST API 커넥터, webhook 서명 검사와 해석 | core |
 | `bunsin-coding` | 코딩 위임 실행기 | core |
 | `bunsin-engine` | 하네스 파이프라인 | core, store, llm, connectors, coding |
 | `bunsin-api` | `EngineApi` trait과 DTO, HTTP 경로와 요청 본문(`http` 모듈) | core |
@@ -564,6 +564,24 @@
 - HTTP transport는 redirect를 따르지 않는다.
 - 실제 Slack, Jira, Confluence MCP 서버로는 아직 연결해 보지 않았다. 테스트는 로컬 rmcp 서버를 쓴다.
 
+**REST API 커넥터**
+
+- 설정은 `mcp` 대신 `api` 키를 쓴다: `{"api": {service: slack|jira|confluence, base_url, auth: bearer|basic(기본 bearer), email?}, token_secret}`.
+  `ConnectorSection`은 두 키 중 하나만 받는다(`ConnectorKind`). 저장 형식은 `deny_unknown_fields`이므로 설정 안의 token은 거부된다.
+  이 키가 없던 설정은 그대로 읽히고 그대로 저장된다.
+- `ApiConnector`(`bunsin-connectors::api`)가 서비스마다 고정된 도구 셋을 둔다. 지우는 도구는 없다. 도구 목록은 요청 없이 코드에서 나온다.
+  그래서 도구 승인(pin), 규칙, 읽기 5회 한도, AI 표시, 승인 실행이 MCP 커넥터와 같은 경로를 지난다.
+- 검사(`ApiConfig::check`, `RealBackends::connector_section`): Slack은 bearer만, basic은 email이 필요하고 bearer는 email이 없다.
+  token이 반드시 있어야 하고 `token_header`는 받지 않는다. `base_url`은 `UpstreamPolicy::check`를 지난다. 저장할 때와 접속할 때 모두 지난다.
+- token은 MCP token처럼 key `MCP_<NAME>`으로 봉인되고 `base_url`의 origin에 묶인다. 다른 origin으로 옮기면 token을 다시 넣어야 한다.
+- 이름은 종류를 지킨다: 주소, 명령, REST API 사이를 바꾸려면 먼저 지운다(`same_kind`).
+- 제어 API `PUT /v1/profiles/{p}/connections/connectors/{c}/api`(`ApiConnectorUpdate`), CLI `connector-set --api <service> [--auth basic --email ...]`,
+  창의 종류 **REST API**(서비스, base URL, 인증 방식, email, token). 창은 Slack을 고르면 `https://slack.com/api`를 채운다.
+  REST API 커넥터의 token은 창에서 지울 수 없다. token이 없으면 쓸 수 없기 때문이다.
+- HTTP client는 redirect를 따르지 않는다. 오류 문구에서 token과 basic 인코딩 값을 지운다.
+- 요청 모양은 공식 API 문서를 따랐다. 테스트는 로컬 stub(daemon `tests/api_connectors.rs`)으로 도구 목록, 승인, 규칙, 읽기, 승인 뒤 쓰기와 AI 표시를 끝까지 돈다.
+  실제 서비스로는 실행하지 않았다.
+
 ## 11. 이벤트 수신 (폴링)
 
 서버는 프로필 설정의 `polls`에 적힌 검색을 반복해서 새 항목을 이벤트로 만든다. MCP만 쓰고, 서버에 공개 주소가 필요 없다.
@@ -797,7 +815,8 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령에만 있다. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
-| 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
+| REST API 커넥터(Slack, Jira, Confluence의 고정 도구, 설정, 저장, CLI, 창) | 구현, 테스트 있음(core, connectors, 엔진, 서버, CLI, 창). 로컬 stub으로만 테스트 |
+| 구성 마법사, 비밀 저장소 | 없음 |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | ARD 게시와 검색 | 없음 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |

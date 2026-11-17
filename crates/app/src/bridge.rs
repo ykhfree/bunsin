@@ -4,10 +4,10 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    AdoptPrinciple, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate, Connections,
-    ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
-    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot,
-    Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate,
+    NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
+    PrivacyUpdate, ProfileSnapshot, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
@@ -83,6 +83,12 @@ pub enum UiCommand {
         profile: String,
         name: String,
         update: CommandConnectorUpdate,
+    },
+    /// Saves one connector that calls a REST API.
+    SaveApiConnector {
+        profile: String,
+        name: String,
+        update: ApiConnectorUpdate,
     },
     RemoveConnector {
         profile: String,
@@ -433,6 +439,11 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         }
         (UiCommand::SaveCommandConnector { profile, name, update }, _) => {
             let result = save_for(selected, &profile, api.set_command_connector(&profile, &name, update)).await;
+            state.connection_result = Some(ConnectionResult::ConnectorSaved { name, result });
+            Ok(())
+        }
+        (UiCommand::SaveApiConnector { profile, name, update }, _) => {
+            let result = save_for(selected, &profile, api.set_api_connector(&profile, &name, update)).await;
             state.connection_result = Some(ConnectionResult::ConnectorSaved { name, result });
             Ok(())
         }

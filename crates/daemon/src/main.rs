@@ -4,12 +4,13 @@
 //! of this machine. All other commands talk to a running server over HTTPS.
 
 use bunsin_api::{
-    ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource, WikiPageUpdate,
+    ApiConnectorUpdate, ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource,
+    WikiPageUpdate,
 };
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::InboxBody;
-use bunsin_core::settings::Wire;
+use bunsin_core::settings::{ApiConfig, ConnectorKind, McpConfig, Wire};
 use bunsin_daemon::keystore::KeyStore;
 use bunsin_daemon::server::{OuterConfig, Reach, ServeConfig, check_listeners, start};
 use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
@@ -336,20 +337,32 @@ enum Command {
         #[command(flatten)]
         token: TokenArgs,
     },
-    /// Save a connector that is reached over HTTP. With --token-stdin, read its token
-    /// from standard input. Then check it with `tools`.
+    /// Save a connector that is reached over HTTP: an MCP server, or with --api the REST API
+    /// of Slack, Jira Cloud or Confluence Cloud. With --token-stdin, read its token from
+    /// standard input. Then check it with `tools`.
     ConnectorSet {
         #[command(flatten)]
         remote: Remote,
         profile: String,
         name: String,
+        /// The MCP address, or with --api the base URL, for example https://slack.com/api
+        /// or https://your-domain.atlassian.net.
         #[arg(long)]
         url: String,
         /// The header that carries the token as it is, for example X-API-Key.
         /// Without it, the token goes as `Authorization: Bearer <token>`.
         /// Give it with every `connector-set` of this connector: a call without it sets Bearer again.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "api")]
         token_header: Option<String>,
+        /// Call this REST API with its fixed tools instead of an MCP server.
+        #[arg(long, value_parser = ["slack", "jira", "confluence"])]
+        api: Option<String>,
+        /// How the REST API gets the token: bearer, or basic with --email (an Atlassian API token).
+        #[arg(long, value_parser = ["bearer", "basic"], default_value = "bearer", requires = "api")]
+        auth: String,
+        /// The account email of basic auth.
+        #[arg(long, requires = "api")]
+        email: Option<String>,
         #[command(flatten)]
         token: TokenArgs,
     },
@@ -826,6 +839,11 @@ fn eval_lines(report: &bunsin_api::EvalReport) -> Vec<String> {
     lines
 }
 
+/// A value of a settings enum from its word on the command line, for example `jira`.
+fn word<T: serde::de::DeserializeOwned>(text: String) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(text)).map_err(|e| e.to_string())
+}
+
 fn json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).expect("API values serialize")
 }
@@ -1174,9 +1192,24 @@ async fn run(cli: Cli) -> Result<(), String> {
                 None => println!("llm\tnot set"),
             }
             for (name, connector) in &connections.connectors {
-                let address = match &connector.mcp {
-                    bunsin_core::settings::McpConfig::Http { url } => url.clone(),
-                    bunsin_core::settings::McpConfig::Stdio { command, .. } => format!("command {}", command.display()),
+                let address = match &connector.kind {
+                    ConnectorKind::Mcp(McpConfig::Http { url }) => url.clone(),
+                    ConnectorKind::Mcp(McpConfig::Stdio { command, .. }) => format!("command {}", command.display()),
+                    ConnectorKind::Api(api) => {
+                        let service = json(&api.service);
+                        let auth = json(&api.auth);
+                        let email = api
+                            .email
+                            .as_deref()
+                            .map(|email| format!(" {email}"))
+                            .unwrap_or_default();
+                        format!(
+                            "api {} {} {}{email}",
+                            service.trim_matches('"'),
+                            api.base_url,
+                            auth.trim_matches('"')
+                        )
+                    }
                 };
                 let header = match &connector.token_header {
                     Some(header) => format!("\tin the header {header}"),
@@ -1216,7 +1249,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             timeout_secs,
             token,
         } => {
-            let wire: Wire = serde_json::from_value(serde_json::Value::String(wire)).map_err(|e| e.to_string())?;
+            let wire: Wire = word(wire)?;
             // The Claude address and model fit only the Claude format.
             let default = |value: Option<String>, name: &str, claude: &str| match (value, wire) {
                 (Some(value), _) => Ok(value),
@@ -1240,18 +1273,37 @@ async fn run(cli: Cli) -> Result<(), String> {
             name,
             url,
             token_header,
+            api,
+            auth,
+            email,
             token,
         } => {
-            let update = ConnectorUpdate {
-                url,
-                token: token.change()?,
-                token_header,
-                expected: bunsin_api::Expected::Unchecked,
-            };
-            connect(&remote)?
-                .set_connector(&profile, &name, update)
-                .await
-                .map_err(text)?;
+            let remote = connect(&remote)?;
+            match api {
+                Some(service) => {
+                    let api = ApiConfig {
+                        service: word(service)?,
+                        base_url: url,
+                        auth: word(auth)?,
+                        email,
+                    };
+                    let update = ApiConnectorUpdate {
+                        api,
+                        token: token.change()?,
+                        expected: bunsin_api::Expected::Unchecked,
+                    };
+                    remote.set_api_connector(&profile, &name, update).await.map_err(text)?;
+                }
+                None => {
+                    let update = ConnectorUpdate {
+                        url,
+                        token: token.change()?,
+                        token_header,
+                        expected: bunsin_api::Expected::Unchecked,
+                    };
+                    remote.set_connector(&profile, &name, update).await.map_err(text)?;
+                }
+            }
             println!("connector {name} of {profile} saved. Check it with: bunsind tools {profile} {name}");
         }
         Command::ConnectorRemove { remote, profile, name } => {

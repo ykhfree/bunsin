@@ -6,10 +6,13 @@ use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
 use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
 use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{
-    CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, SecretChange,
-    TokenChange, TokenSource, ToolsReport,
+    ApiConnectorUpdate, CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection,
+    LlmUpdate, SecretChange, TokenChange, TokenSource, ToolsReport,
 };
-use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, McpConfig, Wire, default_timeout_secs};
+use bunsin_core::settings::{
+    ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ApiAuthMethod, ApiConfig, ApiService, ConnectorKind, McpConfig,
+    SLACK_BASE_URL, Wire, default_timeout_secs,
+};
 use bunsin_core::tool::pin;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
@@ -32,7 +35,9 @@ const HELP: &str = "Leave a token field empty to keep the stored token. \
     The server never sends a token back.";
 const COMMAND_HELP: &str = "The server starts this program and talks to it. \
     The operator of the server must allow that: the server starts with --allow-stdio-connectors.";
-const KIND_TAKEN: &str = "A connector with this name is of the other kind. Remove it first, or use another name.";
+const KIND_TAKEN: &str = "A connector with this name is of another kind. Remove it first, or use another name.";
+const API_HELP: &str = "The server calls the REST API itself, with fixed tools to search, read and add. \
+    No tool deletes. Approve the tools and give each a rule, as for an MCP server.";
 const SECRET_HELP: &str = "Secret variables, such as an API token. The server encrypts each value, \
     gives it to the program, and does not show it again.";
 const SECRET_FIELDS: &str = "Enter the name and the value of the secret variable.";
@@ -49,6 +54,40 @@ enum Kind {
     Address,
     /// A program that the server starts.
     Command,
+    /// The REST API of Slack, Jira Cloud or Confluence Cloud.
+    Api,
+}
+
+impl Kind {
+    fn of(connector: &ConnectorKind) -> Self {
+        match connector {
+            ConnectorKind::Mcp(McpConfig::Http { .. }) => Kind::Address,
+            ConnectorKind::Mcp(McpConfig::Stdio { .. }) => Kind::Command,
+            ConnectorKind::Api(_) => Kind::Api,
+        }
+    }
+}
+
+/// The services of a REST API connector, in the order of the choices on screen.
+const SERVICES: [(ApiService, &str); 3] = [
+    (ApiService::Slack, "Slack"),
+    (ApiService::Jira, "Jira Cloud"),
+    (ApiService::Confluence, "Confluence Cloud"),
+];
+
+/// The auth methods of a REST API connector, in the order of the choices on screen.
+const AUTH_METHODS: [(ApiAuthMethod, &str); 2] = [
+    (ApiAuthMethod::Bearer, "Bearer token"),
+    (ApiAuthMethod::Basic, "Email and API token"),
+];
+
+/// The name of a service on screen.
+fn service_text(service: ApiService) -> &'static str {
+    SERVICES
+        .iter()
+        .find(|(each, _)| *each == service)
+        .map(|(_, text)| *text)
+        .expect("SERVICES names every service")
 }
 
 /// The token field that the Keychain fields fill.
@@ -60,7 +99,11 @@ enum KeychainTarget {
 }
 
 /// The kinds, in the order of the choices on screen.
-const KINDS: [(Kind, &str); 2] = [(Kind::Address, "Address"), (Kind::Command, "Command on the server")];
+const KINDS: [(Kind, &str); 3] = [
+    (Kind::Address, "Address"),
+    (Kind::Command, "Command on the server"),
+    (Kind::Api, "REST API"),
+];
 
 /// The arguments in the text of the form: one in each line. Empty lines are no arguments.
 /// A line is used as it is, so an argument can hold spaces. Quotes are not removed.
@@ -154,8 +197,15 @@ pub struct ConnectionsForm {
     keychain_open: Option<KeychainTarget>,
     /// The header that carries the connector's token. Empty: `Authorization: Bearer`.
     token_header: Entity<InputState>,
-    /// Whether the connector draft is an address or a command.
+    /// Whether the connector draft is an address, a command or a REST API.
     kind: Kind,
+    /// The service and the auth method of a REST API draft.
+    api_service: ApiService,
+    api_auth: ApiAuthMethod,
+    /// The base URL of a REST API draft.
+    api_base: Entity<InputState>,
+    /// The account email of basic auth.
+    api_email: Entity<InputState>,
     /// The absolute path of the program of a command connector.
     command: Entity<InputState>,
     /// The arguments of the command, one in each line.
@@ -266,6 +316,10 @@ impl ConnectionsForm {
             keychain_open: None,
             token_header: input("Authorization: Bearer", window, cx),
             kind: Kind::Address,
+            api_service: ApiService::Slack,
+            api_auth: ApiAuthMethod::Bearer,
+            api_base: input(SLACK_BASE_URL, window, cx),
+            api_email: input("you@example.com", window, cx),
             command: input("/usr/local/bin/npx", window, cx),
             args: cx.new(|cx| TextareaState::new(window, cx).placeholder("-y\nsome-mcp-server")),
             env: cx.new(|cx| TextareaState::new(window, cx).placeholder("REGION=eu")),
@@ -389,18 +443,26 @@ impl ConnectionsForm {
     ) {
         let (mut address, mut header, mut command) = ("", "", String::new());
         let (mut args, mut env) = (String::new(), String::new());
-        match connector.map(|connector| (&connector.mcp, connector)) {
-            Some((McpConfig::Http { url }, connector)) => {
+        let (mut base, mut email) = ("", "");
+        match connector.map(|connector| (&connector.kind, connector)) {
+            Some((ConnectorKind::Mcp(McpConfig::Http { url }), connector)) => {
                 self.kind = Kind::Address;
                 address = url;
                 header = connector.token_header.as_deref().unwrap_or_default();
             }
+            Some((ConnectorKind::Api(api), _)) => {
+                self.kind = Kind::Api;
+                self.api_service = api.service;
+                self.api_auth = api.auth;
+                base = &api.base_url;
+                email = api.email.as_deref().unwrap_or_default();
+            }
             Some((
-                McpConfig::Stdio {
+                ConnectorKind::Mcp(McpConfig::Stdio {
                     command: path,
                     args: stored_args,
                     env: stored_env,
-                },
+                }),
                 _,
             )) => match command_texts(stored_args, stored_env) {
                 Some(texts) => {
@@ -419,6 +481,8 @@ impl ConnectionsForm {
         }
         set(&self.name, if connector.is_some() { name } else { "" }, window, cx);
         set(&self.address, address, window, cx);
+        set(&self.api_base, base, window, cx);
+        set(&self.api_email, email, window, cx);
         set(&self.token, "", window, cx);
         set(&self.token_header, header, window, cx);
         set(&self.command, &command, window, cx);
@@ -514,14 +578,17 @@ impl ConnectionsForm {
     fn connector_untouched(&self, cx: &App) -> bool {
         self.connector_base.as_ref().is_some_and(|(name, base)| {
             text(&self.name, cx) == *name
-                && match &base.mcp {
-                    McpConfig::Http { url } => {
+                && match &base.kind {
+                    ConnectorKind::Api(api) => {
+                        self.kind == Kind::Api && self.api_config(cx) == *api && text(&self.token, cx).is_empty()
+                    }
+                    ConnectorKind::Mcp(McpConfig::Http { url }) => {
                         self.kind == Kind::Address
                             && *url == text(&self.address, cx)
                             && text(&self.token, cx).is_empty()
                             && base.token_header.as_deref().unwrap_or_default() == text(&self.token_header, cx)
                     }
-                    McpConfig::Stdio { command, args, env } => {
+                    ConnectorKind::Mcp(McpConfig::Stdio { command, args, env }) => {
                         self.kind == Kind::Command
                             && command.display().to_string() == text(&self.command, cx)
                             && *args == parse_args(&Self::raw(&self.args, cx))
@@ -534,6 +601,42 @@ impl ConnectionsForm {
                     }
                 }
         })
+    }
+}
+
+impl ConnectionsForm {
+    /// The REST API settings of the draft. Bearer auth has no email.
+    fn api_config(&self, cx: &App) -> ApiConfig {
+        let email = text(&self.api_email, cx);
+        ApiConfig {
+            service: self.api_service,
+            base_url: text(&self.api_base, cx),
+            auth: self.api_auth,
+            email: (self.api_auth == ApiAuthMethod::Basic && !email.is_empty()).then_some(email),
+        }
+    }
+
+    /// Changes the kind of the draft. A REST API draft starts with the base URL of its service if it has one.
+    fn choose_kind(&mut self, kind: Kind, window: &mut Window, cx: &mut App) {
+        self.kind = kind;
+        if kind == Kind::Api {
+            self.choose_service(self.api_service, window, cx);
+        }
+    }
+
+    /// Changes the service. Slack has one base URL and takes only a bearer token, so the form
+    /// fills them in. The Slack address goes when another service is chosen. Text that the user typed stays.
+    fn choose_service(&mut self, service: ApiService, window: &mut Window, cx: &mut App) {
+        let base = text(&self.api_base, cx);
+        if service == ApiService::Slack {
+            self.api_auth = ApiAuthMethod::Bearer;
+            if base.is_empty() {
+                set(&self.api_base, SLACK_BASE_URL, window, cx);
+            }
+        } else if base == SLACK_BASE_URL {
+            set(&self.api_base, "", window, cx);
+        }
+        self.api_service = service;
     }
 }
 
@@ -595,7 +698,7 @@ impl Shell {
             .connections
             .as_ref()
             .and_then(|c| c.connectors.get(&name))
-            .is_some_and(|c| matches!(c.mcp, McpConfig::Stdio { .. }) != (form.kind == Kind::Command));
+            .is_some_and(|c| Kind::of(&c.kind) != form.kind);
         if other_kind {
             form.connector_message = Some(KIND_TAKEN);
             return;
@@ -639,6 +742,15 @@ impl Shell {
         form.connector_message = None;
         form.connector_conflict = None;
         form.connector_remove_token = remove_token;
+        if form.kind == Kind::Api {
+            let update = ApiConnectorUpdate {
+                api: form.api_config(cx),
+                token,
+                expected,
+            };
+            self.send(UiCommand::SaveApiConnector { profile, name, update });
+            return;
+        }
         let update = ConnectorUpdate {
             url: text(&form.address, cx),
             token,
@@ -807,8 +919,18 @@ impl Shell {
                     .font_weight(FontWeight::MEDIUM)
                     .child(SharedString::from(name.to_owned())),
             ));
-        match &connector.mcp {
-            McpConfig::Http { url } => {
+        match &connector.kind {
+            ConnectorKind::Api(api) => {
+                let calls = format!("calls the {} REST API at {}", service_text(api.service), api.base_url);
+                let token = match &api.email {
+                    Some(email) => format!("{} for {email}", token_text(connector.token)),
+                    None => token_text(connector.token).to_owned(),
+                };
+                row = row
+                    .child(labelled_as("address", calls.clone(), quiet(calls, cx)))
+                    .child(labelled_as("token", token.clone(), quiet(token, cx)));
+            }
+            ConnectorKind::Mcp(McpConfig::Http { url }) => {
                 row = row
                     .child(labelled_as("address", url.clone(), quiet(url.clone(), cx)))
                     .child(labelled_as(
@@ -823,7 +945,7 @@ impl Shell {
             }
             // The row shows the program and how much it gets. The arguments and the variables can
             // hold a secret, so they are shown only in the form, after Edit.
-            McpConfig::Stdio { command, args, env } => {
+            ConnectorKind::Mcp(McpConfig::Stdio { command, args, env }) => {
                 let runs = format!("runs the command {}", command.display());
                 let counts = counts_text(args.len(), env.len(), connector.secret_env.len());
                 row = row
@@ -1086,6 +1208,69 @@ impl Shell {
                     .map(IntoElement::into_any_element),
             )
             .collect(),
+            Kind::Api => {
+                let service = SERVICES.iter().position(|(each, _)| *each == form.api_service);
+                let auth = AUTH_METHODS.iter().position(|(each, _)| *each == form.api_auth);
+                let mut fields = vec![
+                    labelled_as("api-help", API_HELP, quiet(API_HELP, cx)).into_any_element(),
+                    RadioGroup::horizontal("api-service")
+                        .selected_index(service)
+                        .children(SERVICES.map(|(_, label)| label))
+                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                            this.connections.choose_service(SERVICES[*ix].0, window, cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    field(
+                        "Base URL: https://slack.com/api, or your Atlassian site",
+                        Input::new(&form.api_base).id("api-base-url").aria_label("Base URL"),
+                        cx,
+                    )
+                    .into_any_element(),
+                ];
+                // Slack takes only a bearer token, so the choice is shown for Jira and Confluence.
+                if form.api_service != ApiService::Slack {
+                    fields.push(
+                        RadioGroup::horizontal("api-auth")
+                            .selected_index(auth)
+                            .children(AUTH_METHODS.map(|(_, label)| label))
+                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                this.connections.api_auth = AUTH_METHODS[*ix].0;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                if form.api_auth == ApiAuthMethod::Basic {
+                    fields.push(
+                        field(
+                            "Email of the Atlassian account",
+                            Input::new(&form.api_email).id("api-email").aria_label("Account email"),
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                }
+                fields.push(
+                    field(
+                        "Token. Leave it empty to keep the stored token.",
+                        Input::new(&form.token)
+                            .id("connector-token")
+                            .aria_label("Connector token"),
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                fields.push(
+                    self.keychain_toggle("open-connector-keychain", KeychainTarget::Connector, cx)
+                        .into_any_element(),
+                );
+                fields.extend(
+                    self.keychain_fields(KeychainTarget::Connector, cx)
+                        .map(IntoElement::into_any_element),
+                );
+                fields
+            }
             Kind::Command => {
                 // The rows name each secret variable. A value is never on screen.
                 let secret_rows: Vec<AnyElement> = form
@@ -1205,8 +1390,8 @@ impl Shell {
                 RadioGroup::horizontal("connector-kind")
                     .selected_index(selected_kind)
                     .children(KINDS.map(|(_, label)| label))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.connections.kind = KINDS[*ix].0;
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.connections.choose_kind(KINDS[*ix].0, window, cx);
                         cx.notify();
                     })),
             )
@@ -1226,7 +1411,8 @@ impl Shell {
                         cx.notify();
                     })),
             );
-        if editing.is_some_and(|c| c.token == TokenSource::Stored && matches!(c.mcp, McpConfig::Http { .. })) {
+        // A REST API connector cannot work without its token, so only an MCP address offers the removal.
+        if editing.is_some_and(|c| c.token == TokenSource::Stored && Kind::of(&c.kind) == Kind::Address) {
             connector_form = connector_form.child(
                 Button::new("remove-connector-token")
                     .self_start()

@@ -3,7 +3,7 @@
 [English](README.md)
 
 Bunsin은 페르소나 AI agent를 실행하는 서버와 관리 도구입니다. agent 하나는 한 사람의 업무 원칙을 가지고,
-MCP 서버를 통해 Slack, Jira, Confluence에서 그 사람을 대신해 일합니다.
+MCP 서버나 각 서비스의 REST API를 통해 Slack, Jira, Confluence에서 그 사람을 대신해 일합니다.
 서버 하나가 서로 격리된 여러 agent 프로필을 담습니다.
 
 LLM은 제안만 합니다. 무엇을 실행할지는 하네스가 결정합니다.
@@ -27,8 +27,8 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
   원칙과 poll도 창에서 정합니다.
-- **아직 만들지 않은 것:** ARD 게시와 검색, REST API 커넥터, MCP 서버용 OAuth, webhook 수신.
-- **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint나 실제 MCP 서버로 실행하는 테스트는 없습니다.
+- **아직 만들지 않은 것:** ARD 게시와 검색, MCP 서버용 OAuth, webhook 수신.
+- **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
   서버 파일에 접근할 수 있는 사람에게서는 격리되어 있지 않습니다.
@@ -216,6 +216,9 @@ bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
 bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # token이 필요 없는 MCP 서버
 bunsind connector-set kim crm --url https://mcp.example.com/crm \
     --token-header X-API-Key --token-stdin       # token을 `X-API-Key: <token>`으로 보냅니다
+bunsind connector-set kim slack-api --api slack --url https://slack.com/api --token-stdin
+bunsind connector-set kim jira-api --api jira --url https://your-domain.atlassian.net \
+    --auth basic --email you@example.com --token-stdin   # Atlassian API token
 bunsind llm-test kim                             # 저장된 LLM endpoint로 테스트 요청 1건
 bunsind llm-usage kim                            # 지난 90일의 LLM 호출과 token
 bunsind connections kim                          # 주소와 각 token의 출처
@@ -236,6 +239,14 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - 커넥터에는 token이 없어도 됩니다. token을 빼고 저장하면 됩니다. token은 `Authorization: Bearer <token>`으로 갑니다.
   MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
   그 커넥터에 `connector-set`을 실행할 때마다 `--token-header`를 주십시오. 빼면 `Authorization: Bearer`로 돌아갑니다.
+- `--api slack|jira|confluence`(창에서는 종류 **REST API**)를 주면 서버가 MCP 서버 대신 그 서비스의 REST API를 직접 부릅니다.
+  도구는 코드에 고정되어 있습니다: Slack `search_messages`, `get_thread`, `post_message`, Jira `search_issues`, `get_issue`, `add_comment`,
+  Confluence `search_pages`, `get_page`, `create_page`. 지우는 도구는 없습니다.
+  `--url`은 base URL입니다: `https://slack.com/api` 또는 Atlassian 사이트 주소입니다.
+  Slack은 bearer token만 받습니다. Jira와 Confluence는 bearer token이나, `--auth basic --email <계정>`과 Atlassian API token을 받습니다.
+  REST API 커넥터에는 token이 있어야 하고, `--token-header`는 받지 않습니다.
+  도구 승인과 도구별 규칙은 MCP 서버와 같습니다. AI 표시는 규칙이 글 자리로 정한 곳(예: `{"arg": "text"}`)에 붙습니다.
+  주소 규칙과 token의 origin 결합은 base URL에 적용됩니다. 요청 모양은 공식 API 문서를 따랐고, 실제 서비스로는 시험하지 않았습니다.
 - 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token이나 주소 커넥터의 token을 읽습니다.
   항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.
   token은 서버로 한 번 복사됩니다. 이후 Keychain에서 값을 바꿔도 서버에는 반영되지 않습니다.
@@ -640,6 +651,8 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 - 호출자 token은 내 프로필의 인바운드 endpoint만 엽니다. 제어 API는 열지 못합니다. 접속 token은 인바운드 endpoint를 열지 못합니다.
 - 서버는 호출자 token의 해시만 저장합니다. 폐기한 token은 폐기 시각과 함께 목록에 남습니다.
 - 창의 Agent 화면이 호출자 token을 보여 줍니다. 거기서 token을 만들고(창이 한 번만 보여 줍니다), 두 번 눌러 폐기합니다.
+
+  ![Agent 화면의 Callers 카드](docs/screens/agent-callers-light.png)
 - 설정 파일에서 endpoint를 켭니다. 켜면 답 도구의 규칙이 추가됩니다.
 
   ```json

@@ -811,10 +811,10 @@ async fn a_connector_save_against_a_changed_server_is_a_conflict_not_an_error() 
     assert_eq!(state.error, None);
     let jira = &state.connections.as_ref().unwrap().connectors["jira"];
     assert_eq!(
-        jira.mcp,
-        bunsin_core::settings::McpConfig::Http {
+        jira.kind,
+        bunsin_core::settings::ConnectorKind::Mcp(bunsin_core::settings::McpConfig::Http {
             url: "https://first.example/jira".into()
-        }
+        })
     );
 }
 
