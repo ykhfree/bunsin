@@ -1001,6 +1001,19 @@ bunsind caller-revoke kim 1                        # the next request with it is
   rule of ARD that an entry must follow. ARD asks for 2 to 5 representative queries; another
   count is listed with a warning. If two profiles make the same identifier, no catalog lists
   either of them.
+- **Conformance.** The tests check every catalog entry against the JSON schema of the ARD
+  specification (`crates/ard/tests/schema.rs`). The specification project also has an official
+  conformance tool. It needs only Python 3 and checks a saved manifest without a network:
+
+  ```sh
+  git clone https://github.com/ards-project/ard-spec
+  curl -s https://agents.example.com/.well-known/ard.json > ard.json   # your --public-url or --internal-url
+  python3 ard-spec/conformance/bin/conformance-test manifest ard.json
+  ```
+
+  It also checks the schema if the Python package `jsonschema` is installed. Bunsin has not
+  run this tool yet. The specification names the trust envelope `trustManifest`, and its schema file
+  `TrustManifest`; Bunsin follows the specification and writes no trust envelope.
 - `bunsind inbound kim` shows the addresses of the endpoint and the catalog on each listener,
   the identifier, the listeners whose catalog lists it, and why a catalog leaves it out
   (for example a publisher domain that the operator no longer allows), with the warnings.

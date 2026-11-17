@@ -850,6 +850,18 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
   내부 리스너는 범위 `internal`과 `public`을, 공개 리스너는 `public`만 싣습니다. catalog는 그 리스너가 제공하는 endpoint만 싣습니다.
   publisher는 서버 운영자가 허용한 도메인이어야 합니다. 항목이 ARD의 필수 규칙을 어기면 서버가 설정을 거부합니다.
   ARD는 대표 질문을 2~5개 권합니다. 개수가 다르면 경고와 함께 싣습니다. 두 프로필이 같은 identifier를 만들면 어느 catalog도 둘 다 싣지 않습니다.
+- **적합성 검사.** 테스트가 catalog의 모든 항목을 ARD 스펙의 JSON 스키마로 검사합니다(`crates/ard/tests/schema.rs`).
+  스펙 프로젝트에는 공식 conformance 도구도 있습니다. 이 도구는 Python 3만 있으면 되고, 저장한 매니페스트를 네트워크 없이 검사합니다.
+
+  ```sh
+  git clone https://github.com/ards-project/ard-spec
+  curl -s https://agents.example.com/.well-known/ard.json > ard.json   # --public-url 또는 --internal-url
+  python3 ard-spec/conformance/bin/conformance-test manifest ard.json
+  ```
+
+  Python 패키지 `jsonschema`가 설치되어 있으면 스키마도 검사합니다. Bunsin은 이 도구를 아직 실행해 보지 않았습니다.
+  스펙 본문은 trust envelope를 `trustManifest`라고 쓰고, 스키마 파일은 `TrustManifest`라고 씁니다.
+  Bunsin은 스펙 본문을 따르고, trust envelope를 쓰지 않습니다.
 - `bunsind inbound kim`은 리스너마다 endpoint와 catalog의 주소, identifier, 항목을 싣는 리스너, catalog가 항목을 빼는 이유
   (예: 운영자가 더 이상 허용하지 않는 publisher 도메인), 경고를 보여 줍니다.
 - 아직 만들지 않은 것: 호출자용 OAuth.

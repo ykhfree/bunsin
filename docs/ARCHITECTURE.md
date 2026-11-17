@@ -500,6 +500,13 @@
     endpoint가 켜지고 publisher가 허용된 모든 프로필을 넘겨 identifier 중복을 전체에서 검사하고, catalog의 scope 규칙(공개 리스너는 `public`만)이 `served_on`과 같은 것을 고른다.
     항목의 `url`은 같은 리스너의 card URL이다. 중복 identifier는 두 프로필 모두 빠진다.
   - 엔진은 `serve_outer`가 등록한 리스너 주소(`add_outer_listener`)로 URL을 만든다.
+  - 스키마 적합성: `crates/ard/tests/schema.rs`가 `catalog(..)`의 본문과 모든 항목을 스펙의 JSON 스키마 사본(`tests/fixtures/ard-entry.schema.json`,
+    ard-spec commit `9d33ea1`)으로 검사한다. daemon `tests/server.rs`는 두 리스너가 실제로 내는 본문을 같은 스키마로 검사한다.
+    검사기는 dev 의존성 `jsonschema` 0.60.2(기본 기능 없음, `format` 검사 켬)이다. 위반은 찾지 못했다.
+    MUST 위반 항목(url과 data 둘 다나 둘 다 없음, type이나 displayName 없음, 잘못된 URN, 상대 URL)은 스키마와 crate의 `validate`가 모두 거부한다.
+  - 남은 차이: 스펙 본문은 `trustManifest`, 스키마는 `TrustManifest`라고 쓴다. crate는 본문을 따른다. catalog는 trust envelope를 쓰지 않으므로 게시물에는 영향이 없다.
+  - 공식 conformance 도구는 ard-spec 저장소의 `conformance/bin/conformance-test`(Python 3, 표준 라이브러리만)이다.
+    `manifest <파일>` 모드는 네트워크 없이 돈다. Python `jsonschema`가 있으면 같은 스키마 검사도 한다. 이 도구는 CI에서 돌리지 않는다.
   - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 ARD identifier,
     싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고.
 - 아직 없는 것: 호출자용 OAuth.
@@ -979,7 +986,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
-| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI, 창) |
+| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI, 창). 게시 본문은 스펙 JSON 스키마 검사를 통과한다. 공식 conformance 도구는 실행해 보지 않았다. |
 | ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버, 창의 목록 편집). 로컬 stub registry로만 테스트 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |

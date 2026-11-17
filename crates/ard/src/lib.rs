@@ -6,7 +6,12 @@
 //!
 //! The source is the ARD specification text, version [`SPEC_VERSION`], and its schema files
 //! `ard-entry.schema.json` and `ard.openapi.yaml`. Comments cite the sections as `§n`.
-//! If the specification body and a guide page differ, this crate follows the specification body.
+//! If the specification body and a guide page or a schema file differ, this crate follows the specification body.
+//! One difference is left: the body names the trust envelope `trustManifest`, and `ard-entry.schema.json`
+//! names it `TrustManifest`. The crate reads and writes `trustManifest`. The schema allows other members,
+//! so it takes `trustManifest` but does not check it. The catalog never writes a trust envelope.
+//!
+//! The test `tests/schema.rs` checks every entry of a catalog against a copy of `ard-entry.schema.json`.
 
 mod catalog;
 mod entry;

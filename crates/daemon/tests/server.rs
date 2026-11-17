@@ -1785,6 +1785,19 @@ async fn catalog(listener: &Running) -> (reqwest::header::HeaderMap, serde_json:
     (response.headers().clone(), response.json().await.unwrap())
 }
 
+/// The errors of a served catalog against the schema `ArdManifest` of the ARD specification.
+/// The schema checks every entry against `ArdEntry`, with formats such as `uri`.
+fn ard_schema_errors(catalog: &serde_json::Value) -> Vec<String> {
+    let text = include_str!("../../ard/tests/fixtures/ard-entry.schema.json");
+    let mut schema: serde_json::Value = serde_json::from_str(text).unwrap();
+    schema["$ref"] = serde_json::json!("#/$defs/ArdManifest");
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .unwrap();
+    validator.iter_errors(catalog).map(|error| error.to_string()).collect()
+}
+
 fn identifiers(catalog: &serde_json::Value) -> Vec<&str> {
     catalog["entries"]
         .as_array()
@@ -1823,6 +1836,9 @@ async fn each_listener_lists_only_the_endpoints_it_serves_and_each_entry_names_i
     );
     let (_, outer) = catalog(&public).await;
     assert_eq!(identifiers(&outer), ["urn:air:acme.com:team:lee"]);
+    // What each listener serves conforms to the schema of the specification.
+    assert_eq!(ard_schema_errors(&inner), Vec::<String>::new());
+    assert_eq!(ard_schema_errors(&outer), Vec::<String>::new());
     let entry = &outer["entries"][0];
     assert_eq!(entry["type"], "application/mcp-server-card+json");
     assert_eq!(entry["url"], "http://localhost/agents/lee/mcp/server-card");
