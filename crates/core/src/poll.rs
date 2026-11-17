@@ -131,7 +131,8 @@ pub fn extract(poll: &PollConfig, result: &Value) -> Result<Extracted, String> {
             thread: poll.mapping.thread.as_deref().and_then(field),
             author,
             text,
-            channel: Channel::Owner,
+            // The owner set up the search, but other people wrote what it found.
+            channel: Channel::Outside,
         });
     }
     Ok(extracted)
@@ -178,8 +179,8 @@ mod tests {
                 thread: Some("1699999999.000001".into()),
                 author: "lee".into(),
                 text: "deploy?".into(),
-                // A poll is the owner's own search.
-                channel: Channel::Owner,
+                // Other people wrote the messages that a poll finds.
+                channel: Channel::Outside,
             }
         );
         assert_eq!(extracted.events[1].thread, None);

@@ -149,7 +149,7 @@ async fn an_owner_mark_on_the_wire_is_not_trusted() {
 }
 
 #[tokio::test]
-async fn a_change_from_a_poll_is_stored_at_once() {
+async fn a_change_from_a_poll_waits() {
     let mut config = auto(true);
     config.polls = vec![poll()];
     let rig = rig_with(config).await;
@@ -165,6 +165,7 @@ async fn a_change_from_a_poll_is_stored_at_once() {
     reply["wiki_updates"] = json!([page("deploy", "Fridays.")]);
     rig.llm.reply(&reply.to_string(), 10);
     assert_eq!(rig.engine.poll_profile("kim").await.unwrap(), 1);
-    assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Executed);
-    assert_eq!(body(&rig, "deploy").await.as_deref(), Some("Fridays."));
+    // Lee wrote the message, so it could steer the agent into a lasting note.
+    assert_eq!(change_state(&rig, "deploy").await, ApprovalState::Pending);
+    assert_eq!(body(&rig, "deploy").await, None);
 }

@@ -46,7 +46,7 @@ fn the_notes_settings_are_saved_and_refused_like_the_settings_file(cx: &mut Test
         // The window says what auto-apply never does.
         let help = label(window, "auto-apply-help");
         assert!(
-            help.contains("never applies a change from a pre-load, an inbound question or a webhook event"),
+            help.contains("never applies a change from a poll, a pre-load, an inbound question or a webhook event"),
             "{help}"
         );
         assert!(help.contains("never overwrites a page that you wrote"), "{help}");

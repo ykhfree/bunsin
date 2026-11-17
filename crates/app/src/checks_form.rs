@@ -14,9 +14,9 @@ use gpui_kit::{App, AppContext, Context, Div, Entity, FontWeight, ParentElement,
 
 /// What auto-apply does, and what it never does. The engine's rules in `notes.rs` decide this.
 pub const AUTO_APPLY_HELP: &str = "With auto-apply, a page change of the agent is stored without asking only \
-    for a message from your own channel while the agent runs. It never applies a change from a pre-load, an \
-    inbound question or a webhook event, and it never overwrites a page that you wrote. Those changes wait \
-    for you in the inbox.";
+    for an event that you handed in yourself with your access token. It never applies a change from a poll, a \
+    pre-load, an inbound question or a webhook event, because other people wrote that text, and it never \
+    overwrites a page that you wrote. Those changes wait for you in the inbox.";
 const NOTES_HELP: &str = "A check reports pages that nobody changed for a long time, pages that no other page \
     names, and, if you ask for it, pairs of pages that say different things. A check never changes a page.";
 const EVAL_HELP: &str = "A run passes when each rate meets its mark. The LLM judge compares each draft with \

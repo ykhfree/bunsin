@@ -839,10 +839,11 @@ agent at once, without your approval, but only if all of these hold:
 
 - the page is new, or the agent wrote it last. A page that you wrote or edited always waits for you;
 - the kill switch is off;
-- the event came through your own channel: your polls, or an event you handed in with your
-  access token. The server sets this mark itself. Every other event counts as `outside`: a
-  webhook, an inbound caller, and any event whose mark comes from the request or from storage.
-  Its changes always wait for you, because other people can write such an event to steer the agent.
+- the event came through your own channel: an event you handed in with your access token. The
+  server sets this mark itself. Every other event counts as `outside`: a poll, a webhook, an
+  inbound caller, and any event whose mark comes from the request or from storage. Its changes
+  always wait for you, because other people wrote such an event and can write it to steer the agent.
+  A poll counts as outside too: you set up the search, but other people wrote the messages it finds.
 
 The change still needs a source and still shows in the inbox, as done. The audit entry
 `wiki_change_applied` says `"auto": true`. A change that cannot be stored stays pending.
