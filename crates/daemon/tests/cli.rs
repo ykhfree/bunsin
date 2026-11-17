@@ -210,6 +210,54 @@ fn the_server_opens_the_outer_listeners_it_is_given() {
 }
 
 #[test]
+fn the_operator_names_the_ard_publishers_and_the_owner_reads_the_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let options = [
+        "--internal-listen",
+        "127.0.0.1:0",
+        "--internal-url",
+        "http://127.0.0.1",
+        "--ard-publisher-domain",
+        "acme.com",
+    ];
+    let (server, _) = Server::start_with(dir.path(), &options, 1);
+    let mut config: serde_json::Value =
+        serde_json::from_str(&stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show")).unwrap();
+    config["inbound"] = serde_json::json!({"enabled": true, "description": "Questions about deploys.",
+        "ard": {"publisher": "acme.com", "agent_name": "kim", "representative_queries": ["When do we deploy?"]}});
+    let file = dir.path().join("kim.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    let shown = stdout_of(server.run(&kim, &["inbound", "kim"]), "inbound");
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(lines[0], "endpoint\ton\tinternal");
+    assert_eq!(
+        lines[1],
+        "internal\thttp://127.0.0.1/agents/kim/mcp\thttp://127.0.0.1/agents/kim/mcp/server-card\t\
+         http://127.0.0.1/.well-known/ard.json"
+    );
+    assert_eq!(lines[2], "ard\turn:air:acme.com:kim\tlisted on: internal");
+    assert!(
+        lines[3].starts_with("warning\tthe entry has 1 representative queries"),
+        "{shown}"
+    );
+
+    // Another domain is refused when the settings are stored.
+    config["inbound"]["ard"]["publisher"] = serde_json::json!("other.example");
+    std::fs::write(&file, config.to_string()).unwrap();
+    let error = stderr_of_failure(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set with another domain",
+    );
+    assert!(error.contains("--ard-publisher-domain other.example"), "{error}");
+    server.stop();
+}
+
+#[test]
 fn the_kill_switch_stays_on_after_the_server_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let kim = add_profile(dir.path(), "kim", "Kim");

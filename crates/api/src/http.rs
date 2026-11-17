@@ -62,6 +62,7 @@
 //! | GET | `/v1/profiles/{p}/callers` | | `[CallerToken]` |
 //! | POST | `/v1/profiles/{p}/callers` | `AddCallerBody` | `NewCallerToken` |
 //! | DELETE | `/v1/profiles/{p}/callers/{id}` | | |
+//! | GET | `/v1/profiles/{p}/inbound` | | `InboundStatus` |
 //!
 //! The newer calls use `POST /v1/profiles/{p}/<method name in kebab case>`, with the arguments
 //! as a JSON body.
@@ -75,6 +76,19 @@ pub const PROFILES: &str = "/v1/profiles";
 
 pub fn profile_path(profile: &str, rest: &str) -> String {
     format!("{PROFILES}/{profile}/{rest}")
+}
+
+/// The ARD catalog of a listener for callers (§5.1 of the ARD specification).
+pub const ARD_CATALOG: &str = "/.well-known/ard.json";
+
+/// The inbound MCP endpoint of a profile on a listener for callers.
+pub fn inbound_mcp_path(profile: &str) -> String {
+    format!("/agents/{profile}/mcp")
+}
+
+/// The server card of the inbound endpoint: the endpoint address and `/server-card`.
+pub fn server_card_path(profile: &str) -> String {
+    format!("{}/server-card", inbound_mcp_path(profile))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

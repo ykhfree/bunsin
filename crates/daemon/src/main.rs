@@ -155,6 +155,10 @@ enum Command {
         /// resolves to an internal address still passes. Give the list on a shared server.
         #[arg(long = "allow-upstream-host")]
         allow_upstream_hosts: Vec<String>,
+        /// A domain that profiles may publish their inbound endpoint under in the ARD catalogs,
+        /// for example acme.com. Repeat it for more domains. Without it, no profile is published.
+        #[arg(long = "ard-publisher-domain")]
+        ard_publisher_domains: Vec<String>,
         /// Let profiles start coding jobs: a coding agent CLI changes a repository on a new branch,
         /// after the profile owner approves each job. The CLI runs as the user of this server, with its
         /// own permission settings. Needs --coding-repo-root.
@@ -621,6 +625,12 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Show where the inbound endpoint is served, and whether the ARD catalogs list it or why not.
+    Inbound {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
     /// Create a caller token and print it once. It opens only the inbound endpoint of this profile.
     CallerAdd {
         #[command(flatten)]
@@ -967,6 +977,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             outer,
             allow_stdio_connectors,
             allow_upstream_hosts,
+            ard_publisher_domains,
             allow_coding,
             coding_repo_root,
             coding_programs,
@@ -979,7 +990,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
-            let mut backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
+            let mut backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts })
+                .with_ard_publishers(&ard_publisher_domains)?;
             if let (true, Some(repo_root)) = (allow_coding, coding_repo_root) {
                 let programs = coding_programs
                     .iter()
@@ -1592,6 +1604,35 @@ async fn run(cli: Cli) -> Result<(), String> {
                     None => "valid",
                 };
                 println!("{}\t{state}\t{}", caller.id, caller.label);
+            }
+        }
+        Command::Inbound { remote, profile } => {
+            let status = connect(&remote)?.inbound_status(&profile).await.map_err(text)?;
+            let word = |scope: &bunsin_core::inbound::InboundScope| json(scope).trim_matches('"').to_owned();
+            let state = if status.enabled { "on" } else { "off" };
+            println!("endpoint\t{state}\t{}", word(&status.scope));
+            for endpoint in &status.endpoints {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    word(&endpoint.listener),
+                    endpoint.mcp_url,
+                    endpoint.card_url,
+                    endpoint.catalog_url
+                );
+            }
+            match &status.ard {
+                None => println!("ard\tnot listed"),
+                Some(ard) => {
+                    let listed: Vec<String> = ard.listed_on.iter().map(word).collect();
+                    let identifier = ard.identifier.as_deref().unwrap_or("-");
+                    println!("ard\t{identifier}\tlisted on: {}", listed.join(", "));
+                    for reason in &ard.refused {
+                        println!("refused\t{reason}");
+                    }
+                    for warning in &ard.warnings {
+                        println!("warning\t{warning}");
+                    }
+                }
             }
         }
         Command::CallerAdd { remote, profile, label } => {

@@ -1095,6 +1095,7 @@ name = "bunsin-engine"
 version = "0.1.0"
 dependencies = [
  "bunsin-api",
+ "bunsin-ard",
  "bunsin-core",
  "bunsin-store",
  "bunsin-testkit",

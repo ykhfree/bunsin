@@ -7,9 +7,10 @@ use bunsin_api::http::{
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
-    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate,
-    NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, InboundStatus, LlmTest,
+    LlmUpdate, NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes,
+    PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport,
+    WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
@@ -473,6 +474,10 @@ impl EngineApi for RemoteEngine {
             self.call(Method::POST, &profile_path(profile, "callers"), Some(&body))
                 .await
         })
+    }
+
+    fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "inbound"), NO_BODY).await })
     }
 
     fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {

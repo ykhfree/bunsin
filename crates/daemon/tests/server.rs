@@ -7,7 +7,7 @@ use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_connectors::{McpConfig, McpConnector, TokenAuth};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
-use bunsin_core::inbound::RequestStatus;
+use bunsin_core::inbound::{ArdListing, InboundScope, RequestStatus};
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::ConnectorError;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
@@ -42,6 +42,10 @@ impl Backends for Fakes {
 
     fn validate(&self, profile: &str, config: &ProfileConfig) -> Result<(), String> {
         self.real.validate(profile, config)
+    }
+
+    fn ard_publishers(&self) -> Vec<String> {
+        self.real.ard_publishers()
     }
 }
 
@@ -87,7 +91,9 @@ async fn rig_with(tls: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Rig 
     let dir = tempfile::tempdir().unwrap();
     let llm = Arc::new(FakeLlm::new());
     let slack = Arc::new(FakeConnector::new("slack", vec![tool("post", "Post a message")]));
-    let real = RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default());
+    let real = RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default())
+        .with_ard_publishers(&["ACME.com".into()])
+        .unwrap();
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
         slack: slack.clone(),
@@ -1713,4 +1719,228 @@ async fn a_started_server_hands_a_question_from_its_listener_to_the_agent_at_onc
 
 fn ignore_reply() -> String {
     json!({"kind": "ignore", "rationale": "a greeting", "summary": null, "tool": null, "args_json": null}).to_string()
+}
+
+/// Turns the endpoint of `profile` on with `scope` and lists it under acme.com with `queries`.
+async fn publish(rig: &Rig, profile: &str, token: &str, scope: InboundScope, queries: &[&str]) {
+    let client = rig.client(token);
+    let mut config = client.profile_config(profile).await.unwrap();
+    config.inbound.enabled = true;
+    config.inbound.scope = scope;
+    config.inbound.description = format!("Questions for {profile}.");
+    config.inbound.ard = Some(ArdListing {
+        publisher: "acme.com".into(),
+        namespace: Some("team".into()),
+        agent_name: profile.into(),
+        representative_queries: queries.iter().map(|q| (*q).to_owned()).collect(),
+    });
+    client.set_profile_config(profile, config).await.unwrap();
+}
+
+async fn catalog(listener: &Running) -> (reqwest::header::HeaderMap, serde_json::Value) {
+    let response = reqwest::get(format!("{}/.well-known/ard.json", listener.url()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    (response.headers().clone(), response.json().await.unwrap())
+}
+
+fn identifiers(catalog: &serde_json::Value) -> Vec<&str> {
+    catalog["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["identifier"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn each_listener_lists_only_the_endpoints_it_serves_and_each_entry_names_its_own_card() {
+    let (rig, internal, public) = inbound_rig().await;
+    publish(
+        &rig,
+        "kim",
+        &rig.kim_token,
+        InboundScope::Internal,
+        &["When do we deploy?", "Who reviews?"],
+    )
+    .await;
+    publish(
+        &rig,
+        "lee",
+        &rig.lee_token,
+        InboundScope::Public,
+        &["Is the build green?", "Who is on call?"],
+    )
+    .await;
+
+    let (headers, inner) = catalog(&internal).await;
+    assert_eq!(headers["content-type"], "application/json");
+    assert_eq!(headers["access-control-allow-origin"], "*");
+    assert_eq!(
+        identifiers(&inner),
+        ["urn:air:acme.com:team:kim", "urn:air:acme.com:team:lee"]
+    );
+    let (_, outer) = catalog(&public).await;
+    assert_eq!(identifiers(&outer), ["urn:air:acme.com:team:lee"]);
+    let entry = &outer["entries"][0];
+    assert_eq!(entry["type"], "application/mcp-server-card+json");
+    assert_eq!(entry["url"], "http://localhost/agents/lee/mcp/server-card");
+    assert_eq!(entry["description"], "Questions for lee.");
+    assert_eq!(
+        inner["entries"][0]["url"],
+        "http://127.0.0.1/agents/kim/mcp/server-card"
+    );
+    // The catalog holds no owner name and no token.
+    let text = format!("{inner}{outer}");
+    assert!(!text.contains("acting for") && !text.contains("bsc_"), "{text}");
+
+    // The invariant: every entry of a listener names a card that the same listener serves.
+    for (listener, listed) in [(&internal, &inner), (&public, &outer)] {
+        for entry in listed["entries"].as_array().unwrap() {
+            let url: url::Url = entry["url"].as_str().unwrap().parse().unwrap();
+            let card = reqwest::get(format!("{}{}", listener.url(), url.path())).await.unwrap();
+            assert_eq!(card.status(), reqwest::StatusCode::OK, "{url}");
+        }
+    }
+
+    // An endpoint that is turned off leaves every catalog at once.
+    let mut config = rig.client(&rig.lee_token).profile_config("lee").await.unwrap();
+    config.inbound.enabled = false;
+    config.inbound.ard = None;
+    rig.client(&rig.lee_token)
+        .set_profile_config("lee", config)
+        .await
+        .unwrap();
+    assert_eq!(identifiers(&catalog(&internal).await.1), ["urn:air:acme.com:team:kim"]);
+    assert!(identifiers(&catalog(&public).await.1).is_empty());
+}
+
+#[tokio::test]
+async fn the_owner_sees_the_addresses_the_listing_and_why_a_catalog_leaves_it_out() {
+    let (rig, _internal, _public) = inbound_rig().await;
+    // One query is fewer than ARD asks for. The entry is listed with a warning.
+    publish(
+        &rig,
+        "lee",
+        &rig.lee_token,
+        InboundScope::Public,
+        &["Is the build green?"],
+    )
+    .await;
+    let status = rig.client(&rig.lee_token).inbound_status("lee").await.unwrap();
+    assert!(status.enabled);
+    let urls: Vec<(&str, &str)> = status
+        .endpoints
+        .iter()
+        .map(|e| (e.mcp_url.as_str(), e.catalog_url.as_str()))
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            (
+                "http://127.0.0.1/agents/lee/mcp",
+                "http://127.0.0.1/.well-known/ard.json"
+            ),
+            (
+                "http://localhost/agents/lee/mcp",
+                "http://localhost/.well-known/ard.json"
+            ),
+        ]
+    );
+    let ard = status.ard.unwrap();
+    assert_eq!(ard.identifier.as_deref(), Some("urn:air:acme.com:team:lee"));
+    assert_eq!(ard.listed_on, [InboundScope::Internal, InboundScope::Public]);
+    assert_eq!(ard.refused, Vec::<String>::new());
+    assert_eq!(ard.warnings.len(), 1);
+    assert!(
+        ard.warnings[0].contains("1 representative queries"),
+        "{:?}",
+        ard.warnings
+    );
+
+    // Settings stored by the operator before a domain was taken away, and a second profile with the
+    // same identifier. The catalogs leave them out, and the owner reads why.
+    let mut other = profile_config("Park");
+    other.inbound.enabled = true;
+    other.inbound.description = "Questions for park.".into();
+    other.inbound.ard = Some(ArdListing {
+        publisher: "other.example".into(),
+        agent_name: "park".into(),
+        ..ArdListing::default()
+    });
+    rig.engine.create_profile("park", other.clone()).await.unwrap();
+    let mut twin = other;
+    twin.inbound.scope = InboundScope::Public;
+    twin.inbound.ard = Some(ArdListing {
+        publisher: "acme.com".into(),
+        namespace: Some("team".into()),
+        agent_name: "lee".into(),
+        representative_queries: vec!["a?".into(), "b?".into()],
+    });
+    rig.engine.create_profile("twin", twin).await.unwrap();
+    let park = rig.engine.inbound_status("park").await.unwrap().ard.unwrap();
+    assert!(park.listed_on.is_empty());
+    assert!(
+        park.refused
+            .iter()
+            .any(|r| r.contains("does not allow the publisher domain `other.example`")),
+        "{:?}",
+        park.refused
+    );
+    let lee = rig
+        .client(&rig.lee_token)
+        .inbound_status("lee")
+        .await
+        .unwrap()
+        .ard
+        .unwrap();
+    assert!(lee.listed_on.is_empty());
+    assert_eq!(
+        lee.refused,
+        ["more than one profile uses the identifier `urn:air:acme.com:team:lee` (§4.2)"]
+    );
+
+    // Kim's endpoint is internal and has no listing.
+    let status = rig.kim().inbound_status("kim").await.unwrap();
+    assert_eq!(status.ard, None);
+    assert_eq!(status.endpoints.len(), 1, "kim is internal only");
+}
+
+#[tokio::test]
+async fn a_listing_that_breaks_an_ard_rule_or_the_operator_list_is_not_stored() {
+    let rig = rig().await;
+    let base = rig.kim().profile_config("kim").await.unwrap();
+    let listing = |publisher: &str, agent: &str| {
+        let mut config = base.clone();
+        config.inbound.enabled = true;
+        config.inbound.description = "Questions.".into();
+        config.inbound.ard = Some(ArdListing {
+            publisher: publisher.into(),
+            agent_name: agent.into(),
+            ..ArdListing::default()
+        });
+        config
+    };
+    for (config, why) in [
+        (listing("other.example", "kim"), "--ard-publisher-domain other.example"),
+        (listing("acme.com", "Kim Lee"), "makes no valid ARD entry"),
+    ] {
+        let error = rig.kim().set_profile_config("kim", config).await.unwrap_err();
+        assert!(matches!(&error, ApiError::Invalid(m) if m.contains(why)), "{error:?}");
+    }
+    let mut off = listing("acme.com", "kim");
+    off.inbound.enabled = false;
+    let error = rig.kim().set_profile_config("kim", off).await.unwrap_err();
+    assert!(
+        matches!(&error, ApiError::Invalid(m) if m.contains("inbound.ard")),
+        "{error:?}"
+    );
+    assert_eq!(rig.kim().profile_config("kim").await.unwrap().inbound.ard, None);
+    // The operator's list holds domains only.
+    assert!(
+        RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default())
+            .with_ard_publishers(&["https://acme.com".into()])
+            .is_err()
+    );
 }

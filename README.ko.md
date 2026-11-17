@@ -27,7 +27,7 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
   원칙과 poll도 창에서 정합니다.
-- **아직 만들지 않은 것:** ARD 게시와 검색, MCP 서버용 OAuth, webhook 수신.
+- **아직 만들지 않은 것:** ARD 검색, MCP 서버용 OAuth, webhook 수신.
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
@@ -187,6 +187,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   두 리스너는 같은 주소를 쓸 수 없습니다. 서버는 키를 읽기 전에 이것을 모두 검사합니다.
   이 리스너는 endpoint를 켠 프로필의 인바운드 endpoint를 제공합니다([다른 사람이 내 agent에게 묻게 하기](#다른-사람이-내-agent에게-묻게-하기) 참고).
   내부 리스너는 범위 `internal`과 `public`을, 공개 리스너는 `public`만 제공합니다.
+- **ARD 게시.** `--ard-publisher-domain acme.com`(여러 번 줄 수 있음)은 프로필이 endpoint를 게시할 수 있는 도메인을 정합니다.
+  이 옵션이 없으면 어떤 프로필도 게시되지 않고, 서버는 `inbound.ard`가 있는 설정을 거부합니다.
+  호출자용 리스너는 자기가 제공하는 프로필의 ARD catalog `/.well-known/ard.json`을 제공합니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
 ## agent 설정 (프로필 소유자)
@@ -677,7 +680,21 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
   리스너 하나에서 동시에 64개를 넘는 요청은 `503`을 받습니다. 호출자는 `get_request`를 1분에 120번까지 부를 수 있습니다. 이 횟수는 메모리에서만 셉니다.
 - **server card**는 `<리스너 URL>/agents/<프로필>/mcp/server-card`에 있습니다(`application/mcp-server-card+json`, token 불필요).
   제목, 설명, endpoint URL을 담고, token과 소유자 이름은 담지 않습니다. 그 프로필을 제공하지 않는 리스너는 `404`를 돌려줍니다.
-- 아직 만들지 않은 것: ARD catalog에 card 게시, 호출자용 OAuth.
+- **ARD catalog.** `inbound`에 `ard`를 넣으면 endpoint가 catalog `<리스너 URL>/.well-known/ard.json`(Agentic Resource Discovery v0.91)에 실립니다.
+
+  ```json
+  "ard": {"publisher": "acme.com", "namespace": "team", "agent_name": "kim",
+          "representative_queries": ["When do we deploy?", "Who reviews a release?"]}
+  ```
+
+  항목의 identifier는 `urn:air:acme.com:team:kim`, type은 `application/mcp-server-card+json`, `url`은 같은 리스너의 server card입니다.
+  표시 이름은 `title`(없으면 `agent_name`)이고, 설명은 `description`입니다.
+  내부 리스너는 범위 `internal`과 `public`을, 공개 리스너는 `public`만 싣습니다. catalog는 그 리스너가 제공하는 endpoint만 싣습니다.
+  publisher는 서버 운영자가 허용한 도메인이어야 합니다. 항목이 ARD의 필수 규칙을 어기면 서버가 설정을 거부합니다.
+  ARD는 대표 질문을 2~5개 권합니다. 개수가 다르면 경고와 함께 싣습니다. 두 프로필이 같은 identifier를 만들면 어느 catalog도 둘 다 싣지 않습니다.
+- `bunsind inbound kim`은 리스너마다 endpoint와 catalog의 주소, identifier, 항목을 싣는 리스너, catalog가 항목을 빼는 이유
+  (예: 운영자가 더 이상 허용하지 않는 publisher 도메인), 경고를 보여 줍니다.
+- 아직 만들지 않은 것: 호출자용 OAuth.
 
 ### agent와 일하기
 

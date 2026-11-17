@@ -131,6 +131,8 @@ pub struct RealBackends {
     upstream: UpstreamPolicy,
     /// Runs coding jobs. `None` unless the operator allows coding.
     coder: Option<Arc<coding::RealCoder>>,
+    /// The publisher domains that ARD entries may name, in lower case. Empty: nothing is published.
+    ard_publishers: Vec<String>,
 }
 
 impl RealBackends {
@@ -144,7 +146,25 @@ impl RealBackends {
             allow_stdio,
             upstream,
             coder: None,
+            ard_publishers: Vec::new(),
         }
+    }
+
+    /// Lets profiles publish their inbound endpoint in the ARD catalogs under these domains.
+    /// A domain is letters, digits, `-` and `.`, with at least one `.`.
+    pub fn with_ard_publishers(mut self, domains: &[String]) -> Result<Self, String> {
+        for domain in domains {
+            let domain = domain.trim().to_ascii_lowercase();
+            let valid = domain.contains('.')
+                && domain
+                    .split('.')
+                    .all(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+            if !valid {
+                return Err(format!("--ard-publisher-domain `{domain}` is not a domain name"));
+            }
+            self.ard_publishers.push(domain);
+        }
+        Ok(self)
     }
 
     /// Lets profiles run coding jobs on repositories under the root of `access`.
@@ -348,6 +368,10 @@ impl Backends for RealBackends {
         }
     }
 
+    fn ard_publishers(&self) -> Vec<String> {
+        self.ard_publishers.clone()
+    }
+
     fn has_server_secret(&self, profile: &str, key: &str) -> bool {
         secret_env_name(profile, key).is_ok_and(|name| (self.secrets)(&name).is_some_and(|value| !value.is_empty()))
     }
@@ -360,6 +384,15 @@ impl Backends for RealBackends {
                 "the settings have `coding`, but the server operator did not start the server with --allow-coding",
             )?;
             coder.check_settings(settings)?;
+        }
+        if let Some(ard) = &config.inbound.ard
+            && !self.ard_publishers.contains(&ard.publisher.trim().to_ascii_lowercase())
+        {
+            return Err(format!(
+                "the server operator does not allow the ARD publisher domain `{}`: \
+                 the server must start with --ard-publisher-domain {}",
+                ard.publisher, ard.publisher
+            ));
         }
         if !config.llm.is_null() {
             secret_env_name(profile, &self.llm_section(&config.llm)?.token_secret)?;

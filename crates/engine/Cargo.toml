@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bunsin-api.workspace = true
+bunsin-ard.workspace = true
 bunsin-core.workspace = true
 bunsin-store.workspace = true
 serde_json.workspace = true

@@ -31,7 +31,7 @@ Bunsin is in early development. Read this list before you use it.
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
-- **Not built yet:** ARD publishing and search, OAuth for MCP servers, webhook intake.
+- **Not built yet:** ARD search, OAuth for MCP servers, webhook intake.
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
   a real MCP server, or the real Slack, Jira or Confluence API.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
@@ -221,6 +221,10 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   They serve the inbound endpoints of the profiles that turn them on (see
   [Let others ask your agent](#let-others-ask-your-agent)): the internal listener serves the
   scopes `internal` and `public`, the public listener only `public`.
+- **ARD publishing.** `--ard-publisher-domain acme.com` (repeat it for more) names the
+  domains that profiles may publish their endpoint under. Without it, no profile is published,
+  and the server refuses settings with `inbound.ard`. A listener for callers serves the ARD
+  catalog `/.well-known/ard.json` of the profiles it serves.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 
@@ -787,7 +791,27 @@ bunsind caller-revoke kim 1                        # the next request with it is
   (`application/mcp-server-card+json`, no token needed). It holds the title, the description and
   the endpoint URL, never a token or the owner's name. A listener that does not serve the
   profile answers `404`.
-- Not built yet: publishing the card in an ARD catalog, OAuth for callers.
+- **ARD catalog.** Add `ard` to `inbound` to list the endpoint in the catalog
+  `<listener URL>/.well-known/ard.json` (Agentic Resource Discovery, v0.91):
+
+  ```json
+  "ard": {"publisher": "acme.com", "namespace": "team", "agent_name": "kim",
+          "representative_queries": ["When do we deploy?", "Who reviews a release?"]}
+  ```
+
+  The entry's identifier is `urn:air:acme.com:team:kim`, its type
+  `application/mcp-server-card+json`, and its `url` the server card on the same listener. Its
+  display name is `title` (or `agent_name`), and its description is `description`. The
+  internal listener lists the scopes `internal` and `public`, the public listener only
+  `public`: a catalog lists exactly the endpoints that its listener serves. The publisher must
+  be a domain that the server operator allows. The server refuses settings whose entry breaks a
+  rule of ARD that an entry must follow. ARD asks for 2 to 5 representative queries; another
+  count is listed with a warning. If two profiles make the same identifier, no catalog lists
+  either of them.
+- `bunsind inbound kim` shows the addresses of the endpoint and the catalog on each listener,
+  the identifier, the listeners whose catalog lists it, and why a catalog leaves it out
+  (for example a publisher domain that the operator no longer allows), with the warnings.
+- Not built yet: OAuth for callers.
 
 ### Work with the agent
 

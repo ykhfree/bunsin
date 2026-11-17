@@ -45,9 +45,9 @@
 - **리스너 셋.** 리스너마다 router가 따로 있다.
   - 제어(`--listen`): `/v1/...`만 있다. 접속 token을 받는다.
   - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
-    인바운드 MCP와 server card(7절)가 여기에 있다. ARD와 webhook의 경로도 여기에 둔다(아직 없음).
-  - 리스너 L은 `served_on(config, L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
-    MCP 경로와 card가 이 함수 하나를 쓴다. ARD catalog도 이 함수를 써야 한다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다).
+    인바운드 MCP와 server card, ARD catalog(7절)가 여기에 있다. webhook의 경로도 여기에 둔다(아직 없음).
+  - 리스너 L은 `InboundConfig::served_on(L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
+    MCP 경로, card, ARD catalog가 이 함수 하나를 쓴다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다). daemon의 `served_on(config, Reach)`는 이 함수를 부른다.
   - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
     `https://`만 받고, `http://`는 host가 loopback일 때만 받는다. 사용자 이름, query, fragment는 거부한다.
   - 리스너마다 제어 API의 TLS 규칙(loopback이 아니면 TLS)을 적용한다. 같은 주소를 두 리스너가 쓸 수 없다(포트 0은 예외).
@@ -415,7 +415,18 @@
   - 본문: `$schema`(`https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`, 스키마의 pattern이 이 값만 받는다), `name`(리스너 host의 label을 뒤집고 `/<프로필>`, 예 `com.example.agents/kim`),
     `version`(bunsind 버전), `description`, `title`(있으면), `remotes: [{type: "streamable-http", url, headers: [{name: "Authorization", isRequired, isSecret}]}]`.
     token과 소유자 이름은 넣지 않는다.
-- 아직 없는 것: ARD 게시(card를 catalog에 싣기), webhook intake(같은 `intake` 표를 쓸 예정), 호출자용 OAuth.
+- **ARD 게시**(engine `ard.rs`, crate `bunsin-ard`): `inbound.ard: {publisher, namespace?, agent_name, representative_queries}`.
+  - 운영자의 `--ard-publisher-domain`(반복) 목록 안의 publisher만 게시한다. 목록이 없으면 아무도 게시하지 않는다.
+    `RealBackends::validate`가 저장할 때, `Backends::ard_publishers`로 catalog가 쓸 때 검사한다. 기각: 소유자가 고르기(운영자 host에서 남의 도메인을 주장한다).
+  - `check_config`의 `check_ard`가 자리표시 URL로 `build_entry`를 돌려 MUST 위반을 거부한다. `ard`는 endpoint가 켜져 있어야 한다.
+    대표 질문 수가 2~5 밖이면 SHOULD 위반이라 경고와 함께 싣는다(설계 결정).
+  - `GET /.well-known/ard.json`(외부 리스너마다, 인증 없음, `Access-Control-Allow-Origin: *`): 요청마다 `bunsin_ard::catalog`로 만든다.
+    endpoint가 켜지고 publisher가 허용된 모든 프로필을 넘겨 identifier 중복을 전체에서 검사하고, catalog의 scope 규칙(공개 리스너는 `public`만)이 `served_on`과 같은 것을 고른다.
+    항목의 `url`은 같은 리스너의 card URL이다. 중복 identifier는 두 프로필 모두 빠진다.
+  - 엔진은 `serve_outer`가 등록한 리스너 주소(`add_outer_listener`)로 URL을 만든다.
+  - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 ARD identifier,
+    싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고.
+- 아직 없는 것: webhook intake(같은 `intake` 표를 쓸 예정), 호출자용 OAuth.
 
 ## 8. AI 표시
 
@@ -818,7 +829,8 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | REST API 커넥터(Slack, Jira, Confluence의 고정 도구, 설정, 저장, CLI, 창) | 구현, 테스트 있음(core, connectors, 엔진, 서버, CLI, 창). 로컬 stub으로만 테스트 |
 | 구성 마법사, 비밀 저장소 | 없음 |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
-| ARD 게시와 검색 | 없음 |
+| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI). 창에는 없음. |
+| ARD 검색 | 없음 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 

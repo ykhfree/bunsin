@@ -7,7 +7,7 @@ use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::CodingConfig;
 use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
-use bunsin_core::inbound::InboundConfig;
+use bunsin_core::inbound::{InboundConfig, InboundScope};
 use bunsin_core::lint::LintFinding;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
@@ -433,6 +433,40 @@ pub struct ApiConnectorUpdate {
     pub expected: Expected<Option<ConnectorConnection>>,
 }
 
+/// Where the inbound endpoint of a profile is served, and its ARD listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundStatus {
+    pub enabled: bool,
+    pub scope: InboundScope,
+    /// One for each listener for callers that serves the endpoint now.
+    pub endpoints: Vec<InboundEndpoint>,
+    /// `None` if the settings have no `inbound.ard`.
+    pub ard: Option<ArdStatus>,
+}
+
+/// The addresses of the endpoint on one listener for callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundEndpoint {
+    pub listener: InboundScope,
+    pub mcp_url: String,
+    pub card_url: String,
+    /// The `/.well-known/ard.json` of this listener.
+    pub catalog_url: String,
+}
+
+/// What the ARD catalogs do with the listing of a profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArdStatus {
+    /// `urn:air:...`, if the listing makes one.
+    pub identifier: Option<String>,
+    /// The listeners whose catalog lists the entry.
+    pub listed_on: Vec<InboundScope>,
+    /// Why the catalogs leave the entry out. Empty if a catalog lists it.
+    pub refused: Vec<String>,
+    /// Rules that the entry should follow and does not. The entry is listed anyway.
+    pub warnings: Vec<String>,
+}
+
 /// A new caller token. The server shows the token this once and keeps only its hash.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewCallerToken {
@@ -709,4 +743,6 @@ pub trait EngineApi: Send + Sync {
     fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>>;
     /// Revokes a caller token. The next request with it is refused.
     fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Where the inbound endpoint is served, and whether the ARD catalogs list it or why not.
+    fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>>;
 }

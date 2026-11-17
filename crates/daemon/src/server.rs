@@ -17,14 +17,15 @@ use bunsin_api::http::{
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate,
-    Connections, ConnectorUpdate, EngineApi, EvalReport, LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions,
-    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
-    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    Connections, ConnectorUpdate, EngineApi, EvalReport, InboundStatus, LlmTest, LlmUpdate, NewCallerToken, Outcome,
+    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundScope;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
@@ -623,6 +624,15 @@ async fn add_caller_token(
     Ok(Json(engine.add_caller_token(&profile, &body.label).await?))
 }
 
+async fn inbound_status(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<InboundStatus> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.inbound_status(&profile).await?))
+}
+
 async fn revoke_caller_token(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -681,6 +691,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         )
         .route(&profile("callers"), get(caller_tokens).post(add_caller_token))
         .route(&profile("callers/{id}"), axum::routing::delete(revoke_caller_token))
+        .route(&profile("inbound"), get(inbound_status))
         .route(&profile("connections"), get(get_connections))
         .route(&profile("connections/llm"), put(put_llm))
         .route(
@@ -712,6 +723,14 @@ pub enum Reach {
 }
 
 impl Reach {
+    /// The endpoint scope that this listener serves at most.
+    pub fn scope(self) -> InboundScope {
+        match self {
+            Reach::Internal => InboundScope::Internal,
+            Reach::Public => InboundScope::Public,
+        }
+    }
+
     /// The word in the options of this listener, for example `--internal-listen`.
     pub fn word(self) -> &'static str {
         match self {
@@ -884,6 +903,11 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Running, 
 /// A question that a caller asks there signals `wake`.
 pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig, wake: Arc<Notify>) -> Result<Running, ServeError> {
     config.check()?;
+    // The catalogs and the owner's inbound status name the address that callers use.
+    engine.add_outer_listener(bunsin_engine::OuterListener {
+        scope: config.reach.scope(),
+        url: config.url.as_str().to_owned(),
+    });
     let router = crate::inbound::routes(engine, &config, wake);
     bind(router, config.listen, config.tls).await
 }

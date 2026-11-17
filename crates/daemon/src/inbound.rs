@@ -11,8 +11,9 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use bunsin_api::http::{ARD_CATALOG, inbound_mcp_path};
 use bunsin_api::{ApiError, EngineApi, ProfileConfig};
-use bunsin_core::inbound::{InboundScope, MAX_QUESTION_CHARS};
+use bunsin_core::inbound::MAX_QUESTION_CHARS;
 use bunsin_core::records::Caller;
 use bunsin_engine::Engine;
 use rmcp::model::{
@@ -42,7 +43,7 @@ const CARD_TYPE: &str = "application/mcp-server-card+json";
 /// True if the listener of `reach` serves the inbound endpoint of a profile with these settings.
 /// The routes and the server card use this one check.
 pub fn served_on(config: &ProfileConfig, reach: Reach) -> bool {
-    config.inbound.enabled && (reach == Reach::Internal || config.inbound.scope == InboundScope::Public)
+    config.inbound.served_on(reach.scope())
 }
 
 struct Inbound {
@@ -102,6 +103,7 @@ pub fn routes(engine: Arc<Engine>, listener: &OuterConfig, wake: Arc<Notify>) ->
         .route_service("/agents/{profile}/mcp", service)
         .route_layer(from_fn_with_state(state.clone(), authenticate))
         .route("/agents/{profile}/mcp/server-card", get(server_card))
+        .route(ARD_CATALOG, get(ard_catalog))
         .with_state(state)
 }
 
@@ -156,7 +158,7 @@ async fn server_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Stri
         "description": config.inbound.description.trim(),
         "remotes": [{
             "type": "streamable-http",
-            "url": state.listener.url_of(&format!("/agents/{profile}/mcp")),
+            "url": state.listener.url_of(&inbound_mcp_path(&profile)),
             "headers": [{
                 "name": "Authorization",
                 "description": "Bearer and the caller token that the owner of this agent gave you",
@@ -179,6 +181,22 @@ async fn server_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Stri
         (header::ETAG, etag),
     ] {
         headers.insert(name, HeaderValue::from_str(&value).expect("a valid header value"));
+    }
+    response
+}
+
+/// The ARD catalog of this listener: the profiles that it serves, each with the server card on this
+/// listener. It has no token and no owner name.
+async fn ard_catalog(State(state): State<Arc<Inbound>>) -> Response {
+    let body = state.engine.ard_catalog(state.listener.reach.scope()).body();
+    let mut response = body.into_response();
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::CONTENT_TYPE, "application/json"),
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (header::CACHE_CONTROL, "public, max-age=300"),
+    ] {
+        headers.insert(name, HeaderValue::from_static(value));
     }
     response
 }

@@ -2,6 +2,7 @@
 //!
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
+mod ard;
 mod autonomy;
 mod callers;
 mod candidates;
@@ -20,15 +21,17 @@ mod principles;
 mod resume;
 mod secrets;
 
+pub use ard::OuterListener;
 pub use preload::PRELOAD_SOURCE;
 pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
-    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, LlmTest, LlmUpdate,
-    NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, InboundStatus,
+    LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
+    PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
+    Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::autonomy::AutonomyThresholds;
@@ -126,6 +129,11 @@ pub trait Backends: Send + Sync {
         false
     }
 
+    /// The publisher domains that the server operator allows in ARD entries, in lower case.
+    fn ard_publishers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The runner of coding jobs. Only a server whose operator allows coding has one.
     fn coder(&self) -> Result<Arc<dyn Coder>, String> {
         Err("this server does not run coding jobs: its operator did not start it with --allow-coding".into())
@@ -168,6 +176,8 @@ pub struct Engine {
     last_polls: Mutex<HashMap<(String, String), i64>>,
     /// Encrypts and decrypts the tokens that owners store.
     secret_box: secrets::SecretBox,
+    /// The listeners for callers of the running server. The ARD catalogs and the inbound status name them.
+    outer: Mutex<Vec<OuterListener>>,
     /// Held for the life of the engine. A second engine on the same directory fails to open.
     _lock: File,
 }
@@ -257,6 +267,7 @@ impl Engine {
             polling: Mutex::new(HashSet::new()),
             last_polls: Mutex::new(HashMap::new()),
             secret_box,
+            outer: Mutex::new(Vec::new()),
             _lock: lock,
         })
     }
@@ -327,6 +338,7 @@ impl Engine {
         config.notes.check().map_err(ApiError::Invalid)?;
         Self::check_coding_rules(config)?;
         Self::check_inbound(config)?;
+        Self::check_ard(config)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -1523,5 +1535,9 @@ impl EngineApi for Engine {
 
     fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.revoke_caller(profile, id) })
+    }
+
+    fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>> {
+        Box::pin(async move { self.read_inbound_status(profile) })
     }
 }
