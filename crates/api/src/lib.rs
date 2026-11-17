@@ -7,6 +7,7 @@ use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::CodingConfig;
 use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundConfig;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
@@ -60,6 +61,9 @@ pub struct ProfileConfig {
     /// Coding delegation. `None`: the agent cannot start a coding job.
     #[serde(default)]
     pub coding: Option<CodingConfig>,
+    /// The inbound endpoint where other people's agents ask questions. Off by default.
+    #[serde(default)]
+    pub inbound: InboundConfig,
 }
 
 impl ProfileConfig {
@@ -82,6 +86,7 @@ impl ProfileConfig {
             eval: EvalConfig::default(),
             notes: NotesConfig::default(),
             coding: None,
+            inbound: InboundConfig::default(),
         }
     }
 }

@@ -639,6 +639,22 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 - 호출자 token은 내 프로필의 인바운드 endpoint만 엽니다. 제어 API는 열지 못합니다. 접속 token은 인바운드 endpoint를 열지 못합니다.
 - 서버는 호출자 token의 해시만 저장합니다. 폐기한 token은 폐기 시각과 함께 목록에 남습니다.
 - 창의 Agent 화면이 호출자 token을 보여 줍니다. 거기서 token을 만들고(창이 한 번만 보여 줍니다), 두 번 눌러 폐기합니다.
+- 설정 파일에서 endpoint를 켭니다. 켜면 답 도구의 규칙이 추가됩니다.
+
+  ```json
+  "inbound": {"enabled": true, "scope": "internal", "title": "Kim's agent",
+              "description": "Questions about the deploy schedule."}
+  ```
+
+  endpoint가 켜져 있으면 `description`(1~100자)이 필요합니다.
+- 질문은 서버에서 기다립니다. agent는 질문을 백그라운드에서 처리하고 내장 도구 `bunsin.inbound/reply`로 답합니다.
+  **모든 답은 소유자의 승인을 기다립니다.** 이 도구의 `autonomous` 단계는 서버가 거부합니다.
+  답에는 AI 표시가 붙고, 소유자의 수정은 교정 기록으로 남습니다. 호출자의 질문만 이 도구를 봅니다.
+- 프로필마다 한도가 있습니다: 호출자당 시간당 질문 20개, 처리하지 않은 질문 50개, 질문당 4,000자.
+  한도는 저장된 질문으로 세므로 재시작해도 초기화되지 않습니다. 질문은 개인정보 필터를 거친 뒤에 저장됩니다.
+  정지 스위치가 켜져 있으면 질문은 기다립니다.
+- 세 번 실패한 질문은 failed로 끝나고, 승인함에 알림이 하나 생깁니다.
+- 질문을 처리하며 agent가 제안한 페이지 변경은 `notes.auto_apply`가 켜져 있어도 언제나 소유자를 기다립니다.
 - 아직 만들지 않은 것: 인바운드 endpoint 자체.
 
 ### agent와 일하기

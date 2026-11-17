@@ -7,6 +7,7 @@ pub mod coding;
 pub mod context;
 pub mod eval;
 pub mod event;
+pub mod inbound;
 pub mod lint;
 pub mod llm;
 pub mod marker;

@@ -1,3 +1,6 @@
+mod intake;
+
+pub use intake::IntakeRow;
 mod learning;
 mod lint;
 
@@ -359,6 +362,7 @@ impl ProfileStore {
         db.execute_batch(SCHEMA)?;
         db.execute_batch(learning::SCHEMA)?;
         db.execute_batch(lint::SCHEMA)?;
+        db.execute_batch(intake::SCHEMA)?;
         // A database from before events could be retried lacks two columns.
         let has_status: bool = db.query_row(
             "SELECT EXISTS (SELECT 1 FROM pragma_table_info('events') WHERE name = 'status')",

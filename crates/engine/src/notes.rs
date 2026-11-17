@@ -138,6 +138,7 @@ impl Engine {
         let may_apply = ctx.config.notes.auto_apply
             && event.channel == Channel::Owner
             && event.source != crate::PRELOAD_SOURCE
+            && event.source != bunsin_core::inbound::INBOUND_SOURCE
             && !store.kill_switch().map_err(store_error)?;
         for update in updates {
             let existing = store.wiki_page(&update.slug).map_err(store_error)?;

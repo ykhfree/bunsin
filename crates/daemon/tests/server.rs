@@ -6,6 +6,7 @@ use bunsin_api::{
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::RequestStatus;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_core::privacy::{CustomPattern, PrivacyConfig};
@@ -1389,4 +1390,43 @@ async fn an_owner_manages_the_caller_tokens_of_the_own_profile_only() {
         .map(|entry| entry.kind)
         .collect();
     assert!(audit.contains(&"caller_token_added".to_owned()) && audit.contains(&"caller_token_revoked".to_owned()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_intake_task_hands_a_stored_question_to_the_agent_and_stops_with_the_server() {
+    use bunsin_daemon::server::Poller;
+    use std::time::{Duration, Instant};
+    let rig = rig().await;
+    let mut config = rig.kim().profile_config("kim").await.unwrap();
+    config.inbound.enabled = true;
+    config.inbound.description = "Questions about the deploy schedule.".into();
+    rig.kim().set_profile_config("kim", config).await.unwrap();
+    let (_, token) = rig.engine.app_store().add_caller_token("kim", "bot", 1).unwrap();
+    let caller = rig.engine.app_store().caller(&token).unwrap().unwrap();
+    let answer = json!({"kind": "tool_call", "rationale": "asked", "summary": null,
+        "tool": "bunsin.inbound/reply", "args_json": json!({"text": "Friday."}).to_string()});
+    rig.llm.reply(&answer.to_string(), 10);
+
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let poller = Poller::start_with(rig.engine.clone(), wake.clone());
+    let asked = rig.engine.ask(&caller, "When do we deploy?").unwrap();
+    wake.notify_one();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while rig.engine.request(&caller, &asked.request_id).unwrap().status == RequestStatus::Working {
+        assert!(Instant::now() < deadline, "the question was not handled");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        rig.engine.request(&caller, &asked.request_id).unwrap().status,
+        RequestStatus::PendingApproval
+    );
+    // A stop ends both tasks. A question after the stop waits for the next start.
+    poller.stop().await;
+    let later = rig.engine.ask(&caller, "And next week?").unwrap();
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        rig.engine.request(&caller, &later.request_id).unwrap().status,
+        RequestStatus::Working
+    );
 }

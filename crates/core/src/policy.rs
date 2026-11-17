@@ -148,9 +148,10 @@ impl Policy {
             (Tier::Observe, _) => Decision::RecordOnly,
             (Tier::Draft, _) => Decision::DraftOnly,
             (Tier::Approve, _) => Decision::NeedsApproval,
-            // A delete is never autonomous, and neither is a coding job.
+            // A delete is never autonomous, and neither is a coding job or an answer to an inbound caller.
             (Tier::Autonomous, ToolClass::Delete) => Decision::NeedsApproval,
             (Tier::Autonomous, _) if crate::coding::is_coding_tool(tool_id) => Decision::NeedsApproval,
+            (Tier::Autonomous, _) if crate::inbound::is_inbound_tool(tool_id) => Decision::NeedsApproval,
             (Tier::Autonomous, _) if held => Decision::NeedsApproval,
             (Tier::Autonomous, _) => Decision::Execute,
         }
@@ -257,6 +258,24 @@ mod tests {
         // The same tool name under a connector is no coding tool.
         let p = policy(&[("ci/start", ToolClass::Write, Tier::Autonomous)]);
         assert_eq!(p.decide("ci/start", true, false, false), Decision::Execute);
+    }
+
+    #[test]
+    fn an_answer_to_an_inbound_caller_always_asks_the_owner() {
+        let p = policy(&[("bunsin.inbound/reply", ToolClass::Write, Tier::Autonomous)]);
+        assert_eq!(
+            p.decide("bunsin.inbound/reply", true, false, false),
+            Decision::NeedsApproval
+        );
+        assert_eq!(
+            p.decide("bunsin.inbound/reply", true, true, false),
+            Decision::Deny(DenyReason::KillSwitch)
+        );
+        let p = policy(&[("bunsin.inbound/reply", ToolClass::Write, Tier::Draft)]);
+        assert_eq!(
+            p.decide("bunsin.inbound/reply", true, false, false),
+            Decision::DraftOnly
+        );
     }
 
     #[test]

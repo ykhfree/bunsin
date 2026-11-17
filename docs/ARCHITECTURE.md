@@ -375,7 +375,30 @@
 - v1은 MCP 서버 카드를 쓴다. A2A는 두 번째 프로토콜 스택이 되므로 미룬다.
 - 도구는 둘이다: `ask`는 즉시 `{request_id, pending_approval}`을 돌려주고, `get_request(id)`가 결과를 돌려준다.
 - 인바운드 요청은 신뢰하지 않는 데이터로 수신 단계에 들어간다. 승인함을 우회하지 않는다.
-- 인증은 프로필별 호출자 bearer token이다. token은 해시로 저장한다. OAuth는 다음 단계이다.
+- 인증은 프로필별 호출자 bearer token이다(9절). token은 해시로 저장한다. OAuth는 다음 단계이다.
+- **설정** `inbound: {enabled(기본 false), scope(internal | public, 기본 internal), title?, description}`(`bunsin_core::inbound`).
+  켜져 있으면 description은 1~100자, title은 1~100자이다. server card의 스키마가 100자까지만 받기 때문이다(설계의 500자에서 바꿈).
+  `set_profile_config`가 endpoint를 꺼짐에서 켜짐으로 바꾸고 답 규칙이 없으면 `{class: write, tier: approve, outgoing_text: {arg: "text"}}`를 넣는다.
+- **intake**(agent.db): `intake(id, channel, delivery_id, caller_id, event, event_key, received_at, attempts, next_try_at, outcome, UNIQUE(channel, delivery_id))`.
+  - `ask`는 질문을 필터를 거친 `InboundEvent`(source `bunsin.inbound`, external_id = request ID, author `caller:<label>`, channel outside)로 저장하고 바로 답한다.
+    `ingest`는 LLM을 기다리기 때문이다. request ID는 `req_`와 OS 난수 16바이트의 hex이다.
+  - 한도: 질문 1~4,000자, 호출자당 시간당 20개, 프로필당 처리하지 않은 질문 50개. 한도는 `intake` 행으로 세므로 재시작 뒤에도 유지된다.
+  - `drain_intake`는 서버의 intake task 하나가 부른다(시작할 때, 5초마다, `ask` 직후의 신호). 정지 스위치가 켜진 프로필은 건너뛴다.
+    행마다 `ingest_event`를 부른다. `Failed`나 `Err`이면 `60초 × 시도 수` 뒤에 다시 한다(이벤트는 `events`에서 열린 채이다).
+    `MAX_EVENT_ATTEMPTS`+1번째 호출은 포기 항목을 넣고 `Failed`를 돌려주므로, 그 뒤 `outcome`을 `failed`로 쓴다. 그 밖의 결과는 `Outcome`의 이름이 `outcome`이 된다.
+  - SIGTERM이면 intake task도 폴링 task처럼 진행 중인 주기를 끝내고 멈춘다(`Poller::stop`).
+- **요청 상태**(`request_status`, 처음 맞는 규칙): `outcome`이 없으면 `working`. `failed`이거나 항목이 failed이면 `failed`.
+  답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). ignored, denied, recorded이거나 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
+  `get_request`는 `(channel, request ID, caller_id)`로 찾는다. 다른 호출자의 ID와 없는 ID는 같은 오류이다.
+- **답 도구 `bunsin.inbound/reply {text}`**
+  - source가 `bunsin.inbound`인 이벤트에만 보인다. 다른 이벤트의 제안은 수리 요청으로 돌린다.
+  - 언제나 승인: `Policy::decide`가 이 도구의 `autonomous`를 `NeedsApproval`로 낮추고(coding 도구와 같다), `check_config`가 `autonomous` 규칙의 저장을 거부한다.
+    이유: 자율 답은 호출자 token을 읽기 도구 전체에 대한 질의 창구로 만든다. 7절 "승인함을 우회하지 않는다"를 지킨다.
+  - 규칙은 class `write`, outgoing text `{arg: "text"}`여야 한다. 다른 `bunsin.inbound/*` 도구는 없다.
+  - `decide`는 이 도구에 pin 검사를 하지 않는다(명세가 코드에 있다). `execute`는 connector를 부르지 않는다. intake 행이 있는지 보고 항목을 `executed`로 옮긴다(감사 `inbound_answered`).
+  - 그래서 AI 표시, 정지 스위치, 수정의 교정 기록, 1회 실행이 다른 쓰기와 같다. 기각: 새 `InboxBody` variant(CLI와 app이 전부 match한다).
+- 인바운드 질문에서 나온 notes 변경은 자동 반영하지 않는다(channel outside, source 검사 둘 다).
+- 아직 없는 것: MCP endpoint와 server card(다음 단계), webhook intake(같은 `intake` 표를 쓸 예정).
 
 ## 8. AI 표시
 
@@ -758,6 +781,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
+| 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP endpoint는 없음 |
 | ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |

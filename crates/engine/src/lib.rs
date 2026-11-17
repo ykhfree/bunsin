@@ -9,6 +9,7 @@ mod coding;
 mod connections;
 mod corrections;
 mod eval;
+mod intake;
 mod lint;
 mod llm_log;
 mod notes;
@@ -325,6 +326,7 @@ impl Engine {
         }
         config.notes.check().map_err(ApiError::Invalid)?;
         Self::check_coding_rules(config)?;
+        Self::check_inbound(config)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -452,6 +454,7 @@ impl Engine {
             ..
         } = ctx;
         let mut tools = Self::tool_hints(config);
+        tools.extend(Self::reply_hint(config, event));
         // Replay gets no notes and no corrections: they hold facts from after the replayed event,
         // and a correction can hold the real reply.
         let (corrections, notes_index) = match allow_reads {
@@ -536,6 +539,10 @@ impl Engine {
                             .to_owned(),
                     )
                 }
+                Ok(reply) => match Self::reply_misuse(event, &reply.proposal) {
+                    Some(error) => Err(error),
+                    None => Ok(reply),
+                },
                 other => other,
             };
             let (proposal, wiki_updates) = match parsed {
@@ -654,8 +661,8 @@ impl Engine {
         let held = store.is_held(tool_id).map_err(store_error)?;
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
-            // The specification of a built-in coding tool is in the code, so it cannot change.
-            Some(_) if is_coding_tool(tool_id) => true,
+            // The specification of a built-in tool is in the code, so it cannot change.
+            Some(_) if is_coding_tool(tool_id) || tool_id == bunsin_core::inbound::REPLY_TOOL => true,
             Some((connector, tool)) if config.policy.rules.contains_key(tool_id) => {
                 match (config.approved_tools.get(connector), runtime.connector(connector)) {
                     (Some(approved), Ok(live)) => match live.list_tools().await {
@@ -696,6 +703,10 @@ impl Engine {
                 Ok(()) => Ok(Outcome::Started { inbox_id: item.id }),
                 Err(error) => self.execution_failed(ctx, item, tool_id, error),
             };
+        }
+        // An answer to an inbound caller goes back through `get_request`, not through a connector.
+        if tool_id == bunsin_core::inbound::REPLY_TOOL {
+            return self.answer_request(ctx, item);
         }
         let result = match split_tool_id(tool_id) {
             Some((connector, tool)) => match runtime.connector(connector) {
@@ -1220,6 +1231,7 @@ impl EngineApi for Engine {
     fn set_profile_config<'a>(&'a self, profile: &'a str, config: ProfileConfig) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let store = self.store(profile)?;
+            let config = Self::with_reply_rule(&Self::config(&store)?, config);
             self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
             Self::check_config(&config)?;
             Self::save_config(&store, &config)?;

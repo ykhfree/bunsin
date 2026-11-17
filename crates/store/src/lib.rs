@@ -3,7 +3,7 @@
 
 mod profile;
 
-pub use profile::{EventStart, LlmCall, ProfileStore, SealedSecret, WikiWrite};
+pub use profile::{EventStart, IntakeRow, LlmCall, ProfileStore, SealedSecret, WikiWrite};
 
 use bunsin_core::records::{Caller, CallerToken, ProfileInfo};
 use rusqlite::Connection;

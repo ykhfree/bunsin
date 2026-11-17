@@ -740,6 +740,24 @@ bunsind caller-revoke kim 1                        # the next request with it is
   the time of its revocation.
 - The window lists the caller tokens in the Agent view. There you create one (the window
   shows it once) and revoke one with two clicks.
+- Turn the endpoint on in the settings file. Turning it on adds the rule of the reply tool:
+
+  ```json
+  "inbound": {"enabled": true, "scope": "internal", "title": "Kim's agent",
+              "description": "Questions about the deploy schedule."}
+  ```
+
+  `description` (1 to 100 characters) is required while the endpoint is on.
+- A question waits on the server; the agent handles it in the background and answers with the
+  built-in tool `bunsin.inbound/reply`. **Every answer waits for your approval**, also with the
+  tier `autonomous`, which the server refuses for this tool. The answer gets the AI marker, and
+  your edit is kept as a correction. Only questions from callers see this tool.
+- Limits per profile: 20 questions an hour per caller, 50 open questions, 4,000 characters per
+  question. The counts come from the stored questions, so a restart does not reset them. A
+  question is stored after the privacy filter. With the kill switch on, questions wait.
+- A question that fails three times ends as failed, with a note in your inbox.
+- A page change the agent proposes while it handles a question always waits for you, also with
+  `notes.auto_apply`.
 - Not built yet: the inbound endpoint itself.
 
 ### Work with the agent

@@ -35,6 +35,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use url::Url;
 
 /// How long running requests may finish after a stop signal. One event can need two LLM
@@ -923,6 +924,8 @@ async fn bind(router: Router, listen: SocketAddr, tls: Option<(PathBuf, PathBuf)
 /// A profile that fails at step 1 or 3 is written to stderr and does not stop the start.
 pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterConfig>) -> Result<Started, ServeError> {
     check_listeners(&config, &outer)?;
+    // The inbound endpoints wake the intake task when a question arrives.
+    let wake = Arc::new(Notify::new());
     let interrupted = engine.mark_interrupted();
     for (profile, error) in &interrupted.failures {
         eprintln!("cut calls of profile {profile} were not checked: {error}");
@@ -938,23 +941,45 @@ pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterCon
     Ok(Started {
         control,
         outer: listeners,
-        poller: Poller::start(engine),
+        poller: Poller::start_with(engine, wake),
     })
 }
 
 /// How often the server looks for polls that are due.
 const POLL_TICK: Duration = Duration::from_secs(5);
 
-/// The task that repeats the searches of all profiles.
+/// The background tasks: one repeats the searches of all profiles, one hands stored questions
+/// to the agent. A stop ends both.
 pub struct Poller {
     stop: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    intake: tokio::task::JoinHandle<()>,
 }
 
 impl Poller {
     /// Starts polling. A failure of one profile is written to stderr and does not stop the task.
     pub fn start(engine: Arc<Engine>) -> Self {
+        Self::start_with(engine, Arc::new(Notify::new()))
+    }
+
+    /// Like `start`. A signal on `wake` makes the intake task run at once instead of at its next tick.
+    pub fn start_with(engine: Arc<Engine>, wake: Arc<Notify>) -> Self {
         let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let mut intake_stopped = stopped.clone();
+        let drainer = engine.clone();
+        // One task drains, so a stored question is never handed to the agent twice at once.
+        let intake = tokio::spawn(async move {
+            loop {
+                for (profile, error) in drainer.drain_intake().await {
+                    eprintln!("a stored question of profile {profile} failed: {error}");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL_TICK) => {}
+                    _ = wake.notified() => {}
+                    _ = intake_stopped.changed() => break,
+                }
+            }
+        });
         let task = tokio::spawn(async move {
             loop {
                 for (profile, error) in engine.poll_all().await {
@@ -969,14 +994,18 @@ impl Poller {
                 }
             }
         });
-        Self { stop, task }
+        Self { stop, task, intake }
     }
 
-    /// Lets the running cycle finish, then ends the task.
+    /// Lets the running cycles finish, then ends the tasks.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
-        if tokio::time::timeout(SHUTDOWN_GRACE, self.task).await.is_err() {
-            eprintln!("the poll task did not finish in {} s", SHUTDOWN_GRACE.as_secs());
+        let both = async {
+            let _ = self.task.await;
+            let _ = self.intake.await;
+        };
+        if tokio::time::timeout(SHUTDOWN_GRACE, both).await.is_err() {
+            eprintln!("the background tasks did not finish in {} s", SHUTDOWN_GRACE.as_secs());
         }
     }
 }
