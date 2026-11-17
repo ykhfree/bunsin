@@ -2,15 +2,16 @@
 
 use bunsin_api::http::{
     AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
-    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody,
-    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, WebhookSecretBody, profile_path,
+    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, OAuthFinishBody,
+    OAuthStartBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody,
+    WebhookSecretBody, profile_path,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
     CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, InboundStatus, LlmTest,
-    LlmUpdate, NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes,
-    PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport,
-    WikiPageUpdate,
+    LlmUpdate, NewCallerToken, OAuthStarted, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
+    PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
+    Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
@@ -580,6 +581,34 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connections/connectors/{name}"));
             self.send_only(Method::DELETE, &path, NO_BODY).await
+        })
+    }
+
+    fn start_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, ApiResult<OAuthStarted>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connectors/{connector}/oauth/start"));
+            let body = OAuthStartBody {
+                redirect_uri: redirect_uri.to_owned(),
+            };
+            self.call(Method::POST, &path, Some(&body)).await
+        })
+    }
+
+    fn finish_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        callback_url: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connectors/{connector}/oauth/finish"));
+            self.send_only(Method::POST, &path, Some(&OAuthFinishBody { callback_url }))
+                .await
         })
     }
 

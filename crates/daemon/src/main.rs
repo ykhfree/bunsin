@@ -4,8 +4,8 @@
 //! of this machine. All other commands talk to a running server over HTTPS.
 
 use bunsin_api::{
-    ApiConnectorUpdate, ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource,
-    WikiPageUpdate,
+    ApiConnectorUpdate, ConnectorUpdate, Edit, EngineApi, LlmUpdate, OAuthState, ProfileConfig, TokenChange,
+    TokenSource, WikiPageUpdate,
 };
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
@@ -376,6 +376,19 @@ enum Command {
         remote: Remote,
         profile: String,
         name: String,
+    },
+    /// Sign in to the MCP server of a connector with OAuth. The settings of the connector must have
+    /// `oauth`. The command prints an address: open it in a browser and sign in. The browser then
+    /// goes to the redirect address, which does not load. Paste that address from the address bar.
+    ConnectorOauth {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        name: String,
+        /// Where the browser goes after the sign-in. It must be a loopback address with http.
+        /// A client ID that the owner registered may need the address it was registered with.
+        #[arg(long, default_value = "http://127.0.0.1:8976/callback")]
+        redirect_uri: String,
     },
     /// List the pages of the agent's notes.
     WikiList {
@@ -1235,7 +1248,12 @@ async fn run(cli: Cli) -> Result<(), String> {
                     Some(header) => format!("\tin the header {header}"),
                     None => String::new(),
                 };
-                println!("{name}\t{address}\t{}{header}", source(connector.token));
+                let token = match connector.oauth.as_ref().map(|oauth| oauth.state) {
+                    Some(OAuthState::SignedIn) => "signed in with OAuth",
+                    Some(OAuthState::SignInNeeded) => "OAuth sign-in needed",
+                    None => source(connector.token),
+                };
+                println!("{name}\t{address}\t{token}{header}");
             }
         }
         Command::LlmTest { remote, profile } => {
@@ -1325,6 +1343,33 @@ async fn run(cli: Cli) -> Result<(), String> {
                 }
             }
             println!("connector {name} of {profile} saved. Check it with: bunsind tools {profile} {name}");
+        }
+        Command::ConnectorOauth {
+            remote,
+            profile,
+            name,
+            redirect_uri,
+        } => {
+            let remote = connect(&remote)?;
+            let started = remote
+                .start_connector_oauth(&profile, &name, &redirect_uri)
+                .await
+                .map_err(text)?;
+            println!("{}", started.authorization_url);
+            eprintln!(
+                "Open the address above in a browser and sign in. The browser then goes to an address \
+                 that starts with {redirect_uri} and does not load. Copy that address from the address bar, \
+                 paste it here and press Enter. The sign-in waits 10 minutes."
+            );
+            let mut callback = String::new();
+            std::io::stdin()
+                .read_line(&mut callback)
+                .map_err(|e| format!("cannot read the address: {e}"))?;
+            remote
+                .finish_connector_oauth(&profile, &name, callback.trim().to_owned())
+                .await
+                .map_err(text)?;
+            println!("connector {name} of {profile} is signed in. Check it with: bunsind tools {profile} {name}");
         }
         Command::ConnectorRemove { remote, profile, name } => {
             connect(&remote)?

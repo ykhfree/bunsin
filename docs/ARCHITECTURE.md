@@ -566,7 +566,7 @@
 - rmcp의 도구 목록 cache를 끈다. cache된 목록은 서버의 변경을 숨겨 pin 검사를 무력하게 만들기 때문이다.
 - 연결은 30초 안에 끝나야 한다. 시간이 지나면 `RealBackends`가 오류를 돌려준다.
 - 커넥터는 권한을 판단하지 않는다. 엔진이 호출 전에 정책과 pin을 검사한다.
-- OAuth는 아직 없다. HTTP transport는 token을 `Authorization: Bearer <token>`으로 보낸다.
+- HTTP transport는 token을 `Authorization: Bearer <token>`으로 보내거나, OAuth로 받은 access token을 보낸다(아래 **OAuth**).
   커넥터 설정의 `token_header`가 있으면 그 헤더가 token을 그대로 담는다(예: `X-API-Key`).
   연결이 스스로 정하는 헤더(`Host`, `Content-Type`, `Mcp-Session-Id` 등)는 거부한다.
   이 검사는 주소 규칙과 같은 자리에 있어서, 설정 파일로 저장할 때와 접속할 때 모두 지난다.
@@ -574,6 +574,37 @@
   LLM token의 헤더는 wire 형식이 정하고, 바꿀 수 없다.
 - HTTP transport는 redirect를 따르지 않는다.
 - 실제 Slack, Jira, Confluence MCP 서버로는 아직 연결해 보지 않았다. 테스트는 로컬 rmcp 서버를 쓴다.
+
+**OAuth**
+
+- 설정: 주소 커넥터의 `oauth: {client_id?, scopes?}`(`OAuthConfig`). 명령 커넥터, REST API 커넥터, token이나 `token_header`와 함께 쓰면 거부한다
+  (`ConnectorSection::check_oauth`, 저장할 때와 접속할 때). client ID와 scope는 공백과 `"`, `\` 없는 출력 가능 ASCII만 받는다.
+  지금은 설정 파일(`config-set`)로만 켠다. 창과 `connector-set`의 저장은 기존 `oauth`를 유지한다.
+- 흐름은 rmcp `auth` 기능(`AuthorizationManager`, `AuthorizationSession`)을 쓴다. 보호 자원 metadata와 인가 서버 metadata를 찾고,
+  `client_id`가 없으면 dynamic client registration(client 이름 `Bunsin`)을 하고, PKCE S256과 `state`로 인가 주소를 만든다.
+- 모든 OAuth 요청(발견, 등록, token, 갱신)은 `PolicyHttp`를 지난다: 보내기 전에 `UpstreamPolicy::check`, redirect 없음, 요청당 30초, 답은 1 MiB까지.
+  rmcp가 같은 origin 안에서 따라가는 발견의 redirect도 이 client로 다시 들어온다. 정책이 거부하면 그 이유가 오류 문구가 된다.
+- 제어 API `POST /v1/profiles/{p}/connectors/{c}/oauth/start`(`redirect_uri`) → 인가 주소, `.../oauth/finish`(`callback_url`).
+  redirect 주소는 http의 loopback(127.0.0.1, ::1, localhost)만 받는다(RFC 8252 7.3).
+  시작한 로그인은 서버 메모리(`SignIns`)에서 10분 기다리고, 프로필당 3개까지이다. 서버를 다시 시작하면 잊는다.
+  finish는 프로필, 커넥터, `state`가 맞는 로그인을 한 번만 꺼낸다. 거부, 틀린 code, 다른 redirect 위치도 그 로그인을 끝낸다.
+  `OAuthFinishBody`의 Debug는 code를 담은 주소를 출력하지 않는다.
+- 창: **Sign in**이 127.0.0.1의 빈 port에 한 번 쓰는 listener(`sign_in.rs`)를 열고 start를 보낸 뒤 브라우저로 인가 주소를 연다.
+  `/callback` 요청 하나를 받고 닫는다. 다른 경로는 404, 10분이 지나면 오류이다.
+  CLI `bunsind connector-oauth`는 인가 주소를 출력하고, 사용자가 붙여 넣은 주소로 finish를 보낸다.
+- credentials(rmcp `StoredCredentials`의 JSON)는 key `OAUTH_<NAME>`으로 봉인하고, origin 자리에 `oauth of <커넥터> for <MCP origin>`을 둔다.
+  주소가 아니므로 token으로 어느 곳에도 보내지지 않는다. finish는 로그인하는 동안 주소의 origin이 바뀌었으면 거부한다.
+  저장한 뒤 그 프로필의 runtime cache를 버린다. 감사 로그는 `oauth_signed_in`, `oauth_sign_in_needed`와 대상만 남긴다.
+- 접속(`RealBackends::oauth_connector`): 현재 주소의 origin에 묶인 credentials만 쓴다. 없거나 다른 origin이면 접속하지 않고 다시 로그인하라는 오류를 돌려준다.
+  접속 전에 access token을 한 번 받는다. 만료되었고 refresh token이 없거나 갱신이 거부되면 같은 오류이다.
+- 갱신: rmcp가 갱신한 credentials는 엔진의 `SecretWriter`(`ProfileWriter`)로 다시 봉인한다. 인가 서버가 refresh token을 거부하면
+  저장된 credentials가 그 값 그대로일 때만 지우고 `oauth_sign_in_needed`를 남긴다. 그 사이 끝난 새 로그인은 지우지 않는다(엔진 전체의 잠금 하나).
+- 상태(`OAuthState`): `signed_in`은 현재 origin의 credentials가 있고, 그 안에 token 응답이 있고, access token이 만료되지 않았거나 refresh token이 있을 때이다.
+  만료는 `token_received_at + expires_in`을 엔진 시계와 비교한다. 둘 중 하나가 없으면 만료되지 않은 것으로 본다(rmcp도 그대로 쓴다).
+  그 외(없음, 다른 origin, 열 수 없음, 만료되고 refresh token 없음)는 `sign_in_needed`이다.
+- `oauth`나 커넥터를 지우면 다음 저장에서 `OAUTH_` credentials를 지운다(`prune_secrets`).
+- 테스트는 로컬 stub 인가 서버(daemon `tests/support/oauth_stub.rs`: metadata, 등록, PKCE 검사, 갱신, 거부)로 엔진, 서버, CLI, 창을 지난다.
+  실제 OAuth 제공자로는 실행하지 않았다.
 
 **REST API 커넥터**
 
@@ -856,6 +887,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | REST API 커넥터(Slack, Jira, Confluence의 고정 도구, 설정, 저장, CLI, 창) | 구현, 테스트 있음(core, connectors, 엔진, 서버, CLI, 창). 로컬 stub으로만 테스트 |
+| MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
 | 구성 마법사, 비밀 저장소 | 없음 |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI). 창에는 없음. |
@@ -870,6 +902,6 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - 평문 `env`에 이미 들어 있는 비밀 값을 비밀 변수로 옮기는 기능. 지금은 사용자가 다시 입력하고 평문 줄을 지운다.
 - 설정 파일이나 CLI로 비밀 변수의 값을 넣는 방법. 지금은 창에서만 입력한다.
 - 서버의 systemd 실행 설정.
-- MCP 서버의 인증 방식. OAuth이면 headless 환경의 흐름이 필요하다.
+- OAuth를 창이나 `connector-set`에서 켜는 방법. 지금은 설정 파일로만 켠다.
 - 임베딩 검색의 제공 여부.
 - 라이선스.

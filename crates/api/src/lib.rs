@@ -18,7 +18,7 @@ use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{
     ArtifactMeta, AuditEntry, CallerToken, CorrectionRecord, DecisionCounts, InboxItem, LlmUsage, ProfileInfo,
 };
-use bunsin_core::settings::{ApiConfig, ConnectorKind, Wire};
+use bunsin_core::settings::{ApiConfig, ConnectorKind, OAuthConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
 use bunsin_core::webhook::WebhookConfig;
 use bunsin_core::wiki::{NotesConfig, WikiPage, WikiSummary, WikiText};
@@ -358,6 +358,32 @@ pub struct ConnectorConnection {
     /// a variable, but only the window gives it a value.
     #[serde(default)]
     pub secret_env_missing: Vec<String>,
+    /// The OAuth sign-in of the connector. `None`: it does not sign in with OAuth.
+    #[serde(default)]
+    pub oauth: Option<OAuthConnection>,
+}
+
+/// The OAuth settings of a connector and whether the server holds credentials for its address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthConnection {
+    pub config: OAuthConfig,
+    pub state: OAuthState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthState {
+    /// The server holds sealed credentials for the connector's present address.
+    SignedIn,
+    /// The owner never signed in, the address moved to another origin, or the authorization
+    /// server refused the refresh token.
+    SignInNeeded,
+}
+
+/// The start of an OAuth sign-in: the page the owner opens in a browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStarted {
+    pub authorization_url: String,
 }
 
 /// What to do with the value of one secret environment variable when a command is saved.
@@ -663,6 +689,23 @@ pub trait EngineApi: Send + Sync {
     ) -> BoxFuture<'a, ApiResult<()>>;
     /// Removes a connector and its stored token.
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// Starts an OAuth sign-in of a connector. `redirect_uri` must be a loopback address
+    /// (`http://127.0.0.1:<port>/...`), where the browser goes after the sign-in. The server
+    /// keeps the sign-in for 10 minutes.
+    fn start_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, ApiResult<OAuthStarted>>;
+    /// Ends a sign-in with the address the browser went to after it. The server checks the state,
+    /// gets the tokens and seals them. The next use of the connector connects with them.
+    fn finish_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        callback_url: String,
+    ) -> BoxFuture<'a, ApiResult<()>>;
     /// The agent's notes: one line per page.
     /// The stored corrections, also the retired ones. Newest first, at most 200.
     fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>>;

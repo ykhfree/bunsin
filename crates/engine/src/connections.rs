@@ -11,8 +11,9 @@ use bunsin_api::{
     Expected, LlmConnection, LlmUpdate, ProfileConfig, SecretChange, TokenChange, TokenSource,
 };
 use bunsin_core::settings::{
-    ConnectorKind, ConnectorSection, ENV_SECRET_PREFIX, LLM_SECRET_KEY, LlmSection, McpConfig, check_token_header,
-    connector_secret_key, env_secret_key, env_secret_origin, origin_of, valid_connector_name,
+    ConnectorKind, ConnectorSection, ENV_SECRET_PREFIX, LLM_SECRET_KEY, LlmSection, McpConfig, OAUTH_SECRET_PREFIX,
+    check_token_header, connector_secret_key, env_secret_key, env_secret_origin, oauth_secret_key, origin_of,
+    valid_connector_name,
 };
 use bunsin_core::webhook::{HOOK_SECRET_PREFIX, hook_secret_key};
 use bunsin_store::ProfileStore;
@@ -28,7 +29,7 @@ fn llm_section(config: &ProfileConfig) -> ApiResult<Option<LlmSection>> {
         .map_err(|e| ApiError::Invalid(format!("the stored `llm` settings are invalid: {e}")))
 }
 
-fn connector_section(name: &str, value: &Value) -> ApiResult<ConnectorSection> {
+pub(crate) fn connector_section(name: &str, value: &Value) -> ApiResult<ConnectorSection> {
     serde_json::from_value(value.clone())
         .map_err(|e| ApiError::Invalid(format!("the stored settings of connector `{name}` are invalid: {e}")))
 }
@@ -62,6 +63,7 @@ impl Engine {
         for (name, value) in &config.connectors {
             let section = connector_section(name, value)?;
             let token = self.token_source(profile, &store, section.token_secret.as_deref())?;
+            let oauth = self.oauth_connection(profile, &store, name, &section)?;
             let mut secret_env_missing = Vec::new();
             for variable in &section.secret_env {
                 if store
@@ -78,6 +80,7 @@ impl Engine {
                     kind: section.kind,
                     token,
                     token_header: section.token_header,
+                    oauth,
                     secret_env: section.secret_env.into_iter().collect(),
                     secret_env_missing,
                 },
@@ -230,8 +233,11 @@ impl Engine {
     ) -> ApiResult<()> {
         let store = self.checked_connector_store(profile, name, expected)?;
         let (loaded, mut config) = Self::config_with_text(&store)?;
+        let earlier = Self::same_kind(name, &config, &kind)?;
+        // The OAuth settings come from the settings file. A save from the form or `connector-set` keeps them.
+        let oauth = earlier.as_ref().and_then(|section| section.oauth.clone());
         // An earlier entry may name its secret itself (set with `config-set`). A kept token keeps that name.
-        let earlier = Self::same_kind(name, &config, &kind)?.and_then(|section| section.token_secret);
+        let earlier = earlier.and_then(|section| section.token_secret);
         let key = match (token, &earlier) {
             (TokenChange::Keep, Some(earlier)) => earlier.clone(),
             _ => connector_secret_key(name),
@@ -250,6 +256,7 @@ impl Engine {
             token_secret: will_have_token.then(|| key.clone()),
             token_header,
             secret_env: Default::default(),
+            oauth,
         };
         config
             .connectors
@@ -301,21 +308,27 @@ impl Engine {
         Ok(Some(earlier))
     }
 
-    /// Deletes every stored value of a secret environment variable, and every webhook secret, that
-    /// `config` no longer names. Every path that stores settings calls this, so a removed variable,
-    /// connector or webhook leaves no value behind, whichever way it was removed.
+    /// Deletes every stored value of a secret environment variable, every webhook secret and every
+    /// set of OAuth credentials that `config` no longer names. Every path that stores settings calls
+    /// this, so a removed variable, connector, webhook or OAuth setting leaves no value behind,
+    /// whichever way it was removed.
     pub(crate) fn prune_secrets(&self, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
         let mut named = std::collections::BTreeSet::new();
         for (name, value) in &config.connectors {
             // Settings that cannot be read name no variable. Validation refused them before.
             if let Ok(section) = connector_section(name, value) {
                 named.extend(section.secret_env.iter().map(|variable| env_secret_key(name, variable)));
+                if section.oauth.is_some() {
+                    named.insert(oauth_secret_key(name));
+                }
             }
         }
         named.extend(config.webhooks.keys().map(|name| hook_secret_key(name)));
         let mut removed = 0;
         for key in store.secret_keys().map_err(store_error)? {
-            let pruned = key.starts_with(ENV_SECRET_PREFIX) || key.starts_with(HOOK_SECRET_PREFIX);
+            let pruned = [ENV_SECRET_PREFIX, HOOK_SECRET_PREFIX, OAUTH_SECRET_PREFIX]
+                .iter()
+                .any(|prefix| key.starts_with(prefix));
             if pruned && !named.contains(&key) {
                 store.delete_secret(&key).map_err(store_error)?;
                 removed += 1;
@@ -373,6 +386,7 @@ impl Engine {
             token_secret: None,
             token_header: None,
             secret_env: update.secret_env.keys().cloned().collect(),
+            oauth: None,
         };
         config
             .connectors

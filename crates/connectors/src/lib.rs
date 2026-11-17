@@ -1,4 +1,4 @@
-//! Connectors to external services. `McpConnector` is an MCP client.
+//! Connectors to external services. `McpConnector` is an MCP client, with a token or with OAuth.
 //! `ApiConnector` calls a REST API with fixed tools. `webhook` checks and reads inbound events.
 //!
 //! This crate does no permission checks. The engine checks the policy before it calls a tool.
@@ -13,6 +13,7 @@ use bunsin_core::tool::ToolSpec;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
+use rmcp::transport::auth::{AuthClient, AuthorizationManager};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
@@ -86,13 +87,7 @@ impl McpConnector {
                         headers.insert(name, value);
                     }
                 }
-                // A redirect could carry the token to another host, and could reach a host
-                // that the server's address rules refused. The client therefore follows none.
-                let http = reqwest::Client::builder()
-                    .default_headers(headers)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))?;
+                let http = http_client(headers)?;
                 ().serve(StreamableHttpClientTransport::with_client(http, transport))
                     .await
             }
@@ -116,16 +111,33 @@ impl McpConnector {
             }
         }
         .map_err(|e| ConnectorError::Transport(e.to_string()))?;
+        Ok(Self::started(name.into(), config, client).await)
+    }
+
+    /// Connects to the MCP server at `url` with the OAuth credentials of `auth`.
+    /// `auth` sends the access token and refreshes it when it expires.
+    pub async fn connect_oauth(
+        name: impl Into<String>,
+        url: &str,
+        auth: AuthorizationManager,
+    ) -> Result<Self, ConnectorError> {
+        let transport = StreamableHttpClientTransportConfig::with_uri(url);
+        let http = AuthClient::new(http_client(reqwest::header::HeaderMap::new())?, auth);
+        let client =
+            ().serve(StreamableHttpClientTransport::with_client(http, transport))
+                .await
+                .map_err(|e| ConnectorError::Transport(e.to_string()))?;
+        let config = McpConfig::Http { url: url.to_owned() };
+        Ok(Self::started(name.into(), config, client).await)
+    }
+
+    async fn started(name: String, config: McpConfig, client: RunningService<RoleClient, ()>) -> Self {
         // The engine compares the live tool list with the approved one before each call.
         // A cached list would hide a change on the server, so the cache is off.
         client
             .set_response_cache_config(rmcp::ClientCacheConfig::disabled())
             .await;
-        Ok(Self {
-            name: name.into(),
-            config,
-            client,
-        })
+        Self { name, config, client }
     }
 
     async fn list_all(&self) -> Result<Vec<ToolSpec>, ConnectorError> {
@@ -173,6 +185,17 @@ impl fmt::Debug for McpConnector {
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
+}
+
+/// The HTTP client of an MCP server at an address, with `headers` on every request.
+fn http_client(headers: reqwest::header::HeaderMap) -> Result<reqwest::Client, ConnectorError> {
+    // A redirect could carry the token to another host, and could reach a host
+    // that the server's address rules refused. The client therefore follows none.
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))
 }
 
 /// A JSON-RPC error from the server is a failed call. Every other error is a transport problem.

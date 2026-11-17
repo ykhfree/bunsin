@@ -131,6 +131,7 @@ impl KeySource for KeyFile {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct SecretBox {
     cipher: XChaCha20Poly1305,
 }

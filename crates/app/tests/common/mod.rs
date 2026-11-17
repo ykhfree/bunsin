@@ -6,8 +6,9 @@ use bunsin_api::{EngineApi, ProfileConfig};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::settings::origin_of;
 use bunsin_daemon::{RealBackends, UpstreamPolicy};
-use bunsin_engine::{Backends, Engine, Runtime};
+use bunsin_engine::{Backends, Engine, OAuthSignIn, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -47,7 +48,51 @@ impl Backends for Fakes {
     fn validate(&self, profile: &str, config: &ProfileConfig) -> Result<(), String> {
         self.real.validate(profile, config)
     }
+
+    /// The authorization server grants at once: its page sends the browser back with `state=s1`.
+    fn oauth_start<'a>(
+        &'a self,
+        _profile: &'a str,
+        _name: &'a str,
+        _section: &'a serde_json::Value,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        let address = format!("{AUTHORIZE}?state=s1&redirect_uri={redirect_uri}");
+        Box::pin(async move { Ok(address) })
+    }
+
+    /// Gives tokens for the MCP server at `OAUTH_URL`, unless the browser came back with an error.
+    fn oauth_finish<'a>(
+        &'a self,
+        _profile: &'a str,
+        _name: &'a str,
+        callback_url: &'a str,
+    ) -> BoxFuture<'a, Result<OAuthSignIn, String>> {
+        let result = if callback_url.contains("error=") {
+            Err("the authorization server did not give access: access_denied".to_owned())
+        } else {
+            let credentials = json!({
+                "client_id": "c1",
+                "token_response": {"access_token": OAUTH_ACCESS, "token_type": "bearer", "refresh_token": "r1"},
+            });
+            Ok(OAuthSignIn {
+                credentials: credentials.to_string(),
+                origin: origin_of(OAUTH_URL).unwrap(),
+            })
+        };
+        Box::pin(async move { result })
+    }
 }
+
+/// The address of the MCP server of the OAuth connector in the tests.
+#[allow(dead_code)]
+pub const OAUTH_URL: &str = "https://mcp.example/docs";
+/// The page where the owner signs in.
+#[allow(dead_code)]
+pub const AUTHORIZE: &str = "https://auth.example/authorize";
+/// The access token of a finished sign-in. The window must never show it.
+#[allow(dead_code)]
+pub const OAUTH_ACCESS: &str = "oauth-window-access-3c9e1d";
 
 /// Why a connector other than `slack` cannot connect.
 #[allow(dead_code)]

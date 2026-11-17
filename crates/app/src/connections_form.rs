@@ -7,7 +7,7 @@ use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
 use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{
     ApiConnectorUpdate, CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection,
-    LlmUpdate, SecretChange, TokenChange, TokenSource, ToolsReport,
+    LlmUpdate, OAuthState, SecretChange, TokenChange, TokenSource, ToolsReport,
 };
 use bunsin_core::settings::{
     ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ApiAuthMethod, ApiConfig, ApiService, ConnectorKind, McpConfig,
@@ -175,6 +175,17 @@ const SAVE_FIRST: &str = "Save the endpoint first. The test uses the saved setti
 const TESTING: &str = "Testing… One short request goes to the endpoint. It waits for the answer up to the timeout.";
 const TYPED_TOKEN: &str = "Empty the token field first, or save the token.";
 const APPROVE_NOTE: &str = "Approving tools does not create permission rules.";
+const SIGN_IN_WAITING: &str = "Sign in in the browser. The window waits 10 minutes for it. \
+    If no browser opened, open this address:";
+const SIGNED_IN: &str = "Signed in. Check lists the tools with the new sign-in.";
+
+/// How the row of an OAuth connector shows its sign-in.
+pub fn oauth_text(state: OAuthState) -> &'static str {
+    match state {
+        OAuthState::SignedIn => "signed in with OAuth",
+        OAuthState::SignInNeeded => "OAuth sign-in needed",
+    }
+}
 
 pub struct ConnectionsForm {
     /// The profile that the drafts belong to. None until the server's connections arrive.
@@ -360,6 +371,8 @@ impl ConnectionsForm {
             self.load_connector("", None, window, cx);
         }
         match result {
+            // The page opens once, when the start arrives. The row shows the address too.
+            Some(ConnectionResult::SignInStarted { result: Ok(url), .. }) => cx.open_url(url),
             Some(ConnectionResult::LlmSaved(Err(SaveError::Conflict))) => self.llm_conflict = true,
             Some(ConnectionResult::ConnectorSaved {
                 name,
@@ -931,13 +944,14 @@ impl Shell {
                     .child(labelled_as("token", token.clone(), quiet(token, cx)));
             }
             ConnectorKind::Mcp(McpConfig::Http { url }) => {
+                // An OAuth connector has no token. It shows its sign-in instead.
+                let (id, access) = match &connector.oauth {
+                    Some(oauth) => ("oauth", oauth_text(oauth.state)),
+                    None => ("token", token_text(connector.token)),
+                };
                 row = row
                     .child(labelled_as("address", url.clone(), quiet(url.clone(), cx)))
-                    .child(labelled_as(
-                        "token",
-                        token_text(connector.token),
-                        quiet(token_text(connector.token), cx),
-                    ))
+                    .child(labelled_as(id, access, quiet(access, cx)))
                     .children(connector.token_header.as_ref().map(|header| {
                         let text = format!("sent in the header {header}");
                         labelled_as("token-header", text.clone(), quiet(text, cx))
@@ -952,6 +966,19 @@ impl Shell {
                     .child(labelled_as("address", runs.clone(), quiet(runs, cx)))
                     .child(labelled_as("command-counts", counts.clone(), quiet(counts, cx)));
             }
+        }
+        if connector.oauth.is_some() {
+            let sign_in = UiCommand::SignIn {
+                profile: profile.to_owned(),
+                name: name.to_owned(),
+            };
+            buttons = buttons.child(
+                Button::new("sign-in")
+                    .small()
+                    .outline()
+                    .label("Sign in")
+                    .on_click(send(sign_in)),
+            );
         }
         let (edit_name, edited) = (name.to_owned(), connector.clone());
         let remove = UiCommand::RemoveConnector {
@@ -997,6 +1024,20 @@ impl Shell {
                 }
                 Err(error) => row = row.child(labelled("tools", error.clone())),
             },
+            Some(ConnectionResult::SignInStarted { name: started, result }) if started == name => {
+                let text = match result {
+                    Ok(url) => format!("{SIGN_IN_WAITING} {url}"),
+                    Err(error) => error.clone(),
+                };
+                row = row.child(labelled("sign-in-result", text));
+            }
+            Some(ConnectionResult::SignedIn { name: signed, result }) if signed == name => {
+                let text = match result {
+                    Ok(()) => SIGNED_IN.to_owned(),
+                    Err(error) => error.clone(),
+                };
+                row = row.child(labelled("sign-in-result", text));
+            }
             Some(ConnectionResult::ToolsApproved { name: approved, result }) if approved == name => {
                 let text = match result {
                     Ok(()) => "Tools approved".to_owned(),

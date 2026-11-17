@@ -109,6 +109,24 @@ pub enum UiCommand {
         name: String,
         shown: PinSet,
     },
+    /// Signs in to the MCP server of an OAuth connector. The bridge opens a one-time listener
+    /// on 127.0.0.1 for the browser and then sends `StartSignIn`.
+    SignIn {
+        profile: String,
+        name: String,
+    },
+    /// Starts the sign-in with the redirect address of the listener.
+    StartSignIn {
+        profile: String,
+        name: String,
+        redirect_uri: String,
+    },
+    /// Ends the sign-in with the address the browser went to, or with why none came.
+    FinishSignIn {
+        profile: String,
+        name: String,
+        callback: Result<String, String>,
+    },
     /// Opens a page of the notes. The page is then reloaded with every refresh.
     OpenNote {
         profile: String,
@@ -252,6 +270,15 @@ pub enum ConnectionResult {
         result: Result<ToolsReport, String>,
     },
     ToolsApproved {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The address of the page where the owner signs in.
+    SignInStarted {
+        name: String,
+        result: Result<String, String>,
+    },
+    SignedIn {
         name: String,
         result: Result<(), String>,
     },
@@ -465,6 +492,44 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         (UiCommand::ApproveTools { profile, name, shown }, _) => {
             let result = for_profile(selected, &profile, api.approve_tools(&profile, &name, shown)).await;
             state.connection_result = Some(ConnectionResult::ToolsApproved { name, result });
+            Ok(())
+        }
+        (
+            UiCommand::StartSignIn {
+                profile,
+                name,
+                redirect_uri,
+            },
+            _,
+        ) => {
+            let start = api.start_connector_oauth(&profile, &name, &redirect_uri);
+            let result = for_profile(selected, &profile, start).await;
+            let result = result.map(|started| started.authorization_url);
+            state.connection_result = Some(ConnectionResult::SignInStarted { name, result });
+            Ok(())
+        }
+        (
+            UiCommand::FinishSignIn {
+                profile,
+                name,
+                callback,
+            },
+            _,
+        ) => {
+            let result = match callback {
+                Ok(callback) => {
+                    let finish = api.finish_connector_oauth(&profile, &name, callback);
+                    for_profile(selected, &profile, finish).await
+                }
+                Err(error) => Err(error),
+            };
+            state.connection_result = Some(ConnectionResult::SignedIn { name, result });
+            Ok(())
+        }
+        // The loop of `spawn_bridge` turns `SignIn` into `StartSignIn`. A direct call has no listener.
+        (UiCommand::SignIn { name, .. }, _) => {
+            let result = Err("this window cannot receive a sign-in".to_owned());
+            state.connection_result = Some(ConnectionResult::SignInStarted { name, result });
             Ok(())
         }
         (UiCommand::OpenNote { profile, slug }, _) => check_selected(selected, &profile).map(|()| {
@@ -745,6 +810,51 @@ pub async fn refresh(api: &dyn EngineApi, state: &mut UiState) {
 /// How often the window reloads by itself.
 pub const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Opens the listener for the browser and starts the sign-in. A task waits for the browser
+/// and sends `FinishSignIn`.
+async fn sign_in(
+    api: &dyn EngineApi,
+    state: &mut UiState,
+    profile: String,
+    name: String,
+    commands: &mpsc::WeakUnboundedSender<UiCommand>,
+) {
+    let (listener, redirect_uri) = match crate::sign_in::listen().await {
+        Ok(listening) => listening,
+        Err(error) => {
+            let command = UiCommand::FinishSignIn {
+                profile,
+                name,
+                callback: Err(error),
+            };
+            return apply(api, state, command).await;
+        }
+    };
+    let start = UiCommand::StartSignIn {
+        profile: profile.clone(),
+        name: name.clone(),
+        redirect_uri: redirect_uri.clone(),
+    };
+    apply(api, state, start).await;
+    if !matches!(
+        &state.connection_result,
+        Some(ConnectionResult::SignInStarted { result: Ok(_), .. })
+    ) {
+        return;
+    }
+    let commands = commands.clone();
+    tokio::spawn(async move {
+        let callback = crate::sign_in::wait(listener, &redirect_uri).await;
+        if let Some(commands) = commands.upgrade() {
+            let _ = commands.send(UiCommand::FinishSignIn {
+                profile,
+                name,
+                callback,
+            });
+        }
+    });
+}
+
 /// Starts the task that serves the window. It reloads the state after each command and
 /// every `refresh_every`. It ends when either channel closes.
 pub fn spawn_bridge(
@@ -754,6 +864,8 @@ pub fn spawn_bridge(
 ) -> (mpsc::UnboundedSender<UiCommand>, mpsc::UnboundedReceiver<UiState>) {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (state_tx, state_rx) = mpsc::unbounded_channel();
+    // A sign-in sends its end back as a command. A weak sender lets the loop end with the window.
+    let sign_ins = command_tx.downgrade();
     runtime.spawn(async move {
         let mut state = UiState::default();
         // The timer runs on tokio. A tokio timer must not be polled on the GPUI executor.
@@ -763,6 +875,9 @@ pub fn spawn_bridge(
             let before = state.clone();
             tokio::select! {
                 command = command_rx.recv() => match command {
+                    Some(UiCommand::SignIn { profile, name }) => {
+                        sign_in(&*api, &mut state, profile, name, &sign_ins).await;
+                    }
                     Some(command) => apply(&*api, &mut state, command).await,
                     // The window closed or disconnected.
                     None => break,

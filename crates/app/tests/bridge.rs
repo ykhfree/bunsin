@@ -1077,3 +1077,69 @@ async fn the_history_of_the_open_page_is_loaded_while_it_is_shown() {
     apply(&*rig.engine, &mut state, history("kim", false)).await;
     assert_eq!(state.open_note.as_ref().unwrap().history, None);
 }
+
+/// The sign-in result of the last command, as text.
+fn sign_in_result(state: &UiState) -> Result<String, String> {
+    match &state.connection_result {
+        Some(ConnectionResult::SignInStarted { result, .. }) => result.clone(),
+        Some(ConnectionResult::SignedIn { result, .. }) => result.clone().map(|()| "signed in".to_owned()),
+        other => panic!("not a sign-in result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_sign_in_without_a_callback_or_for_another_connector_or_profile_saves_nothing() {
+    let rig = common::rig().await;
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.connectors.insert(
+        "docs".into(),
+        serde_json::json!({"mcp": {"transport": "http", "url": common::OAUTH_URL}, "oauth": {}}),
+    );
+    config.connectors.insert(
+        "wiki".into(),
+        serde_json::json!({"mcp": {"transport": "http", "url": "https://mcp.example/wiki"}}),
+    );
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let finish = |name: &str, profile: &str, callback: Result<String, String>| UiCommand::FinishSignIn {
+        profile: profile.into(),
+        name: name.into(),
+        callback,
+    };
+
+    // The listener gave up. The engine is not asked.
+    let late = "nobody signed in within 10 minutes. Sign in again".to_owned();
+    apply(&*rig.engine, &mut state, finish("docs", "kim", Err(late.clone()))).await;
+    assert_eq!(sign_in_result(&state), Err(late));
+
+    // A connector without OAuth cannot start one.
+    let start = UiCommand::StartSignIn {
+        profile: "kim".into(),
+        name: "wiki".into(),
+        redirect_uri: "http://127.0.0.1:8976/callback".into(),
+    };
+    apply(&*rig.engine, &mut state, start).await;
+    let error = sign_in_result(&state).unwrap_err();
+    assert!(error.contains("does not sign in with OAuth"), "{error}");
+
+    // A callback for a profile that is not selected is refused before the engine sees it.
+    let callback = "http://127.0.0.1:8976/callback?code=c1&state=s1".to_owned();
+    apply(&*rig.engine, &mut state, finish("docs", "lee", Ok(callback))).await;
+    let error = sign_in_result(&state).unwrap_err();
+    assert_eq!(error, "another profile is selected now, so nothing was done");
+
+    // A direct `SignIn` has no listener for the browser.
+    let sign_in = UiCommand::SignIn {
+        profile: "kim".into(),
+        name: "docs".into(),
+    };
+    apply(&*rig.engine, &mut state, sign_in).await;
+    assert!(sign_in_result(&state).unwrap_err().contains("cannot receive a sign-in"));
+
+    let connections = rig.engine.connections("kim").await.unwrap();
+    let oauth = connections.connectors["docs"].oauth.as_ref().unwrap();
+    assert_eq!(oauth.state, bunsin_api::OAuthState::SignInNeeded);
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    assert!(!audit.iter().any(|entry| entry.kind == "oauth_signed_in"));
+}

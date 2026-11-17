@@ -12,14 +12,15 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use bunsin_api::http::{
     AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
-    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, PROFILES, RejectBody,
-    ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody, WebhookSecretBody, status_of,
+    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, OAuthFinishBody,
+    OAuthStartBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody,
+    WebhookSecretBody, status_of,
 };
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate,
-    Connections, ConnectorUpdate, EngineApi, EvalReport, InboundStatus, LlmTest, LlmUpdate, NewCallerToken, Outcome,
-    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate,
-    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    Connections, ConnectorUpdate, EngineApi, EvalReport, InboundStatus, LlmTest, LlmUpdate, NewCallerToken,
+    OAuthStarted, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
+    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
@@ -643,6 +644,34 @@ async fn put_webhook_secret(
     Ok(Json(engine.set_webhook_secret(&profile, &name, body.secret).await?))
 }
 
+async fn start_connector_oauth(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, connector)): Path<(String, String)>,
+    Json(body): Json<OAuthStartBody>,
+) -> Reply<OAuthStarted> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(
+        engine
+            .start_connector_oauth(&profile, &connector, &body.redirect_uri)
+            .await?,
+    ))
+}
+
+async fn finish_connector_oauth(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((profile, connector)): Path<(String, String)>,
+    Json(body): Json<OAuthFinishBody>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(
+        engine
+            .finish_connector_oauth(&profile, &connector, body.callback_url)
+            .await?,
+    ))
+}
+
 async fn revoke_caller_token(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -665,6 +694,14 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("replay"), post(replay))
         .route(&profile("connectors/{connector}/tools"), get(connector_tools))
         .route(&profile("connectors/{connector}/tools/approve"), post(approve_tools))
+        .route(
+            &profile("connectors/{connector}/oauth/start"),
+            post(start_connector_oauth),
+        )
+        .route(
+            &profile("connectors/{connector}/oauth/finish"),
+            post(finish_connector_oauth),
+        )
         .route(&profile("privacy"), get(get_privacy).put(put_privacy))
         .route(&profile("permissions"), get(get_permissions).put(put_permissions))
         .route(&profile("principles"), get(get_principles).put(put_principles))

@@ -31,9 +31,10 @@ Bunsin is in early development. Read this list before you use it.
   addresses only if you list them as terms.
 - **There is no setup wizard.** The window and the command line set the connections and
   the privacy filter. The window also sets the permission rules, the principles and the polls.
-- **Not built yet:** OAuth for MCP servers.
+- **OAuth for MCP servers is turned on in the settings file only.** The window and the
+  command line then sign in (see [LLM endpoint and connectors](#llm-endpoint-and-connectors)).
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
-  a real MCP server, or the real Slack, Jira or Confluence API.
+  a real MCP server, a real OAuth provider, or the real Slack, Jira or Confluence API.
 - **The desktop window is tested headlessly.** The Keychain storage has no test.
 - **The server operator can read profile data.** Profiles are isolated from each other,
   not from a person with access to the server's files.
@@ -263,6 +264,7 @@ bunsind llm-test kim                             # one test request to the saved
 bunsind llm-usage kim                            # LLM calls and tokens of the last 90 days
 bunsind connections kim                          # addresses and where each token comes from
 bunsind tools kim slack                          # connects and lists the tools: the check that it works
+bunsind connector-oauth kim docs                 # signs in to an MCP server that uses OAuth (see below)
 bunsind connector-remove kim jira                # removes the connector and its token
 ```
 
@@ -283,6 +285,30 @@ bunsind connector-remove kim jira                # removes the connector and its
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every
   `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
+- **OAuth.** An MCP server at an address can take a sign-in with OAuth instead of a token.
+  Turn it on in the settings file: give the connector `"oauth": {}` and no token, then
+  `config-set`. For example:
+  `"docs": {"mcp": {"transport": "http", "url": "https://mcp.example.com/docs"}, "oauth": {}}`.
+  The window and `connector-set` keep the `oauth` of a connector they save, but cannot turn
+  it on or off. In `oauth`, `"client_id"` names a client that the authorization server gave
+  you for Bunsin. Without it, the server registers a client by itself (dynamic client
+  registration). `"scopes"` lists the scopes to ask for. Without it, the server asks for the
+  scopes that the MCP server names.
+- To sign in, click **Sign in** in the row of the connector in the window. The window opens
+  the sign-in page in the browser and takes the browser's return on a free port of
+  127.0.0.1. On the command line, `connector-oauth` prints the address of the page. Open it,
+  sign in, then paste the address that the browser goes to; that page does not load.
+  `--redirect-uri` sets that address (default `http://127.0.0.1:8976/callback`). A client ID
+  that was registered with one fixed address may need it. A sign-in waits 10 minutes. A
+  profile can have 3 sign-ins waiting, and a restart of the server forgets them.
+- The server seals the OAuth tokens and binds them to the origin of the MCP server's address.
+  It renews the access token with the refresh token by itself. `connections` and the window
+  show `signed in with OAuth` or `OAuth sign-in needed`. You must sign in again after the
+  address moves to another origin, after the authorization server refuses the refresh
+  token, or when the access token has expired and there is no refresh token. Removing
+  `oauth` or the connector deletes the tokens. Each request of the sign-in passes the address
+  rules, follows no redirect and must end in 30 seconds. The sign-in ran only against a
+  local test server.
 - With `--api slack|jira|confluence` (in the window: the kind **REST API**), the server calls
   the service's REST API itself instead of an MCP server. The tools are fixed in the code:
   Slack `search_messages`, `get_thread`, `post_message`; Jira `search_issues`, `get_issue`,
@@ -978,7 +1004,7 @@ you read, edit, make and delete a page. **Permissions** sets what the agent may 
 each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
 principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)).
 **Learning** shows what the agent learns from you and how you check it (see below). **Settings** has the connections (LLM endpoint,
-connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds.
+connectors, tokens, a check that lists a connector's tools, the OAuth sign-in) and the privacy filter. It reloads from the server every 5 seconds.
 
 **Edit before approval.** A waiting call whose rule names places of text has the button
 "Edit the text". It opens one text field for each place: one for `{ "arg": "text" }`, one for each

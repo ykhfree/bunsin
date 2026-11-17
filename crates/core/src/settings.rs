@@ -151,6 +151,28 @@ impl ConnectorKind {
     }
 }
 
+/// Sign-in with OAuth for an MCP server at an address. The tokens are not in here:
+/// the server seals them after the owner signs in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthConfig {
+    /// A client ID that the authorization server gave out for Bunsin.
+    /// `None`: the server registers a client by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// The scopes to ask for. Empty: the scopes that the MCP server's metadata names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+/// True if `text` is one OAuth scope or client ID: printable ASCII without space, `"` and `\`.
+fn oauth_word(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| (0x21..=0x7e).contains(&b) && b != b'"' && b != b'\\')
+}
+
 /// One entry of the `connectors` section of the profile settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "StoredConnector")]
@@ -167,6 +189,35 @@ pub struct ConnectorSection {
     /// The values are not in the settings. A connector with an address has none.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub secret_env: BTreeSet<String>,
+    /// Sign in with OAuth instead of a token. Only an MCP server at an address can use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthConfig>,
+}
+
+impl ConnectorSection {
+    /// Refuses OAuth where it cannot work: on a command, a REST API, or together with a token.
+    pub fn check_oauth(&self) -> Result<(), String> {
+        let Some(oauth) = &self.oauth else {
+            return Ok(());
+        };
+        if !matches!(self.kind, ConnectorKind::Mcp(McpConfig::Http { .. })) {
+            return Err("OAuth sign-in is only for an MCP server at an address".into());
+        }
+        if self.token_secret.is_some() || self.token_header.is_some() {
+            return Err("a connector signs in with OAuth or sends a token, not both: remove the token".into());
+        }
+        if let Some(bad) = oauth
+            .client_id
+            .iter()
+            .chain(&oauth.scopes)
+            .find(|word| !oauth_word(word))
+        {
+            return Err(format!(
+                "the OAuth client ID or scope `{bad}` is invalid: use printable characters without spaces"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The stored form of a connector. It refuses unknown fields, so a token written into the
@@ -184,6 +235,8 @@ struct StoredConnector {
     token_header: Option<String>,
     #[serde(default)]
     secret_env: BTreeSet<String>,
+    #[serde(default)]
+    oauth: Option<OAuthConfig>,
 }
 
 impl TryFrom<StoredConnector> for ConnectorSection {
@@ -201,6 +254,7 @@ impl TryFrom<StoredConnector> for ConnectorSection {
             token_secret: stored.token_secret,
             token_header: stored.token_header,
             secret_env: stored.secret_env,
+            oauth: stored.oauth,
         })
     }
 }
@@ -270,6 +324,23 @@ pub fn check_token_header(name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Every key of sealed OAuth credentials starts with this.
+pub const OAUTH_SECRET_PREFIX: &str = "OAUTH_";
+
+/// The secret key of the OAuth credentials of a connector.
+pub fn oauth_secret_key(connector: &str) -> String {
+    format!(
+        "{OAUTH_SECRET_PREFIX}{}",
+        connector.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// What OAuth credentials are stored for, in the place of a token's address: the connector and
+/// the origin of its MCP server. It is not an address, so they are never sent as a token.
+pub fn oauth_secret_origin(connector: &str, origin: &str) -> String {
+    format!("oauth of {connector} for {origin}")
 }
 
 /// The secret key of the LLM token when the server chooses the name.
@@ -398,6 +469,60 @@ mod tests {
         let inline = json!({"api": {"service": "slack", "base_url": SLACK_BASE_URL, "token": "xoxb-1"}});
         assert!(parse(inline).is_err());
         assert!(parse(json!({"mcp": {"transport": "http", "url": "https://x"}, "token_env": "HOME"})).is_err());
+    }
+
+    #[test]
+    fn oauth_loads_from_old_settings_and_fits_only_an_address_without_a_token() {
+        use serde_json::json;
+        let parse = |value: serde_json::Value| serde_json::from_value::<ConnectorSection>(value).unwrap();
+        // Settings from before OAuth have none, and are written back without the key.
+        let old = json!({"mcp": {"transport": "http", "url": "https://mcp.example/x"}, "token_secret": null});
+        let section = parse(old.clone());
+        assert_eq!(section.oauth, None);
+        assert_eq!(serde_json::to_value(&section).unwrap(), old);
+
+        let stored = json!({"mcp": {"transport": "http", "url": "https://mcp.example/x"}, "token_secret": null,
+            "oauth": {"client_id": "bunsin-1", "scopes": ["read", "write:issues"]}});
+        let section = parse(stored.clone());
+        assert_eq!(section.check_oauth(), Ok(()));
+        assert_eq!(serde_json::to_value(&section).unwrap(), stored);
+        // An empty `oauth` asks the server to register a client and to pick the scopes.
+        let empty = parse(json!({"mcp": {"transport": "http", "url": "https://mcp.example/x"}, "oauth": {}}));
+        assert_eq!(empty.oauth, Some(OAuthConfig::default()));
+        assert_eq!(empty.check_oauth(), Ok(()));
+        // A token in `oauth` is refused like everywhere else.
+        let inline = json!({"mcp": {"transport": "http", "url": "https://x"}, "oauth": {"access_token": "t"}});
+        assert!(serde_json::from_value::<ConnectorSection>(inline).is_err());
+
+        let with = |mut value: serde_json::Value| {
+            value["oauth"] = json!({});
+            parse(value).check_oauth().unwrap_err()
+        };
+        let command = json!({"mcp": {"transport": "stdio", "command": "/bin/x"}});
+        assert!(with(command).contains("only for an MCP server at an address"));
+        let api = json!({"api": {"service": "slack", "base_url": SLACK_BASE_URL}, "token_secret": "MCP_S"});
+        assert!(with(api).contains("only for an MCP server at an address"));
+        let token = json!({"mcp": {"transport": "http", "url": "https://x"}, "token_secret": "MCP_X"});
+        assert!(with(token).contains("not both"));
+        let header = json!({"mcp": {"transport": "http", "url": "https://x"}, "token_header": "X-API-Key"});
+        assert!(with(header).contains("not both"));
+        for bad in ["", "two words", "quo\"te"] {
+            let mut section = parse(json!({"mcp": {"transport": "http", "url": "https://x"}}));
+            section.oauth = Some(OAuthConfig {
+                client_id: None,
+                scopes: vec![bad.to_owned()],
+            });
+            assert!(section.check_oauth().unwrap_err().contains("invalid"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn oauth_keys_and_origins_never_look_like_a_token_of_an_address() {
+        assert_eq!(oauth_secret_key("jira-cloud"), "OAUTH_JIRA_CLOUD");
+        assert_ne!(oauth_secret_key("a-b"), connector_secret_key("a-b"));
+        let origin = oauth_secret_origin("jira", "https://mcp.example:443");
+        assert_eq!(origin, "oauth of jira for https://mcp.example:443");
+        assert_eq!(origin_of(&origin), None);
     }
 
     #[test]

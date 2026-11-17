@@ -1044,3 +1044,92 @@ fn coding_needs_both_operator_flags() {
     let error = stderr_of_failure(output, "a custom program");
     assert!(error.contains("not a backend"), "{error}");
 }
+
+#[path = "support/oauth_stub.rs"]
+mod oauth_stub;
+
+#[test]
+fn connector_oauth_prints_the_address_and_takes_the_pasted_callback() {
+    // The stub authorization server runs on its own threads while the processes run.
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let stub = runtime.block_on(oauth_stub::start());
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let (server, _) = Server::start_with(dir.path(), &["--allow-upstream-host", "127.0.0.1"], 0);
+    let shown = stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show");
+    let mut config: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    config["connectors"] = serde_json::json!({
+        "docs": {"mcp": {"transport": "http", "url": stub.mcp_url()}, "oauth": {}}
+    });
+    let file = dir.path().join("kim.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        format!("llm\tnot set\ndocs\t{}\tOAuth sign-in needed\n", stub.mcp_url())
+    );
+
+    let mut child = bunsind()
+        .args(["connector-oauth", "--server", &server.url, "kim", "docs"])
+        .env("BUNSIN_TOKEN", &kim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut address = String::new();
+    stdout.read_line(&mut address).unwrap();
+    assert!(
+        address.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8976%2Fcallback"),
+        "{address}"
+    );
+    let callback = runtime.block_on(oauth_stub::browser(address.trim()));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{callback}\n").as_bytes())
+        .unwrap();
+    let status = child.wait().unwrap();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).unwrap();
+    let mut errors = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut errors).unwrap();
+    assert!(status.success(), "connector-oauth failed: {errors}");
+    assert!(rest.contains("connector docs of kim is signed in"), "{rest}");
+    assert!(errors.contains("paste it here"), "{errors}");
+
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        format!("llm\tnot set\ndocs\t{}\tsigned in with OAuth\n", stub.mcp_url())
+    );
+    let tools = stdout_of(server.run(&kim, &["tools", "kim", "docs"]), "tools");
+    assert!(tools.contains("hello"), "{tools}");
+    for text in [&address, &rest, &errors, &tools] {
+        for secret in [oauth_stub::ACCESS, oauth_stub::REFRESH] {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+
+    // A pasted address of no waiting sign-in is refused, with exit status 1.
+    let mut child = bunsind()
+        .args(["connector-oauth", "--server", &server.url, "kim", "docs"])
+        .env("BUNSIN_TOKEN", &kim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{callback}\n").as_bytes())
+        .unwrap();
+    let error = stderr_of_failure(child.wait_with_output().unwrap(), "a used callback");
+    assert!(error.contains("no sign-in waits"), "{error}");
+}

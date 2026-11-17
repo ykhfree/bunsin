@@ -54,6 +54,8 @@
 //! | DELETE | `/v1/profiles/{p}/connections/connectors/{c}` | | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}/command` | `CommandConnectorUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}/api` | `ApiConnectorUpdate` | |
+//! | POST | `/v1/profiles/{p}/connectors/{c}/oauth/start` | `OAuthStartBody` | `OAuthStarted` |
+//! | POST | `/v1/profiles/{p}/connectors/{c}/oauth/finish` | `OAuthFinishBody` | |
 //! | GET | `/v1/profiles/{p}/wiki` | | `[WikiSummary]` |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}` | | `WikiPage` |
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
@@ -101,6 +103,23 @@ impl std::fmt::Debug for WebhookSecretBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The secret is left out on purpose.
         f.write_str("WebhookSecretBody([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStartBody {
+    pub redirect_uri: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthFinishBody {
+    pub callback_url: String,
+}
+
+impl std::fmt::Debug for OAuthFinishBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The address holds the authorization code. It is left out on purpose.
+        f.write_str("OAuthFinishBody([REDACTED])")
     }
 }
 

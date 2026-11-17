@@ -29,7 +29,10 @@ tokio.workspace = true
 getrandom = "0.3"
 url = "2"
 # The inbound endpoint: a stateless MCP server on the outer listeners. The same rmcp as the connectors.
-rmcp = { version = "=3.10.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "=3.10.0", default-features = false, features = ["auth", "server", "transport-streamable-http-server"] }
+# The versions that rmcp uses. The OAuth client of connectors is built with them.
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 # The Keychain holds the server's master key on macOS only. Linux servers need no keyring library.
 [target.'cfg(target_os = "macos")'.dependencies]

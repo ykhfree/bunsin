@@ -14,6 +14,7 @@ mod intake;
 mod lint;
 mod llm_log;
 mod notes;
+mod oauth;
 mod poll_settings;
 mod polling;
 mod preload;
@@ -23,6 +24,7 @@ mod secrets;
 mod webhooks;
 
 pub use ard::OuterListener;
+pub use oauth::{OAuthSignIn, SecretWriter};
 pub use preload::PRELOAD_SOURCE;
 pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
@@ -31,9 +33,9 @@ pub use webhooks::WebhookTarget;
 use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
     CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, InboundStatus,
-    LlmTest, LlmUpdate, NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
-    PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
-    Resolution, ToolsReport, WikiPageUpdate,
+    LlmTest, LlmUpdate, NewCallerToken, OAuthStarted, Outcome, Permissions, PermissionsUpdate, PollPreview,
+    PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
+    ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::ard::ARD_SEARCH_TOOL;
@@ -122,6 +124,39 @@ pub trait Backends: Send + Sync {
         self.build(profile, config)
     }
 
+    /// Like `build_with_secrets`. A connector stores new OAuth credentials through `writer`.
+    fn build_with_writer<'a>(
+        &'a self,
+        profile: &'a str,
+        config: &'a ProfileConfig,
+        secrets: &'a ProfileSecrets,
+        _writer: Arc<dyn SecretWriter>,
+    ) -> BoxFuture<'a, Result<Runtime, String>> {
+        self.build_with_secrets(profile, config, secrets)
+    }
+
+    /// Starts the OAuth sign-in of connector `name`, whose settings are `section`.
+    /// Returns the address of the page where the owner signs in.
+    fn oauth_start<'a>(
+        &'a self,
+        _profile: &'a str,
+        _name: &'a str,
+        _section: &'a Value,
+        _redirect_uri: &'a str,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Err("this server cannot sign in to connectors with OAuth".to_owned()) })
+    }
+
+    /// Ends a sign-in that `oauth_start` began, with the address the browser went to after it.
+    fn oauth_finish<'a>(
+        &'a self,
+        _profile: &'a str,
+        _name: &'a str,
+        _callback_url: &'a str,
+    ) -> BoxFuture<'a, Result<OAuthSignIn, String>> {
+        Box::pin(async { Err("this server cannot sign in to connectors with OAuth".to_owned()) })
+    }
+
     /// Checks new settings before they are stored. The error says what to change.
     fn validate(&self, _profile: &str, _config: &ProfileConfig) -> Result<(), String> {
         Ok(())
@@ -181,6 +216,8 @@ pub struct Engine {
     secret_box: secrets::SecretBox,
     /// The listeners for callers of the running server. The ARD catalogs and the inbound status name them.
     outer: Mutex<Vec<OuterListener>>,
+    /// Taken by every write of OAuth credentials. See `oauth::ProfileWriter`.
+    oauth_writes: Arc<Mutex<()>>,
     /// Held for the life of the engine. A second engine on the same directory fails to open.
     _lock: File,
 }
@@ -271,6 +308,7 @@ impl Engine {
             last_polls: Mutex::new(HashMap::new()),
             secret_box,
             outer: Mutex::new(Vec::new()),
+            oauth_writes: Arc::new(Mutex::new(())),
             _lock: lock,
         })
     }
@@ -309,7 +347,8 @@ impl Engine {
                 secrets.insert(key.clone(), self.secret_box.open(profile, &key, &sealed));
             }
         }
-        let built = self.backends.build_with_secrets(profile, config, &secrets).await;
+        let writer = self.writer(profile, store);
+        let built = self.backends.build_with_writer(profile, config, &secrets, writer).await;
         let runtime = Arc::new(built.map_err(ApiError::Internal)?);
         self.runtimes
             .lock()
@@ -1510,6 +1549,24 @@ impl EngineApi for Engine {
 
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.delete_connector(profile, name) })
+    }
+
+    fn start_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, ApiResult<OAuthStarted>> {
+        Box::pin(async move { self.start_oauth(profile, connector, redirect_uri).await })
+    }
+
+    fn finish_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        callback_url: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.finish_oauth(profile, connector, &callback_url).await })
     }
 
     fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>> {

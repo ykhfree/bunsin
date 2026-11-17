@@ -690,6 +690,7 @@ fn store_command(rt: &tokio::runtime::Runtime, rig: &common::Rig, name: &str, mc
         token_secret: None,
         token_header: None,
         secret_env: Default::default(),
+        oauth: None,
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config
@@ -2134,6 +2135,7 @@ fn a_secret_variable_without_a_value_is_not_shown_as_stored(cx: &mut TestAppCont
         token_secret: None,
         token_header: None,
         secret_env: ["API_TOKEN".to_owned()].into(),
+        oauth: None,
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config
@@ -2165,4 +2167,119 @@ fn a_secret_variable_without_a_value_is_not_shown_as_stored(cx: &mut TestAppCont
         assert_eq!(label(window, "secret-API_TOKEN"), "API_TOKEN: stored on the server");
         assert_eq!(label(window, "secret-missing"), "");
     });
+}
+
+/// Stores connector `docs` of kim at `OAUTH_URL`, signing in with OAuth. Only the settings file
+/// turns OAuth on.
+fn add_oauth_docs(rt: &tokio::runtime::Runtime, rig: &common::Rig) {
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config.connectors.insert(
+        "docs".into(),
+        serde_json::json!({"mcp": {"transport": "http", "url": common::OAUTH_URL}, "oauth": {}}),
+    );
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+}
+
+/// What the browser does after the sign-in: it asks the window's redirect address for
+/// `query`. Returns the answer of the window's listener.
+fn browser_returns(redirect_uri: &str, query: &str) -> String {
+    use std::io::{Read, Write};
+    let rest = redirect_uri.strip_prefix("http://").unwrap();
+    let (address, path) = rest.split_at(rest.find('/').unwrap());
+    let mut socket = std::net::TcpStream::connect(address).unwrap();
+    let request = format!("GET {path}?{query} HTTP/1.1\r\nhost: {address}\r\n\r\n");
+    socket.write_all(request.as_bytes()).unwrap();
+    let mut answer = String::new();
+    socket.read_to_string(&mut answer).unwrap();
+    answer
+}
+
+/// Clicks Sign in on connector `docs` and returns the redirect address that the opened page names.
+fn start_sign_in(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, shell: &Entity<Shell>, n: u64) -> String {
+    on_screen(cx, window, |window, cx| click_row(window, cx, "docs", "sign-in"));
+    wait_for_commands(cx, shell, n);
+    let opened = cx.opened_url().expect("the window opens the sign-in page");
+    assert!(opened.starts_with(common::AUTHORIZE), "{opened}");
+    on_screen(cx, window, |window, _| {
+        let shown = row(window, "docs", "sign-in-result").unwrap();
+        assert!(
+            shown.starts_with("Sign in in the browser.") && shown.ends_with(&opened),
+            "{shown}"
+        );
+    });
+    let redirect_uri = opened.split("redirect_uri=").nth(1).unwrap().to_owned();
+    assert!(redirect_uri.starts_with("http://127.0.0.1:"), "{redirect_uri}");
+    redirect_uri
+}
+
+#[gpui_kit::test]
+fn an_oauth_connector_is_signed_in_from_its_row_through_the_browser(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    add_jira(&rt, &rig);
+    add_oauth_docs(&rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(row(window, "docs", "oauth").as_deref(), Some("OAuth sign-in needed"));
+        assert_eq!(row(window, "docs", "token"), None);
+        assert!(row(window, "docs", "sign-in").is_some());
+        // A connector with a token has no sign-in.
+        assert!(row(window, "jira", "token").is_some());
+        assert_eq!(row(window, "jira", "sign-in"), None);
+    });
+
+    let redirect_uri = start_sign_in(cx, window, &shell, 1);
+    let answer = browser_returns(&redirect_uri, "code=c1&state=s1");
+    assert!(
+        answer.starts_with("HTTP/1.1 200") && answer.contains("close this page"),
+        "{answer}"
+    );
+    wait_for_commands(cx, &shell, 2);
+    wait_until(cx, &shell, "the signed-in row", |s| {
+        let connections = s.state.connections.as_ref();
+        let docs = connections.and_then(|c| c.connectors.get("docs"));
+        docs.and_then(|d| d.oauth.as_ref())
+            .is_some_and(|o| o.state == bunsin_api::OAuthState::SignedIn)
+    });
+    on_screen(cx, window, |window, _| {
+        assert_eq!(row(window, "docs", "oauth").as_deref(), Some("signed in with OAuth"));
+        assert_eq!(
+            row(window, "docs", "sign-in-result").as_deref(),
+            Some("Signed in. Check lists the tools with the new sign-in.")
+        );
+        assert_not_on_screen(window, common::OAUTH_ACCESS, "signed in with OAuth");
+    });
+    // The listener took its one callback and closed.
+    let address = redirect_uri.strip_prefix("http://").unwrap().split('/').next().unwrap();
+    assert!(std::net::TcpStream::connect(address).is_err());
+}
+
+#[gpui_kit::test]
+fn a_refused_sign_in_shows_why_and_the_connector_still_needs_one(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    add_oauth_docs(&rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
+
+    // A request to another path does not end the sign-in.
+    let redirect_uri = start_sign_in(cx, window, &shell, 1);
+    let origin = redirect_uri.trim_end_matches("/callback");
+    let other = browser_returns(&format!("{origin}/favicon.ico"), "");
+    assert!(other.starts_with("HTTP/1.1 404"), "{other}");
+    browser_returns(&redirect_uri, "error=access_denied&state=s1");
+    wait_for_commands(cx, &shell, 2);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            row(window, "docs", "sign-in-result").as_deref(),
+            Some("invalid request: the authorization server did not give access: access_denied")
+        );
+        assert_eq!(row(window, "docs", "oauth").as_deref(), Some("OAuth sign-in needed"));
+    });
+    let connections = rt.block_on(rig.engine.connections("kim")).unwrap();
+    let oauth = connections.connectors["docs"].oauth.as_ref().unwrap();
+    assert_eq!(oauth.state, bunsin_api::OAuthState::SignInNeeded);
+
+    // The owner can start again from the same row.
+    let again = start_sign_in(cx, window, &shell, 3);
+    assert_ne!(again, redirect_uri, "each sign-in listens on its own address");
 }

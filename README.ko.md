@@ -29,8 +29,8 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
 - **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
   원칙과 poll도 창에서 정합니다.
-- **아직 만들지 않은 것:** MCP 서버용 OAuth.
-- **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
+- **MCP 서버용 OAuth는 설정 파일로만 켭니다.** 켠 뒤의 로그인은 창과 명령줄에서 합니다([LLM endpoint와 커넥터](#llm-endpoint와-커넥터) 참고).
+- **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 OAuth 제공자, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
   서버 파일에 접근할 수 있는 사람에게서는 격리되어 있지 않습니다.
@@ -228,6 +228,7 @@ bunsind llm-test kim                             # 저장된 LLM endpoint로 테
 bunsind llm-usage kim                            # 지난 90일의 LLM 호출과 token
 bunsind connections kim                          # 주소와 각 token의 출처
 bunsind tools kim slack                          # 접속해서 도구 목록을 봅니다. 동작 확인 방법입니다
+bunsind connector-oauth kim docs                 # OAuth를 쓰는 MCP 서버에 로그인합니다(아래 참고)
 bunsind connector-remove kim jira                # 커넥터와 그 token을 지웁니다
 ```
 
@@ -244,6 +245,23 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - 커넥터에는 token이 없어도 됩니다. token을 빼고 저장하면 됩니다. token은 `Authorization: Bearer <token>`으로 갑니다.
   MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
   그 커넥터에 `connector-set`을 실행할 때마다 `--token-header`를 주십시오. 빼면 `Authorization: Bearer`로 돌아갑니다.
+- **OAuth.** 주소로 접속하는 MCP 서버는 token 대신 OAuth 로그인을 쓸 수 있습니다.
+  설정 파일에서 켭니다: 커넥터에 `"oauth": {}`를 넣고 token은 빼고 `config-set`을 실행합니다. 예:
+  `"docs": {"mcp": {"transport": "http", "url": "https://mcp.example.com/docs"}, "oauth": {}}`.
+  창과 `connector-set`은 저장할 때 커넥터의 `oauth`를 유지하지만, 켜거나 끄지는 못합니다.
+  `oauth`의 `"client_id"`는 인가 서버가 Bunsin용으로 발급한 client입니다. 없으면 서버가 client를 직접 등록합니다(dynamic client registration).
+  `"scopes"`는 요청할 scope입니다. 없으면 MCP 서버가 알려 주는 scope를 요청합니다.
+- 로그인하려면 창에서 그 커넥터 줄의 **Sign in**을 누릅니다. 창이 브라우저로 로그인 페이지를 열고,
+  브라우저가 돌아오는 요청을 127.0.0.1의 빈 port에서 받습니다.
+  명령줄에서는 `connector-oauth`가 로그인 페이지 주소를 출력합니다. 그 주소를 열어 로그인한 뒤,
+  브라우저가 이동한 주소를 붙여 넣습니다. 그 페이지는 열리지 않습니다.
+  `--redirect-uri`로 그 주소를 바꿉니다(기본값 `http://127.0.0.1:8976/callback`). 고정된 주소로 등록한 client ID에는 이 옵션이 필요할 수 있습니다.
+  로그인은 10분 동안 기다립니다. 프로필 하나에 3개까지 기다릴 수 있고, 서버를 다시 시작하면 잊습니다.
+- 서버는 OAuth token을 봉인하고 MCP 서버 주소의 origin에 묶습니다. access token은 refresh token으로 스스로 갱신합니다.
+  `connections`와 창은 `signed in with OAuth` 또는 `OAuth sign-in needed`를 보여 줍니다.
+  주소가 다른 origin으로 바뀐 뒤, 인가 서버가 refresh token을 거부한 뒤, 또는 access token이 만료되었고 refresh token이 없을 때는 다시 로그인해야 합니다.
+  `oauth`나 커넥터를 지우면 token도 지워집니다. 로그인의 요청은 모두 주소 규칙을 지나고, redirect를 따르지 않으며, 30초 안에 끝나야 합니다.
+  로컬 테스트 서버로만 시험했습니다.
 - `--api slack|jira|confluence`(창에서는 종류 **REST API**)를 주면 서버가 MCP 서버 대신 그 서비스의 REST API를 직접 부릅니다.
   도구는 코드에 고정되어 있습니다: Slack `search_messages`, `get_thread`, `post_message`, Jira `search_issues`, `get_issue`, `add_comment`,
   Confluence `search_pages`, `get_page`, `create_page`. 지우는 도구는 없습니다.
@@ -837,7 +855,7 @@ token을 macOS Keychain에 저장합니다.
 **Permissions**는 승인된 도구마다 agent가 할 수 있는 일을 정합니다([권한 규칙](#권한-규칙)).
 **Agent**에는 원칙과 poll이 있습니다([원칙](#원칙), [이벤트 찾기](#이벤트-찾기-폴링)).
 **Learning**은 agent가 사용자에게서 배우는 것과 그것을 확인하는 방법을 보여 줍니다(아래).
-**Settings**에는 연결 설정(LLM endpoint, 커넥터, token, 커넥터의 도구 목록으로 하는 연결 확인)과 개인정보 필터가 있습니다.
+**Settings**에는 연결 설정(LLM endpoint, 커넥터, token, 커넥터의 도구 목록으로 하는 연결 확인, OAuth 로그인)과 개인정보 필터가 있습니다.
 5초마다 서버에서 상태를 다시 읽습니다.
 
 **승인 전 수정.** 규칙이 글의 자리를 정한 대기 호출에는 "Edit the text" 버튼이 있습니다.
