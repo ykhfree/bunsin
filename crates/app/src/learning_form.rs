@@ -455,7 +455,7 @@ impl Shell {
         )
     }
 
-    fn candidates_card(&self, cx: &Context<Self>) -> Div {
+    pub(crate) fn candidates_card(&self, cx: &Context<Self>) -> Div {
         let extract = |id: &'static str, label: &'static str, source: PrincipleSource| {
             Button::new(id)
                 .outline()
@@ -522,7 +522,7 @@ impl Shell {
             )
     }
 
-    fn eval_card(&self, cx: &Context<Self>) -> Div {
+    pub(crate) fn eval_card(&self, cx: &Context<Self>) -> Div {
         let section = card(cx)
             .w(px(460.))
             .flex_none()

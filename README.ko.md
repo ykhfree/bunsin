@@ -27,8 +27,8 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   notes는 agent가 이벤트를 처리하며 읽은 것과 사용자가 시작한 읽기로 채워집니다. 검색 품질은 MCP 서버에 달려 있습니다.
 - **개인정보 필터는 패턴과 사용자의 단어 목록으로 동작합니다.** 이메일, 전화번호 같은 정해진 형식은 찾습니다.
   사람 이름과 주소는 단어 목록(`terms`)에 적은 것만 찾습니다.
-- **구성 마법사가 없습니다.** 연결 설정과 개인정보 필터는 창과 명령줄로 설정합니다. 권한 규칙은 창에서도 설정합니다.
-  원칙과 poll도 창에서 정합니다.
+- **구성 마법사는 창에만 있습니다.** 마법사는 다른 화면과 같은 호출을 쓰고, 자기 상태를 저장하지 않습니다.
+  명령줄에는 마법사가 없습니다. [agent 설정](#agent-설정-프로필-소유자)에 같은 순서의 명령이 있습니다.
 - **MCP 서버용 OAuth는 설정 파일로만 켭니다.** 켠 뒤의 로그인은 창과 명령줄에서 합니다([LLM endpoint와 커넥터](#llm-endpoint와-커넥터) 참고).
 - **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 OAuth 제공자, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** Keychain 저장 코드는 테스트가 없습니다.
@@ -207,6 +207,49 @@ bunsind config-set kim kim.json
 사설 CA를 쓰는 서버에는 `BUNSIN_CA_CERT`에 CA 인증서 파일의 경로를 넣습니다.
 
 새 프로필은 아무것도 할 수 없습니다. 설정에 LLM endpoint, 커넥터, 승인한 도구, 권한 규칙을 넣어야 합니다.
+
+### 단계별 구성 (Setup)
+
+LLM endpoint나 커넥터가 없고 승인한 도구도 없는 프로필이면, 창이 스스로 **setup**을 엽니다.
+Agent 화면의 "Set up the agent" 버튼으로 다시 열 수 있습니다. 단계는 일곱 개입니다.
+각 단계는 다른 화면에 있는 같은 기능의 컨트롤을 보여 줍니다.
+
+1. **LLM endpoint**: 주소, 모델, token을 저장하고 Test를 누릅니다. Next는 성공한 시험이 있어야 넘어갑니다.
+2. **Connect services**: 주소의 MCP 서버, REST API, 또는 운영자가 허용한 경우 서버가 실행하는 명령을 연결합니다.
+   Check가 접속하고 도구 목록을 받습니다.
+3. **Tools and rules**: 커넥터마다 도구 목록을 받아 이름과 설명을 읽고, 목록을 승인합니다. 이어서 도구마다 규칙을 정합니다.
+   창은 도구의 class를 스스로 고르지 않습니다. 새 Write와 Delete 규칙은 Approve에서 시작하고, 다른 사람에게 가는 글의 자리는 사용자가 고릅니다.
+   setup은 Observe와 Approve만 보여 줍니다.
+4. **Knowledge**(선택): read 규칙이 있는 도구로 한 번 읽어 notes를 채웁니다.
+5. **Principles**: 읽기 한 번(예: 내가 보낸 메시지의 검색), 교정 기록, 재현 사례에서 원칙 후보를 찾습니다. 후보마다 채택, 수정, 기각을 고릅니다.
+6. **Evaluation**: 재현 사례가 있으면 JSON 배열로 더하고, 첫 평가를 실행합니다. 이 단계가 비율을 보여 줍니다.
+7. **Finish**: 요약을 보여 줍니다. 모든 write와 delete 규칙이 Observe나 Approve일 때만 setup이 끝납니다.
+   "Set them to Approve"는 나머지 규칙을 Approve로 옮깁니다.
+
+모든 단계에 Skip이 있습니다. "Leave the setup"은 Agent 화면으로 가고, 창은 닫힐 때까지 단계를 기억합니다.
+새 창은 서버가 결과를 보여 주지 않는 첫 단계에서 시작합니다. 예를 들어 LLM endpoint만 저장되어 있으면 Connect services에서 시작합니다.
+
+![setup의 도구 단계](docs/screens/setup-tools-light.png)
+
+명령줄에서는 같은 단계를 아래 순서의 명령으로 합니다.
+
+```sh
+bunsind llm-set kim --token-stdin                 # 1. LLM endpoint
+bunsind llm-test kim
+bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin   # 2.
+bunsind tools kim slack                           # 3. 연결 확인과 도구 목록
+bunsind tools kim slack --approve
+bunsind rule-set kim slack/search --class read
+bunsind rule-set kim slack/post --class write --text text
+bunsind preload-notes kim --tool slack/search --args '{"query": "deploy"}'           # 4.
+bunsind extract-principles kim --from read --tool slack/search --args '{"query":"from:me"}'  # 5.
+bunsind principle-candidates kim
+bunsind adopt-principle kim 1
+bunsind add-replay-cases kim cases.json           # 6.
+bunsind start-eval kim
+bunsind eval-report kim
+bunsind rules kim                                 # 7. approve보다 높은 write 규칙이 없는지 확인
+```
 
 ### LLM endpoint와 커넥터
 
@@ -859,7 +902,7 @@ token을 macOS Keychain에 저장합니다.
 
 ![창의 Inbox 화면](docs/screens/inbox-light.png)
 
-창에는 여섯 화면이 있습니다. **Inbox**는 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
+창에는 여섯 화면과 setup이 있습니다([단계별 구성](#단계별-구성-setup) 참고). **Inbox**는 승인함(각 호출의 모든 인자 포함), 감사 로그, 정지 스위치를 보여 줍니다.
 **Notes**는 notes의 페이지 목록을 보여 주고, 페이지를 읽고, 고치고, 만들고, 지울 수 있게 합니다.
 **Permissions**는 승인된 도구마다 agent가 할 수 있는 일을 정합니다([권한 규칙](#권한-규칙)).
 **Agent**에는 원칙과 poll이 있습니다([원칙](#원칙), [이벤트 찾기](#이벤트-찾기-폴링)).
@@ -888,7 +931,7 @@ AI 표시는 서버가 수정 뒤에 붙입니다. 그래서 입력란에는 표
 - **Principle candidates**: "Find in my corrections"와 "Find in my replay cases"가 LLM에 묻습니다.
   새 후보마다 근거 인용과 "Adopt", "Edit, then adopt", "Dismiss" 버튼이 있습니다.
   채택은 창이 보여 주는 원칙 목록을 기대합니다. 그 사이에 서버의 원칙이 바뀌었으면 아무것도 더하지 않고, 창이 거부를 보여 줍니다.
-- **Evaluation**: 재현 사례(`bunsind add-replay-cases`로 더함), "Run the evaluation", 실행 상태, 비율, 통과 기준, 사례마다 한 줄.
+- **Evaluation**: 재현 사례(`bunsind add-replay-cases`나 setup의 6단계로 더함), "Run the evaluation", 실행 상태, 비율, 통과 기준, 사례마다 한 줄.
 - **Autonomy suggestions**: Permissions 화면의 제안 기준. 이것만 따로, 충돌 검사와 함께 저장합니다.
   세 칸을 비우거나 "Turn suggestions off"를 누르면 제안이 꺼집니다.
 

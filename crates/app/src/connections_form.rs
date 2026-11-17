@@ -1062,12 +1062,18 @@ impl Shell {
             .flex()
             .flex_col()
             .gap_4();
-        let form = &self.connections;
-        let (Some(server), Some(profile)) = (&self.state.connections, &form.profile) else {
-            return section;
-        };
+        match (self.llm_card(cx), self.connectors_card(cx)) {
+            (Some(llm), Some(connectors)) => section.child(llm).child(connectors),
+            _ => section,
+        }
+    }
 
-        // The LLM endpoint.
+    /// The LLM endpoint with Save and Test, while the server's connections are known.
+    pub(crate) fn llm_card(&self, cx: &Context<Self>) -> Option<Div> {
+        let form = &self.connections;
+        let (Some(server), Some(_)) = (&self.state.connections, &form.profile) else {
+            return None;
+        };
         let llm = server.llm.as_ref();
         let llm_token = llm.map_or(TokenSource::None, |llm| llm.token);
         let llm_changed = form.llm_differs(llm, cx);
@@ -1191,7 +1197,16 @@ impl Shell {
                     cx,
                 )
             }));
+        Some(llm_section)
+    }
 
+    /// The saved connectors with Check, and the form that adds or changes one,
+    /// while the server's connections are known.
+    pub(crate) fn connectors_card(&self, cx: &Context<Self>) -> Option<Div> {
+        let form = &self.connections;
+        let (Some(server), Some(profile)) = (&self.state.connections, &form.profile) else {
+            return None;
+        };
         // The saved connectors, each in its own ID scope.
         let rows: Vec<_> = server
             .connectors
@@ -1485,7 +1500,7 @@ impl Shell {
             );
 
         let count = server.connectors.len();
-        section.child(llm_section).child(
+        Some(
             card(cx)
                 .child(
                     div()

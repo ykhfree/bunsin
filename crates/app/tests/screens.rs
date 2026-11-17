@@ -804,6 +804,65 @@ fn draw(
     .unwrap();
     shot(&mut cx, window, dir, &name("settings-secrets"));
 
+    // The setup, in a new window whose forms hold no draft of the pictures above. It opens from the
+    // Agent view, moves back to its first step, and shows a test that works.
+    let (commands, _received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (setup, _shell) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options(), cx, |window, cx| {
+                cx.new(|cx| Shell::new(receiver, commands, window, cx))
+            })
+        })
+        .unwrap();
+    let window: AnyWindowHandle = setup.into();
+    let click = |cx: &mut HeadlessAppContext, id: &'static str| {
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        })
+        .unwrap();
+    };
+    states.send(on(UiCommand::Refresh)).unwrap();
+    click(&mut cx, "tab-agent");
+    click(&mut cx, "open-setup");
+    for _ in 0..6 {
+        cx.run_until_parked();
+        let first = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let back = window.try_find("setup-back").is_some();
+                if back {
+                    window.click("setup-back", cx);
+                }
+                !back
+            })
+            .unwrap();
+        if first {
+            break;
+        }
+    }
+    rig.llm.reply(
+        r#"{"kind":"ignore","rationale":"connection test","summary":null,"tool":null,"args_json":null}"#,
+        41,
+    );
+    states.send(on(UiCommand::TestLlm { profile: "kim".into() })).unwrap();
+    shot(&mut cx, window, dir, &name("setup-llm"));
+    // The tools step, with the list of a connector beside the rules.
+    click(&mut cx, "setup-next");
+    click(&mut cx, "setup-next");
+    let check = UiCommand::CheckConnector {
+        profile: "kim".into(),
+        name: "slack".into(),
+    };
+    states.send(on(check)).unwrap();
+    shot(&mut cx, window, dir, &name("setup-tools"));
+    for _ in 0..4 {
+        click(&mut cx, "setup-skip");
+    }
+    shot(&mut cx, window, dir, &name("setup-finish"));
+
     // A coding call that waits for the owner, and the result of a job that ended. It comes last,
     // because its rows would change the inbox of the other pictures.
     let coding = rt.block_on(coding_state(rig));

@@ -830,7 +830,7 @@ impl Shell {
     }
 
     /// One read that the agent turns into page changes, which go to the inbox.
-    fn preload_card(&self, cx: &Context<Self>) -> impl IntoElement {
+    pub(crate) fn preload_card(&self, cx: &Context<Self>) -> impl IntoElement {
         let form = &self.notes;
         let readers: Vec<&str> = self
             .state

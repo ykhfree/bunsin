@@ -1,5 +1,5 @@
 //! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
-//! polls, learning, privacy settings, connections and caller tokens.
+//! polls, learning, privacy settings, connections, caller tokens and the setup of an agent.
 
 use crate::bridge::{UiCommand, UiState};
 use crate::callers_form::CallersForm;
@@ -11,6 +11,7 @@ use crate::permissions_form::PermissionsForm;
 use crate::polls_form::PollsForm;
 use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
+use crate::setup_form::SetupForm;
 use crate::theme::{card, code_block, icon, notice, palette, quiet, state_mark, utc_minute};
 use bunsin_api::{Autonomy, Resolution};
 use bunsin_core::approval::ApprovalState;
@@ -38,6 +39,7 @@ pub struct Shell {
     pub(crate) principles: PrinciplesForm,
     pub(crate) polls: PollsForm,
     pub(crate) learning: LearningForm,
+    pub(crate) setup: SetupForm,
     /// The edit of a waiting call in the inbox, if one is open.
     pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
@@ -65,6 +67,9 @@ pub enum View {
     Learning,
     /// The connections and the privacy filter.
     Settings,
+    /// The setup of an agent, step by step. It opens by itself for a profile that nobody has set up,
+    /// and from the Agent view.
+    Setup,
 }
 
 impl Shell {
@@ -85,6 +90,13 @@ impl Shell {
                     shell.principles.receive(&state, window, cx);
                     shell.polls.receive(&state, window, cx);
                     shell.learning.receive(&state, window, cx);
+                    if shell.setup.receive(&state, window, cx) {
+                        shell.view = View::Setup;
+                    }
+                    // The setup shows the selected profile, also after a change of profile.
+                    if shell.view == View::Setup {
+                        shell.setup.open(&state);
+                    }
                     shell.draft_editor.receive(&state);
                     shell.state = state;
                     cx.notify();
@@ -107,6 +119,7 @@ impl Shell {
             principles: PrinciplesForm::new(window, cx),
             polls: PollsForm::new(window, cx),
             learning: LearningForm::new(window, cx),
+            setup: SetupForm::new(window, cx),
             draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
@@ -751,16 +764,29 @@ impl Shell {
             View::Agent => "Agent",
             View::Learning => "Learning",
             View::Settings => "Settings",
+            View::Setup => "Setup",
         };
         let switch = Button::new("kill-switch")
             .label(if stopped { "Resume changes" } else { "Stop all changes" })
             .icon(icon(if stopped { "play" } else { "pause" }))
             .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped))));
+        // The Agent view opens the setup again. The button sits in this line, so it moves no card.
+        let setup = (self.view == View::Agent).then(|| {
+            Button::new("open-setup")
+                .outline()
+                .icon(icon("list-checks"))
+                .label("Set up the agent")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_setup();
+                    cx.notify();
+                }))
+        });
         div()
             .flex()
             .items_center()
             .gap_4()
             .child(div().flex_1().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
+            .children(setup)
             .child(labelled_as("status", status, state_mark(status, color)))
             .child(if stopped { switch.primary() } else { switch.outline() })
     }
@@ -785,7 +811,9 @@ impl Render for Shell {
         let audit = snapshot.map(|s| s.audit.as_slice()).unwrap_or_default();
         let error = self.state.error.clone().unwrap_or_default();
 
-        let page = if self.view == View::Permissions {
+        let page = if self.view == View::Setup {
+            self.setup_section(cx)
+        } else if self.view == View::Permissions {
             self.permissions_section(cx)
         } else if self.view == View::Learning {
             self.learning_section(cx)

@@ -2,7 +2,7 @@
 //! The clicks change a draft. Only Save sends the table to the server.
 
 use crate::bridge::{SaveError, UiCommand, UiState};
-use crate::shell::{Shell, labelled, labelled_as};
+use crate::shell::{Shell, View, labelled, labelled_as};
 use crate::theme::{card, notice, palette, quiet};
 use bunsin_api::{Expected, PermissionsUpdate, ToolAutonomy};
 use bunsin_core::autonomy::AutonomyThresholds;
@@ -83,7 +83,7 @@ fn class_word(class: ToolClass) -> &'static str {
     }
 }
 
-fn tier_word(tier: Tier) -> &'static str {
+pub(crate) fn tier_word(tier: Tier) -> &'static str {
     match tier {
         Tier::Observe => "observe",
         Tier::Draft => "draft",
@@ -410,10 +410,19 @@ impl Shell {
         let row = || div().flex().flex_wrap().items_center().gap_2();
         let mut lines: Vec<AnyElement> = Vec::new();
         if let Some(rule) = rule.filter(|rule| rule.class != ToolClass::Read) {
-            // "Autonomous" is not offered for a delete. A stored rule that has it is still shown.
+            // "Autonomous" is not offered for a delete. The setup offers only Observe and Approve,
+            // the steps a setup may end with. A stored rule's step is always shown.
+            let setup = self.view == View::Setup;
             let tiers = [Tier::Observe, Tier::Draft, Tier::Approve, Tier::Autonomous]
                 .into_iter()
-                .filter(|tier| *tier != Tier::Autonomous || rule.class == ToolClass::Write || rule.tier == *tier)
+                .filter(|tier| {
+                    rule.tier == *tier
+                        || match tier {
+                            Tier::Draft | Tier::Autonomous if setup => false,
+                            Tier::Autonomous => rule.class == ToolClass::Write,
+                            _ => true,
+                        }
+                })
                 .map(|tier| {
                     let tool_id = id.to_owned();
                     let word = tier_word(tier);

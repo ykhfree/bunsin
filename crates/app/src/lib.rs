@@ -12,6 +12,7 @@ pub mod permissions_form;
 pub mod polls_form;
 pub mod principles_form;
 pub mod privacy;
+pub mod setup_form;
 pub mod shell;
 pub mod sign_in;
 pub mod theme;

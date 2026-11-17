@@ -7,7 +7,7 @@ use bunsin_api::{
     AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
     CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate,
     NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
-    PrivacyUpdate, ProfileSnapshot, Resolution, ToolsReport, WikiPageUpdate,
+    PrivacyUpdate, ProfileSnapshot, ReplayCase, Resolution, ToolsReport, WikiPageUpdate,
 };
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::eval::ReplayCaseRecord;
@@ -171,6 +171,11 @@ pub enum UiCommand {
     DeleteReplayCase {
         profile: String,
         id: i64,
+    },
+    /// Stores past cases for the evaluation. The server filters personal data before it stores them.
+    AddReplayCases {
+        profile: String,
+        cases: Vec<ReplayCase>,
     },
     /// Starts an evaluation run. The server replays the cases in the background.
     StartEval {
@@ -341,6 +346,10 @@ pub struct UiState {
     pub extract_result: Option<Result<usize, String>>,
     /// The replay cases of the selected profile, oldest first.
     pub replay_cases: Option<Vec<ReplayCaseRecord>>,
+    /// How many cases the last `AddReplayCases` stored, or why it failed. Not an `error`.
+    pub cases_result: Option<Result<usize, String>>,
+    /// How many `AddReplayCases` commands the bridge has run.
+    pub case_adds: u64,
     /// The newest evaluation run of the selected profile.
     pub eval_report: Option<EvalReport>,
     /// The result of the last command, if it was `SaveAutonomyThresholds`. A failed save is shown here, not in `error`.
@@ -418,6 +427,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.thresholds_result = None;
     state.lint_result = None;
     state.preload_result = None;
+    state.cases_result = None;
     state.new_caller = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
@@ -599,6 +609,12 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         (UiCommand::PreloadNotes { profile, request }, _) => {
             let result = for_profile(selected, &profile, api.preload_notes(&profile, request)).await;
             state.preload_result = Some(result.map(|filed| filed.len()));
+            Ok(())
+        }
+        (UiCommand::AddReplayCases { profile, cases }, _) => {
+            let result = for_profile(selected, &profile, api.add_replay_cases(&profile, cases)).await;
+            state.cases_result = Some(result.map(|ids| ids.len()));
+            state.case_adds += 1;
             Ok(())
         }
         (UiCommand::AddCaller { profile, label }, _) => {

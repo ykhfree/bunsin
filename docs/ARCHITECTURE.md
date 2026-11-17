@@ -128,7 +128,7 @@
   - 실제 앱은 아이콘 자원을 등록한다(`with_assets`). 등록하지 않으면 체크 표시 같은 아이콘이 그려지지 않는다.
   - 그림 확인: `cargo test -p bunsin-app --test screens -- <폴더>`가 창을 띄우지 않고 각 화면을 두 모드의 PNG로 그린다.
     이 방법으로는 hover, focus 이동, 제목 표시줄, 시스템 모드 변경을 따르는 동작을 확인할 수 없다.
-- 창은 Inbox, Notes, Permissions, Agent, Learning, Settings 여섯 화면 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
+- 창은 Inbox, Notes, Permissions, Agent, Learning, Settings 여섯 화면과 Setup 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
   승인함 테스트는 1280x800 창에서 실행한다.
   - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
     retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
@@ -138,6 +138,7 @@
   - Agent: 소유자의 원칙과 poll, 호출자 token(9절). 아래 "Agent 화면" 항목.
   - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
   - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인)과 개인정보 설정.
+  - Setup: 새 agent의 구성 마법사. 아래 "Setup 화면" 항목.
 - 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `remove_connector`, `privacy`, `set_privacy`).
   app은 설정 전체를 읽거나 쓰지 않는다.
 - 설정 화면의 입력 내용은 사용자의 초안이다. 5초마다의 새로고침은 초안을 덮어쓰지 않는다. 프로필을 바꾸면 초안을 버린다.
@@ -182,15 +183,33 @@
   `replay_cases`, `eval_report`를 더 읽는다.
   - 교정: 최신순 목록과 "Retire"(`retire_correction`). 폐기한 것은 표시만 남는다.
   - 원칙 후보: "Find in my corrections"와 "Find in my replay cases"가 `extract_principles`를 부른다. 결과 개수나 거부 이유는 카드 안에 보인다.
-    `read` 출처는 도구와 인자 입력이 필요하므로 명령(`bunsind extract-principles --from read`)으로만 쓴다.
+    `read` 출처는 도구와 인자 입력이 필요하므로 Learning 화면에는 없다. 명령(`bunsind extract-principles --from read`)과 Setup 화면의 5단계가 쓴다.
     `new` 후보마다 "Adopt", "Edit, then adopt"(입력란에 글을 넣고 "Adopt the edit"), "Dismiss". 채택은 창이 가진 원칙 목록을 `expected`로 보낸다.
     고치는 후보가 서버에서 `new`가 아니게 되면 입력란을 닫는다.
   - 평가: 사례 목록과 Delete, "Run the evaluation"(`start_eval`), run 상태, 비율, 통과 기준, 사례마다 한 줄(심판 판정 포함). 사례 추가는 명령(`add-replay-cases`)으로 한다.
-    창에 사례 입력란은 두지 않았다. 지난 메시지를 여러 개 한 번에 넣는 일이 대부분이기 때문이다.
+    Learning 화면에는 사례 입력란을 두지 않았다. 지난 메시지를 여러 개 한 번에 넣는 일이 대부분이기 때문이다.
+    Setup 화면의 6단계에는 JSON 배열 입력란이 있다(`add_replay_cases`, 명령과 같은 형식).
   - 자율 제안 기준: 전용 API `autonomy_thresholds`와 `set_autonomy_thresholds`(`POST .../autonomy-thresholds`, `.../set-autonomy-thresholds`).
     저장은 `check_config`(같은 `AutonomyThresholds::check`)를 지나고, 읽은 기준을 `Expected`로 보낸다. 다르면 412이고 화면은 "서버 것 불러오기"와 "그래도 저장"을 보여 준다.
     입력란의 기준값은 이미 읽는 `autonomy` 응답의 `thresholds`에서 온다(같은 값이므로 호출을 하나 줄였다). 세 칸이 비면 `None`, 모두 정수면 기준이다. 일부만 채우면 창이 보내지 않는다.
     감사 `autonomy_thresholds_changed`는 새 기준을 남긴다. 명령은 따로 두지 않았다. `config-set`이 같은 일을 한다.
+- **Setup 화면**(`setup_form.rs`, PLAN 5절과 6절의 4단계): 일곱 단계(LLM endpoint, 연결, 도구와 규칙, 업무지식, 원칙 후보, 재현 평가, 마무리).
+  - 새 API는 없다. 각 단계는 다른 화면의 카드를 그대로 그린다(`llm_card`, `connectors_card`, `permissions_section`, `preload_card`,
+    `candidates_card`, `eval_card`). 더한 명령은 bridge의 `AddReplayCases` 하나이고, 기존 `add_replay_cases`를 부른다.
+  - 서버에 자기 상태를 저장하지 않는다. 창이 열려 있는 동안 프로필마다 단계를 기억한다.
+    새 창은 서버가 결과를 보여 주지 않는 첫 단계에서 시작한다(`first_open_step`: endpoint, 커넥터, 모든 커넥터의 승인 목록과 규칙, notes, 원칙이나 새 후보, 평가 run).
+  - 창은 프로필마다 한 번, LLM endpoint나 커넥터가 없고 승인한 도구도 없는 프로필(`needs_setup`)이면 setup을 스스로 연다.
+    승인한 도구가 있는 프로필은 설정 파일 같은 다른 길로 구성된 것으로 보고 열지 않는다. Agent 화면 머리줄의 "Set up the agent"가 다시 연다.
+  - 1단계의 Next는 이 창에서 시험(`test_llm`)이 성공한 endpoint가 서버의 endpoint와 같을 때만 넘어간다. 모든 단계에 Skip이 있다.
+  - 3단계는 커넥터마다 `connector_tools`의 도구 이름과 설명(데이터)을 보여 주고 `approve_tools`로 승인한다. 규칙은 Permissions 화면의 초안과 같다.
+    Setup 화면에서 단계 버튼은 Observe와 Approve만 보인다(저장된 규칙의 단계는 보인다). 그래서 setup은 Autonomous를 정하지 않는다.
+  - 7단계는 요약을 보여 준다. read가 아닌 규칙이 모두 Observe나 Approve일 때만 Finish가 끝낸다.
+    "Set them to Approve"는 나머지를 Approve로 내리는 `set_permissions`이다(읽은 표를 `Expected`로 보낸다).
+  - 원칙 후보는 교정 기록, 재현 사례, 읽기에서 온다. 새 프로필에는 앞의 둘이 없으므로 5단계는 읽기 출처를 먼저 둔다.
+    PLAN 순서에서 평가(6단계)가 원칙(5단계)보다 뒤라서, 6단계에서 더한 사례로 후보를 찾으려면 Back으로 돌아간다.
+  - 테스트: `crates/app/tests/setup.rs`(가짜 LLM과 커넥터로 일곱 단계 전체, 떠났다가 이어 하기, Autonomous 규칙이 있으면 끝나지 않음).
+    그림: `docs/screens/setup-*-light.png`.
+  - 명령줄 마법사(`bunsind setup`)는 만들지 않았다. 단계마다 입력을 묻는 대화형 명령이 되어 작은 명령 순서가 아니기 때문이다. README에 명령 순서를 적었다.
 - **명령줄의 권한 규칙**: `bunsind rules`, `rule-set`, `rule-remove`는 같은 API(`permissions`, `set_permissions`)를 쓴다.
   - 명령은 표를 읽고 규칙 하나만 바꾼 뒤, 읽은 표를 `Expected`로 함께 보낸다. 그 사이에 표가 바뀌었으면 충돌로 거부된다.
     "그래도 저장"은 없다. 명령을 다시 실행하면 새 표에서 시작한다.
@@ -894,13 +913,13 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
 | 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
 | agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집, 내보내기, 점검, opt-in 자동 반영, 미리 읽기) | 구현, 테스트 있음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
-| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 사례를 추가하지 않는다. |
-| 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령에만 있다. |
+| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 Setup 화면에서만 사례를 추가한다. |
+| 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령과 Setup 화면에 있다. |
 | 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
 | 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
 | REST API 커넥터(Slack, Jira, Confluence의 고정 도구, 설정, 저장, CLI, 창) | 구현, 테스트 있음(core, connectors, 엔진, 서버, CLI, 창). 로컬 stub으로만 테스트 |
 | MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
-| 구성 마법사, 비밀 저장소 | 없음 |
+| 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI). 창에는 없음. |
 | ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버). 로컬 stub registry로만 테스트 |

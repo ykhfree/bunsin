@@ -29,8 +29,9 @@ Bunsin is in early development. Read this list before you use it.
 - **The privacy filter works on patterns and on your list of terms.** It finds email
   addresses, phone numbers and the other listed forms. It finds names and postal
   addresses only if you list them as terms.
-- **There is no setup wizard.** The window and the command line set the connections and
-  the privacy filter. The window also sets the permission rules, the principles and the polls.
+- **The setup wizard is in the window only.** It uses the same calls as the other views and
+  stores nothing of its own. The command line has no wizard; [Set up an agent](#set-up-an-agent-profile-owner)
+  lists the commands in the same order.
 - **OAuth for MCP servers is turned on in the settings file only.** The window and the
   command line then sign in (see [LLM endpoint and connectors](#llm-endpoint-and-connectors)).
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
@@ -243,6 +244,54 @@ For a server with a private CA, set `BUNSIN_CA_CERT` to the CA certificate file.
 
 A new profile can do nothing. Its settings must name an LLM endpoint, connectors,
 approved tools and permission rules.
+
+### The setup, step by step
+
+The window opens a **setup** by itself for a profile that has no LLM endpoint or no
+connector, and no approved tool. The button "Set up the agent" in the Agent view opens it
+again. It has seven steps. Each step shows the controls that the other views have for it:
+
+1. **LLM endpoint**: save the address, the model and the token, then press Test. Next
+   needs a test that works.
+2. **Connect services**: an MCP server at an address, a REST API, or a command that the
+   server runs if its operator allows it. Check connects and lists the tools.
+3. **Tools and rules**: list the tools of each connector, read the names and descriptions,
+   and approve the list. Then give each tool a rule. No tool gets a class by itself. A new
+   Write or Delete rule starts at Approve, and you choose where its text for other people
+   is. The setup offers only Observe and Approve.
+4. **Knowledge** (optional): one read into the notes from a tool with a read rule.
+5. **Principles**: candidates from one read (for example a search of your sent messages),
+   from your corrections or from your replay cases. Adopt, edit or dismiss each one.
+6. **Evaluation**: add replay cases as a JSON array, if you have them, and run the first
+   evaluation. The step shows the rates.
+7. **Finish**: a summary. The setup ends only when every write and delete rule is at
+   Observe or Approve. "Set them to Approve" moves the others there.
+
+Each step has Skip. "Leave the setup" goes to the Agent view, and the window keeps the
+step until it closes. A new window starts at the first step whose result the server does
+not show, for example Connect services when only the LLM endpoint is saved.
+
+![The tools step of the setup](docs/screens/setup-tools-light.png)
+
+On the command line, the same steps are these commands, in this order:
+
+```sh
+bunsind llm-set kim --token-stdin                 # 1. the LLM endpoint
+bunsind llm-test kim
+bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin   # 2.
+bunsind tools kim slack                           # 3. the check and the tool list
+bunsind tools kim slack --approve
+bunsind rule-set kim slack/search --class read
+bunsind rule-set kim slack/post --class write --text text
+bunsind preload-notes kim --tool slack/search --args '{"query": "deploy"}'           # 4.
+bunsind extract-principles kim --from read --tool slack/search --args '{"query":"from:me"}'  # 5.
+bunsind principle-candidates kim
+bunsind adopt-principle kim 1
+bunsind add-replay-cases kim cases.json           # 6.
+bunsind start-eval kim
+bunsind eval-report kim
+bunsind rules kim                                 # 7. no write rule above approve
+```
 
 ### LLM endpoint and connectors
 
@@ -1007,7 +1056,7 @@ macOS Keychain.
 
 ![The inbox of the window](docs/screens/inbox-light.png)
 
-The window has six views. **Inbox** shows the approval inbox with every argument of each
+The window has six views and the setup (see [The setup, step by step](#the-setup-step-by-step)). **Inbox** shows the approval inbox with every argument of each
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
 each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
@@ -1040,7 +1089,7 @@ item runs the call.
   Each new candidate shows its quote and has "Adopt", "Edit, then adopt" and "Dismiss".
   An adoption expects the principles that the window shows. If they changed on the server
   meanwhile, nothing is added and the window shows the refusal.
-- **Evaluation**: the replay cases (add them with `bunsind add-replay-cases`), "Run the
+- **Evaluation**: the replay cases (add them with `bunsind add-replay-cases` or in step 6 of the setup), "Run the
   evaluation", the state of the run, the rates, the pass mark and one line per case.
 - **Autonomy suggestions**: the thresholds of the suggestions in the permissions view, saved
   alone with a conflict check. Three empty fields, or "Turn suggestions off", turn them off.
