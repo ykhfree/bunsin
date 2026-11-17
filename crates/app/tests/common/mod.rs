@@ -49,6 +49,10 @@ impl Backends for Fakes {
         self.real.validate(profile, config)
     }
 
+    fn ard_publishers(&self) -> Vec<String> {
+        self.real.ard_publishers()
+    }
+
     /// The authorization server grants at once: its page sends the browser back with `state=s1`.
     fn oauth_start<'a>(
         &'a self,
@@ -94,6 +98,10 @@ pub const AUTHORIZE: &str = "https://auth.example/authorize";
 #[allow(dead_code)]
 pub const OAUTH_ACCESS: &str = "oauth-window-access-3c9e1d";
 
+/// The only ARD publisher domain that the operator of the rig allows.
+#[allow(dead_code)]
+pub const PUBLISHER: &str = "acme.com";
+
 /// Why a connector other than `slack` cannot connect.
 #[allow(dead_code)]
 pub const REFUSED: &str = "connection refused";
@@ -123,8 +131,11 @@ pub async fn rig_with(now: i64, allow_stdio: bool) -> Rig {
     let llm = Arc::new(FakeLlm::new());
     let tools = vec![tool("post", "Post a message")];
     let slack = Arc::new(FakeConnector::new("slack", tools.clone()));
-    // The real address rules, with no token in the environment.
-    let real = RealBackends::new(Arc::new(|_| None), allow_stdio, UpstreamPolicy::default());
+    // The real address rules, with no token in the environment. The operator allows ARD listings
+    // under `acme.com` only.
+    let real = RealBackends::new(Arc::new(|_| None), allow_stdio, UpstreamPolicy::default())
+        .with_ard_publishers(&[PUBLISHER.into()])
+        .unwrap();
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
         slack: slack.clone(),

@@ -137,9 +137,9 @@
     정책이 소유자 없이 실행한 항목(`executed`, `failed`)에는 "Report a problem" 버튼이 있다(`report_autonomous`). 도구가 보류 중이면 버튼을 감춘다.
   - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제, 오른쪽 열의 미리 읽기와 점검 결과(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
-  - Agent: 소유자의 원칙과 poll, 호출자 token(9절). 아래 "Agent 화면" 항목.
+  - Agent: 소유자의 원칙과 poll, 호출자 token(9절), 인바운드 endpoint와 ARD 등록, webhook, ARD registry. 아래 "Agent 화면" 항목과 "부분 저장 카드" 항목.
   - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
-  - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인)과 개인정보 설정.
+  - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인), 개인정보 설정, notes 설정, 평가 설정.
   - Setup: 새 agent의 구성 마법사. 아래 "Setup 화면" 항목.
 - 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `remove_connector`, `privacy`, `set_privacy`).
   app은 설정 전체를 읽거나 쓰지 않는다.
@@ -161,6 +161,29 @@
   - 충돌 검사(`Expected`)와 "그래도 저장"은 원칙과 같다. 감사 로그 `polls_changed`는 개수만 남긴다. 검색 인자에 사람 이름이 있을 수 있기 때문이다.
   - 각 poll은 snapshot의 마지막 실행 결과를 보여 준다. 초안이 서버 목록과 다르면 보여 주지 않는다. 결과는 서버 목록의 순서를 따르기 때문이다.
   - Test는 저장된 poll만 실행한다. 바뀐 초안에서는 "먼저 저장하라"고 알린다. 결과는 개인정보 필터를 거친 이벤트이다(11절의 `poll-test`와 같다).
+- **부분 저장 카드**(`publishing_form.rs`, `checks_form.rs`, 공통 `part_form.rs`): 설정 파일이나 명령줄로만 바꾸던 설정을 창에서 바꾼다.
+  - Agent 화면: "Inbound endpoint and ARD listing"(`inbound` 전체), "Webhooks"(`webhooks`와 서명 secret), "ARD registries"(`ard_registries`).
+    Settings 화면: "Notes"(`notes`: `auto_apply`, `stale_days`, `lint_every_hours`, `lint_conflicts`), "Evaluation"(`eval`: `pass`, `judge`).
+  - 전용 API 쌍: `inbound_settings`/`set_inbound_settings`, `ard_registries`/`set_ard_registries`, `webhooks`/`set_webhooks`,
+    `notes_settings`/`set_notes_settings`, `eval_settings`/`set_eval_settings`(`POST .../<이름의 kebab case>`).
+    저장은 엔진의 `replace_part`(`crates/engine/src/settings_parts.rs`) 하나를 지난다.
+  - `replace_part`는 그 부분만 `Expected`와 비교하고, 바꾼 설정 전체에 `set_profile_config`와 같은 단계를 적용한다:
+    답 도구 규칙 추가(`with_reply_rule`), 서버 규칙(`Backends::validate`: ARD publisher 도메인, registry 주소), `check_config`,
+    읽은 그대로일 때만 저장, 지운 webhook의 secret 삭제(`prune_secrets`). registry 저장은 runtime을 버린다. 검색 client가 registry 목록으로 만들어지기 때문이다.
+  - 감사: `inbound_settings_changed`(on/off, scope, 등록 여부만. 제목과 설명 글은 남기지 않는다), `ard_registries_changed`와 `webhooks_changed`(이름),
+    `notes_settings_changed`와 `eval_settings_changed`(새 값).
+  - bridge는 새로고침마다 `inbound_status`와 다섯 getter를 더 읽는다. 저장 결과는 `UiState::part_result`(`Part`, 결과) 하나와 `part_saves` 하나로 센다.
+  - 카드는 원칙 카드처럼 초안을 지킨다. 바꾸지 않은 카드만 서버 값을 다시 읽는다. 충돌이면 "서버 것 불러오기"와 "그래도 저장"을 보여 준다.
+  - 인바운드 카드는 `inbound_status`의 listener별 주소, 등록 identifier, 등록한 catalog, catalog가 빼는 이유(`refused`), 경고(`warnings`)를 양식 위에 보인다.
+    입력란은 글을 다듬지 않는다. 그래서 창이 쓴 설정은 다시 읽어도 "Not saved"가 되지 않는다. 질문은 한 줄에 하나이고 빈 줄은 버린다.
+  - webhook 카드는 서버에 있는 webhook에만 "Store the signing secret"을 보인다. secret은 가린 입력란에서 `UiCommand::SetWebhookSecret`으로만 간다.
+    그 값은 `Typed`에 담겨 `Debug`에 나오지 않고, `UiState`와 label에 들어가지 않는다. 저장되면 입력란을 닫고 비운다.
+  - Notes 카드는 자동 적용이 하지 않는 일을 적는다: 미리 읽기, 인바운드 질문, webhook 이벤트의 변경은 적용하지 않고, 사용자가 쓴 페이지를 덮어쓰지 않는다(15절, `notes.rs`의 `may_apply`).
+  - 배치: 새 카드는 각 화면의 기존 카드 뒤에 온다. 그래서 기존 카드의 자리와 1280x800 승인함 테스트는 그대로이다.
+    화면 그림 도구는 스크롤을 고정 픽셀 대신 요소 위치로 맞춘다(`bring`). 페이지가 길어지면 고정 픽셀 스크롤이 끝에서 멈추지 않기 때문이다.
+  - 명령은 더하지 않았다. 명령줄 사용자는 `config-show`/`config-set`과 `webhook-secret`, `inbound`를 쓴다.
+  - 테스트: `crates/app/tests/publishing.rs`, `checks.rs`(창), daemon `tests/server.rs`(HTTP, 권한, 충돌), `ard_search.rs`(다음 검색이 새 registry로 감), `webhooks.rs`(지운 webhook의 secret 삭제).
+    그림: `docs/screens/agent-publishing-light.png`, `agent-webhooks-light.png`, `settings-checks-light.png`.
 - **Permissions 화면**은 전용 API `permissions`(승인된 도구와 권한 표를 읽는다. 어디에도 접속하지 않는다)와
   `set_permissions`(표 전체를 바꾼다)를 쓴다.
   - 저장은 설정 파일과 같은 검증을 지난다. 그래서 poll이 쓰는 read 규칙을 지우면 거부된다.
@@ -774,7 +797,7 @@ agent는 이벤트만 보고 답하지 않는다. 필요한 사실을 `read` 도
 - 저장 요청은 "화면이 읽었던 값"을 함께 보낼 수 있다(`Expected::Value`). 서버의 현재 값이 다르면 서버는 `Conflict`로 거부하고 아무것도 저장하지 않는다.
   개인정보 설정, LLM endpoint, 커넥터 각각이 자기 값만 비교한다. 다른 항목의 변경은 충돌이 아니다.
 - 창은 충돌을 경고하고 두 가지를 제안한다: 서버 값을 다시 읽기, 그래도 저장하기(검사 없이 저장).
-- 좁은 범위의 저장(개인정보, 연결, 도구 승인)은 설정을 "읽은 그대로일 때만 교체"한다. 같은 설정에서 출발한 두 변경이 둘 다 저장되어 하나가 조용히 사라지는 일이 없다.
+- 좁은 범위의 저장(개인정보, 연결, 도구 승인, 3절의 부분 저장 카드)은 설정을 "읽은 그대로일 때만 교체"한다. 같은 설정에서 출발한 두 변경이 둘 다 저장되어 하나가 조용히 사라지는 일이 없다.
 - 한계: token만 바뀐 경우는 비교에 보이지 않는다. 명령줄과 `config-set`은 검사 없이 저장한다.
   예외는 권한 규칙 명령(`rule-set`, `rule-remove`)이다. 이 명령은 읽은 표를 함께 보낸다(3절).
 
@@ -909,7 +932,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 이벤트 폴링, 실패한 이벤트의 재시도, 도구 목록 조회와 승인 | 구현, 가짜 커넥터로만 테스트 |
 | 개인정보 필터(기본 4종, 사용자 정의 패턴, 단어 목록) | 구현, 테스트 있음 |
 | 연결 설정과 token의 서버 저장(암호화, 주소 결합) | 구현, 테스트 있음 |
-| webhook 방식의 이벤트 수신(Slack, Jira Cloud: 서명, url_verification, 전달 ID 중복 제거, intake, 자기 글, 설정 검사, 봉인된 secret) | 구현, 테스트 있음(core, store, 서버, CLI 명령). 실제 Slack과 Jira로는 보내 보지 않았다. |
+| webhook 방식의 이벤트 수신(Slack, Jira Cloud: 서명, url_verification, 전달 ID 중복 제거, intake, 자기 글, 설정 검사, 봉인된 secret) | 구현, 테스트 있음(core, store, 서버, CLI 명령, 창). 실제 Slack과 Jira로는 보내 보지 않았다. |
 | 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 구현, 테스트 있음. 커넥터 문서의 색인과 순위는 없음. |
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
 | LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
@@ -923,8 +946,8 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
-| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI). 창에는 없음. |
-| ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버). 로컬 stub registry로만 테스트 |
+| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI, 창) |
+| ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버, 창의 목록 편집). 로컬 stub registry로만 테스트 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
 

@@ -17,22 +17,29 @@ use bunsin_api::http::{
     WebhookSecretBody, status_of,
 };
 use bunsin_api::{
-    AdoptPrinciple, ApiConnectorUpdate, ApiError, Autonomy, AutonomyThresholdsUpdate, CommandConnectorUpdate,
-    Connections, ConnectorUpdate, EngineApi, EvalReport, InboundStatus, LlmTest, LlmUpdate, NewCallerToken,
-    OAuthStarted, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
-    PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, EngineApi, EvalReport, EvalSettingsUpdate, InboundStatus,
+    InboundUpdate, LlmTest, LlmUpdate, NewCallerToken, NotesSettingsUpdate, OAuthStarted, Outcome, Permissions,
+    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig,
+    ProfileSnapshot, ReplayCase, ReplayResult, ToolsReport, WebhooksUpdate, WikiPageUpdate,
 };
+use bunsin_core::ard::ArdRegistry;
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::PrincipleCandidate;
+use bunsin_core::eval::EvalConfig;
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundConfig;
 use bunsin_core::inbound::InboundScope;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::{CallerToken, CorrectionRecord, LlmUsage, ProfileInfo};
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::NotesConfig;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use bunsin_engine::Engine;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -644,6 +651,101 @@ async fn put_webhook_secret(
     Ok(Json(engine.set_webhook_secret(&profile, &name, body.secret).await?))
 }
 
+async fn inbound_settings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<InboundConfig> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.inbound_settings(&profile).await?))
+}
+
+async fn set_inbound_settings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<InboundUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_inbound_settings(&profile, update).await?))
+}
+
+async fn ard_registries(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<Vec<ArdRegistry>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.ard_registries(&profile).await?))
+}
+
+async fn set_ard_registries(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<ArdRegistriesUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_ard_registries(&profile, update).await?))
+}
+
+async fn webhooks(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<BTreeMap<String, WebhookConfig>> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.webhooks(&profile).await?))
+}
+
+async fn set_webhooks(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<WebhooksUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_webhooks(&profile, update).await?))
+}
+
+async fn notes_settings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<NotesConfig> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.notes_settings(&profile).await?))
+}
+
+async fn set_notes_settings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<NotesSettingsUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_notes_settings(&profile, update).await?))
+}
+
+async fn eval_settings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+) -> Reply<EvalConfig> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.eval_settings(&profile).await?))
+}
+
+async fn set_eval_settings(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(profile): Path<String>,
+    Json(update): Json<EvalSettingsUpdate>,
+) -> Reply<()> {
+    authorize(&engine, &headers, &profile)?;
+    Ok(Json(engine.set_eval_settings(&profile, update).await?))
+}
+
 async fn start_connector_oauth(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -740,6 +842,16 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&profile("callers/{id}"), axum::routing::delete(revoke_caller_token))
         .route(&profile("inbound"), get(inbound_status))
         .route(&profile("webhooks/{name}/secret"), put(put_webhook_secret))
+        .route(&profile("inbound-settings"), post(inbound_settings))
+        .route(&profile("set-inbound-settings"), post(set_inbound_settings))
+        .route(&profile("ard-registries"), post(ard_registries))
+        .route(&profile("set-ard-registries"), post(set_ard_registries))
+        .route(&profile("webhooks"), post(webhooks))
+        .route(&profile("set-webhooks"), post(set_webhooks))
+        .route(&profile("notes-settings"), post(notes_settings))
+        .route(&profile("set-notes-settings"), post(set_notes_settings))
+        .route(&profile("eval-settings"), post(eval_settings))
+        .route(&profile("set-eval-settings"), post(set_eval_settings))
         .route(&profile("connections"), get(get_connections))
         .route(&profile("connections/llm"), put(put_llm))
         .route(

@@ -301,6 +301,48 @@ pub struct PollsUpdate {
     pub expected: Expected<Vec<PollConfig>>,
 }
 
+/// New settings of the inbound endpoint and its ARD listing, with the ones the caller loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundUpdate {
+    pub inbound: InboundConfig,
+    #[serde(default)]
+    pub expected: Expected<InboundConfig>,
+}
+
+/// New ARD registries, with the list the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArdRegistriesUpdate {
+    /// Every registry. A registry that is not in here is removed.
+    pub registries: Vec<ArdRegistry>,
+    #[serde(default)]
+    pub expected: Expected<Vec<ArdRegistry>>,
+}
+
+/// New webhooks, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhooksUpdate {
+    /// Every webhook by name. A webhook that is not in here is removed with its signing secret.
+    pub webhooks: BTreeMap<String, WebhookConfig>,
+    #[serde(default)]
+    pub expected: Expected<BTreeMap<String, WebhookConfig>>,
+}
+
+/// New settings of the notes, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotesSettingsUpdate {
+    pub notes: NotesConfig,
+    #[serde(default)]
+    pub expected: Expected<NotesConfig>,
+}
+
+/// New evaluation settings, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvalSettingsUpdate {
+    pub eval: EvalConfig,
+    #[serde(default)]
+    pub expected: Expected<EvalConfig>,
+}
+
 /// New privacy settings, with what the caller loaded before it changed them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacyUpdate {
@@ -825,4 +867,24 @@ pub trait EngineApi: Send + Sync {
         name: &'a str,
         secret: String,
     ) -> BoxFuture<'a, ApiResult<()>>;
+    /// The settings of the inbound endpoint and its ARD listing.
+    fn inbound_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundConfig>>;
+    /// Replaces only the inbound settings. They pass the same checks and server rules as in the settings file.
+    fn set_inbound_settings<'a>(&'a self, profile: &'a str, update: InboundUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The ARD registries that the agent may search.
+    fn ard_registries<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ArdRegistry>>>;
+    /// Replaces only the ARD registries. Their addresses pass the server's address rules.
+    fn set_ard_registries<'a>(&'a self, profile: &'a str, update: ArdRegistriesUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The webhooks by name. The signing secrets are never in it; `inbound_status` says which are stored.
+    fn webhooks<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<BTreeMap<String, WebhookConfig>>>;
+    /// Replaces only the webhooks. The signing secret of a removed webhook is deleted.
+    fn set_webhooks<'a>(&'a self, profile: &'a str, update: WebhooksUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The settings of the notes: auto-apply and the checks.
+    fn notes_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<NotesConfig>>;
+    /// Replaces only the settings of the notes.
+    fn set_notes_settings<'a>(&'a self, profile: &'a str, update: NotesSettingsUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The evaluation settings: the pass mark and the LLM judge.
+    fn eval_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalConfig>>;
+    /// Replaces only the evaluation settings.
+    fn set_eval_settings<'a>(&'a self, profile: &'a str, update: EvalSettingsUpdate) -> BoxFuture<'a, ApiResult<()>>;
 }

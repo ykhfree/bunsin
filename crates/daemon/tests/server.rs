@@ -7,7 +7,7 @@ use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_connectors::{McpConfig, McpConnector, TokenAuth};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
-use bunsin_core::inbound::{ArdListing, InboundScope, RequestStatus};
+use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope, RequestStatus};
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::ports::ConnectorError;
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
@@ -357,6 +357,36 @@ async fn a_token_reaches_only_its_own_profile() {
         };
         refused(kim.set_connector(other, "slack", connector).await);
         refused(kim.remove_connector(other, "slack").await);
+        refused(kim.inbound_settings(other).await.map(|_| ()));
+        let inbound = bunsin_api::InboundUpdate {
+            inbound: Default::default(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_inbound_settings(other, inbound).await);
+        refused(kim.ard_registries(other).await.map(|_| ()));
+        let registries = bunsin_api::ArdRegistriesUpdate {
+            registries: Vec::new(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_ard_registries(other, registries).await);
+        refused(kim.webhooks(other).await.map(|_| ()));
+        let webhooks = bunsin_api::WebhooksUpdate {
+            webhooks: Default::default(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_webhooks(other, webhooks).await);
+        refused(kim.notes_settings(other).await.map(|_| ()));
+        let notes = bunsin_api::NotesSettingsUpdate {
+            notes: Default::default(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_notes_settings(other, notes).await);
+        refused(kim.eval_settings(other).await.map(|_| ()));
+        let eval = bunsin_api::EvalSettingsUpdate {
+            eval: Default::default(),
+            expected: bunsin_api::Expected::Unchecked,
+        };
+        refused(kim.set_eval_settings(other, eval).await);
         refused(
             kim.replay(
                 other,
@@ -1942,5 +1972,115 @@ async fn a_listing_that_breaks_an_ard_rule_or_the_operator_list_is_not_stored() 
         RealBackends::new(Arc::new(|_| None), false, UpstreamPolicy::default())
             .with_ard_publishers(&["https://acme.com".into()])
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn single_parts_of_the_settings_are_read_and_replaced_over_http_with_a_conflict_check() {
+    let rig = rig().await;
+    let kim = rig.kim();
+    let before = kim.profile_config("kim").await.unwrap();
+
+    // The inbound endpoint and its listing. Turning it on adds the reply rule.
+    let loaded = kim.inbound_settings("kim").await.unwrap();
+    assert_eq!(loaded, InboundConfig::default());
+    let inbound = InboundConfig {
+        enabled: true,
+        description: "Questions about deploys.".into(),
+        ard: Some(ArdListing {
+            publisher: "acme.com".into(),
+            agent_name: "kim".into(),
+            ..ArdListing::default()
+        }),
+        ..InboundConfig::default()
+    };
+    let update = |inbound: InboundConfig, expected| bunsin_api::InboundUpdate {
+        inbound,
+        expected: bunsin_api::Expected::Value(expected),
+    };
+    kim.set_inbound_settings("kim", update(inbound.clone(), loaded.clone()))
+        .await
+        .unwrap();
+    assert_eq!(kim.inbound_settings("kim").await.unwrap(), inbound);
+    let rules = kim.permissions("kim").await.unwrap().rules;
+    assert!(rules.contains_key(bunsin_core::inbound::REPLY_TOOL));
+    let stale = kim
+        .set_inbound_settings("kim", update(InboundConfig::default(), loaded))
+        .await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+    // A publisher domain that the operator does not allow is refused, as in the settings file.
+    let mut other = inbound.clone();
+    other.ard.as_mut().unwrap().publisher = "other.example".into();
+    let refused = kim.set_inbound_settings("kim", update(other, inbound.clone())).await;
+    assert!(
+        matches!(&refused, Err(ApiError::Invalid(m)) if m.contains("--ard-publisher-domain other.example")),
+        "{refused:?}"
+    );
+
+    // The notes and the evaluation. A value that the settings file refuses is refused here too.
+    let notes = bunsin_core::wiki::NotesConfig {
+        auto_apply: true,
+        stale_days: Some(30),
+        lint_every_hours: Some(24),
+        lint_conflicts: false,
+    };
+    let notes_update = |notes, expected| bunsin_api::NotesSettingsUpdate {
+        notes,
+        expected: bunsin_api::Expected::Value(expected),
+    };
+    kim.set_notes_settings("kim", notes_update(notes.clone(), Default::default()))
+        .await
+        .unwrap();
+    assert_eq!(kim.notes_settings("kim").await.unwrap(), notes);
+    let zero = bunsin_core::wiki::NotesConfig {
+        stale_days: Some(0),
+        ..notes.clone()
+    };
+    let refused = kim.set_notes_settings("kim", notes_update(zero, notes.clone())).await;
+    assert!(
+        matches!(&refused, Err(ApiError::Invalid(m)) if m.contains("stale_days")),
+        "{refused:?}"
+    );
+    let eval = bunsin_core::eval::EvalConfig {
+        pass: Some(bunsin_core::eval::EvalPass {
+            kind_percent: 80,
+            overlap_percent: 40,
+            boundary_percent: 100,
+        }),
+        judge: true,
+    };
+    let eval_update = |eval, expected| bunsin_api::EvalSettingsUpdate {
+        eval,
+        expected: bunsin_api::Expected::Value(expected),
+    };
+    kim.set_eval_settings("kim", eval_update(eval.clone(), Default::default()))
+        .await
+        .unwrap();
+    assert_eq!(kim.eval_settings("kim").await.unwrap(), eval);
+    assert_eq!(kim.eval_report("kim").await.unwrap().pass, eval.pass);
+    let stale = kim
+        .set_eval_settings("kim", eval_update(Default::default(), Default::default()))
+        .await;
+    assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
+
+    // The other parts of the settings are as they were.
+    let after = kim.profile_config("kim").await.unwrap();
+    assert_eq!(
+        (&after.principles, &after.polls, &after.privacy, &after.connectors),
+        (&before.principles, &before.polls, &before.privacy, &before.connectors)
+    );
+    let kinds: Vec<String> = kim
+        .snapshot("kim")
+        .await
+        .unwrap()
+        .audit
+        .into_iter()
+        .map(|a| a.kind)
+        .filter(|kind| kind.ends_with("settings_changed"))
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        3,
+        "one entry per stored save, none for a refused one: {kinds:?}"
     );
 }

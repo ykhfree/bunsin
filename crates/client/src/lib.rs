@@ -7,27 +7,33 @@ use bunsin_api::http::{
     WebhookSecretBody, profile_path,
 };
 use bunsin_api::{
-    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
-    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, InboundStatus, LlmTest,
-    LlmUpdate, NewCallerToken, OAuthStarted, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate,
-    PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult,
-    Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, EvalSettingsUpdate,
+    InboundStatus, InboundUpdate, LlmTest, LlmUpdate, NewCallerToken, NotesSettingsUpdate, OAuthStarted, Outcome,
+    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WebhooksUpdate, WikiPageUpdate,
 };
+use bunsin_core::ard::ArdRegistry;
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::eval::EvalConfig;
 use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundConfig;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::{CallerToken, CorrectionRecord, LlmUsage, ProfileInfo};
 use bunsin_core::tool::PinSet;
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::NotesConfig;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -490,6 +496,88 @@ impl EngineApi for RemoteEngine {
         Box::pin(async move {
             let path = profile_path(profile, &format!("webhooks/{name}/secret"));
             self.send_only(Method::PUT, &path, Some(&WebhookSecretBody { secret }))
+                .await
+        })
+    }
+
+    fn inbound_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundConfig>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "inbound-settings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_inbound_settings<'a>(&'a self, profile: &'a str, update: InboundUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-inbound-settings"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn ard_registries<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ArdRegistry>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "ard-registries"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_ard_registries<'a>(&'a self, profile: &'a str, update: ArdRegistriesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-ard-registries"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn webhooks<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<BTreeMap<String, WebhookConfig>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "webhooks"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_webhooks<'a>(&'a self, profile: &'a str, update: WebhooksUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::POST, &profile_path(profile, "set-webhooks"), Some(&update))
+                .await
+        })
+    }
+
+    fn notes_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<NotesConfig>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "notes-settings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_notes_settings<'a>(&'a self, profile: &'a str, update: NotesSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-notes-settings"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn eval_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalConfig>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "eval-settings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_eval_settings<'a>(&'a self, profile: &'a str, update: EvalSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::POST, &profile_path(profile, "set-eval-settings"), Some(&update))
                 .await
         })
     }

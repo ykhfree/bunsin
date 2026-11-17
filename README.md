@@ -692,6 +692,8 @@ bunsind inbound kim                          # the address of each webhook, and 
   A page change from it always waits for you, also with `notes.auto_apply`.
 - A connector cannot have a poll and a webhook: their event IDs differ, so one message would be
   handled twice. The server refuses such settings.
+- In the window, the **Webhooks** card of the Agent view does the same as the settings file and
+  `webhook-secret` (see [Desktop window](#desktop-window-macos)).
 
 ### Privacy filter
 
@@ -810,6 +812,7 @@ agent at once, without your approval, but only if all of these hold:
 
 The change still needs a source and still shows in the inbox, as done. The audit entry
 `wiki_change_applied` says `"auto": true`. A change that cannot be stored stays pending.
+The **Notes** card of the window's Settings view sets `auto_apply` and the checks above.
 
 #### Read into the notes
 
@@ -853,6 +856,7 @@ that you name in the settings:
   decision of the server uses it.
 - The agent cannot call what it found. You add a found agent or tool as a connector, approve
   its tools and give each a rule.
+- In the window, the **ARD registries** card of the Agent view edits the list.
 
 ### Delegate coding
 
@@ -911,7 +915,8 @@ bunsind caller-revoke kim 1                        # the next request with it is
   shows it once) and revoke one with two clicks.
 
   ![The callers card in the agent view](docs/screens/agent-callers-light.png)
-- Turn the endpoint on in the settings file. Turning it on adds the rule of the reply tool:
+- Turn the endpoint on in the settings file, or in the **Inbound endpoint and ARD listing** card of
+  the Agent view. Turning it on adds the rule of the reply tool:
 
   ```json
   "inbound": {"enabled": true, "scope": "internal", "title": "Kim's agent",
@@ -1029,7 +1034,7 @@ The server scores each draft without an LLM:
 
 The server replays three cases about every five seconds. It also does this while the kill
 switch is on, because a replay sends nothing. One run runs at a time. The pass mark is
-yours to set in the settings file:
+yours to set in the settings file or in the **Evaluation** card of the window's Settings view:
 
 ```json
 { "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
@@ -1062,9 +1067,39 @@ The window has six views and the setup (see [The setup, step by step](#the-setup
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
 each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
-principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)).
+principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)), the caller tokens,
+the inbound endpoint with its ARD listing, the webhooks and the ARD registries (see below).
 **Learning** shows what the agent learns from you and how you check it (see below). **Settings** has the connections (LLM endpoint,
-connectors, tokens, a check that lists a connector's tools, the OAuth sign-in) and the privacy filter. It reloads from the server every 5 seconds.
+connectors, tokens, a check that lists a connector's tools, the OAuth sign-in), the privacy filter,
+and the settings of the notes and of the evaluation. It reloads from the server every 5 seconds.
+
+**Settings that each card saves alone.** The cards for the inbound endpoint, the webhooks, the ARD
+registries, the notes and the evaluation each save only their own part of the settings, with a
+conflict check: if the part changed on the server since the card loaded it, nothing is saved, and
+the card offers "Load the server's version" and "Save anyway". A save passes the same checks and
+server rules as a settings file, for example the operator's list of ARD publisher domains and the
+address rules. The settings file and these cards change the same settings.
+
+- **Inbound endpoint and ARD listing** (Agent view): on or off, the public listener, the description
+  and title of the server card, and the ARD listing (publisher domain, namespace, agent name, the
+  questions it answers well, one per line). Above the form the card shows the addresses of the
+  endpoint on each listener, the identifier of the listing, the catalogs that list it, and each
+  reason why a catalog leaves it out (the same as `bunsind inbound`).
+- **Webhooks** (Agent view): add and remove webhooks, see the address of each and whether its
+  signing secret is stored, and store the secret in a masked field. The window never shows a stored
+  secret, and no label holds a typed one.
+- **ARD registries** (Agent view): add and remove registries.
+- **Notes** (Settings view): auto-apply, the days until a page is stale, how often the server checks
+  the notes, and the check for pages that disagree. The card says what auto-apply never does: it
+  never applies a change from a pre-load, an inbound question or a webhook event, and it never
+  overwrites a page that you wrote.
+- **Evaluation** (Settings view): the pass mark (three fields, or three empty fields for none) and the LLM judge.
+
+![The inbound endpoint card](docs/screens/agent-publishing-light.png)
+
+![The webhooks and the ARD registries](docs/screens/agent-webhooks-light.png)
+
+![The notes and the evaluation settings](docs/screens/settings-checks-light.png)
 
 **Edit before approval.** A waiting call whose rule names places of text has the button
 "Edit the text". It opens one text field for each place: one for `{ "arg": "text" }`, one for each

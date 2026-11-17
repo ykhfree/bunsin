@@ -21,6 +21,7 @@ mod preload;
 mod principles;
 mod resume;
 mod secrets;
+mod settings_parts;
 mod webhooks;
 
 pub use ard::OuterListener;
@@ -31,20 +32,21 @@ pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
 pub use webhooks::WebhookTarget;
 
 use bunsin_api::{
-    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
-    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, Expected, InboundStatus,
-    LlmTest, LlmUpdate, NewCallerToken, OAuthStarted, Outcome, Permissions, PermissionsUpdate, PollPreview,
-    PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, EvalSettingsUpdate, Expected,
+    InboundStatus, InboundUpdate, LlmTest, LlmUpdate, NewCallerToken, NotesSettingsUpdate, OAuthStarted, Outcome,
+    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WebhooksUpdate, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
-use bunsin_core::ard::ARD_SEARCH_TOOL;
+use bunsin_core::ard::{ARD_SEARCH_TOOL, ArdRegistry};
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::is_coding_tool;
 use bunsin_core::context::{ContextInput, ToolHint, assemble};
-use bunsin_core::eval::ReplayCaseRecord;
+use bunsin_core::eval::{EvalConfig, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundConfig;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
@@ -57,7 +59,10 @@ use bunsin_core::records::{
     CallerToken, CorrectionRecord, DecisionKind, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote,
 };
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
-use bunsin_core::wiki::{WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiPage, WikiSummary, WikiUpdate, is_notes_tool};
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::{
+    NotesConfig, WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiPage, WikiSummary, WikiUpdate, is_notes_tool,
+};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
 use llm_log::Purpose;
 use serde_json::{Map, Value, json};
@@ -1638,5 +1643,45 @@ impl EngineApi for Engine {
         secret: String,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.save_webhook_secret(profile, name, &secret) })
+    }
+
+    fn inbound_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundConfig>> {
+        Box::pin(async move { self.read_inbound_settings(profile) })
+    }
+
+    fn set_inbound_settings<'a>(&'a self, profile: &'a str, update: InboundUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_inbound_settings(profile, update) })
+    }
+
+    fn ard_registries<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ArdRegistry>>> {
+        Box::pin(async move { self.read_ard_registries(profile) })
+    }
+
+    fn set_ard_registries<'a>(&'a self, profile: &'a str, update: ArdRegistriesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_ard_registries(profile, update) })
+    }
+
+    fn webhooks<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<BTreeMap<String, WebhookConfig>>> {
+        Box::pin(async move { self.read_webhooks(profile) })
+    }
+
+    fn set_webhooks<'a>(&'a self, profile: &'a str, update: WebhooksUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_webhooks(profile, update) })
+    }
+
+    fn notes_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<NotesConfig>> {
+        Box::pin(async move { self.read_notes_settings(profile) })
+    }
+
+    fn set_notes_settings<'a>(&'a self, profile: &'a str, update: NotesSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_notes_settings(profile, update) })
+    }
+
+    fn eval_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalConfig>> {
+        Box::pin(async move { self.read_eval_settings(profile) })
+    }
+
+    fn set_eval_settings<'a>(&'a self, profile: &'a str, update: EvalSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_eval_settings(profile, update) })
     }
 }

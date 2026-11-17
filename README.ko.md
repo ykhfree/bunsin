@@ -591,6 +591,7 @@ bunsind inbound kim                          # webhook마다 주소와 secret �
 - webhook 이벤트는 외부에서 온 것입니다. 채널이나 프로젝트에 글을 쓰는 누구나 agent를 움직일 수 있습니다.
   그래서 그 이벤트에서 나온 notes 변경은 `notes.auto_apply`가 켜져 있어도 소유자를 기다립니다.
 - 한 커넥터에 poll과 webhook을 함께 둘 수 없습니다. 이벤트 ID가 달라 메시지 하나가 두 번 처리되기 때문입니다. 서버가 그런 설정을 거부합니다.
+- 창에서는 Agent 화면의 **Webhooks** 카드가 설정 파일과 `webhook-secret`과 같은 일을 합니다([데스크톱 창](#데스크톱-창-macos) 참고).
 
 ### 개인정보 필터
 
@@ -696,6 +697,7 @@ bunsind dismiss-finding kim 3
 
 변경안은 여전히 출처가 필요하고, 승인함에 완료 상태로 남습니다. 감사 `wiki_change_applied`에 `"auto": true`가 붙습니다.
 저장할 수 없는 변경안은 대기 상태로 남습니다.
+창에서는 Settings 화면의 **Notes** 카드가 `auto_apply`와 위의 점검 설정을 정합니다.
 
 #### notes 미리 읽기
 
@@ -732,6 +734,7 @@ agent는 설정에 적은 ARD registry(Agentic Resource Discovery)에서 다른 
   agent는 결과마다 identifier, 이름, type, URL, 설명, capabilities, score, source만 받습니다.
   `score`는 LLM이 읽는 글일 뿐이고, 서버의 어떤 결정에도 쓰이지 않습니다.
 - agent는 찾은 것을 호출할 수 없습니다. 소유자가 커넥터로 더하고, 도구를 승인하고, 규칙을 주어야 합니다.
+- 창에서는 Agent 화면의 **ARD registries** 카드가 목록을 고칩니다.
 
 ### 코딩 위임
 
@@ -781,7 +784,7 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 - 창의 Agent 화면이 호출자 token을 보여 줍니다. 거기서 token을 만들고(창이 한 번만 보여 줍니다), 두 번 눌러 폐기합니다.
 
   ![Agent 화면의 Callers 카드](docs/screens/agent-callers-light.png)
-- 설정 파일에서 endpoint를 켭니다. 켜면 답 도구의 규칙이 추가됩니다.
+- 설정 파일이나 Agent 화면의 **Inbound endpoint and ARD listing** 카드에서 endpoint를 켭니다. 켜면 답 도구의 규칙이 추가됩니다.
 
   ```json
   "inbound": {"enabled": true, "scope": "internal", "title": "Kim's agent",
@@ -879,7 +882,7 @@ bunsind delete-replay-case kim 3          # 이전 실행의 결과는 남음
 - **과잉 넘김**: `reply` 사례 중 agent가 넘긴 비율.
 
 서버는 약 5초마다 사례 3개를 재현합니다. 재현은 아무것도 보내지 않으므로 정지 스위치가 켜져 있어도 진행합니다. 실행은 한 번에 하나입니다.
-통과 기준은 사용자가 설정 파일에서 정합니다.
+통과 기준은 사용자가 설정 파일이나 창의 Settings 화면 **Evaluation** 카드에서 정합니다.
 
 ```json
 { "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
@@ -908,9 +911,33 @@ token을 macOS Keychain에 저장합니다.
 **Notes**는 notes의 페이지 목록을 보여 주고, 페이지를 읽고, 고치고, 만들고, 지울 수 있게 합니다.
 **Permissions**는 승인된 도구마다 agent가 할 수 있는 일을 정합니다([권한 규칙](#권한-규칙)).
 **Agent**에는 원칙과 poll이 있습니다([원칙](#원칙), [이벤트 찾기](#이벤트-찾기-폴링)).
+호출자 token, ARD 등록을 포함한 인바운드 endpoint, webhook, ARD registry도 Agent에 있습니다(아래).
 **Learning**은 agent가 사용자에게서 배우는 것과 그것을 확인하는 방법을 보여 줍니다(아래).
 **Settings**에는 연결 설정(LLM endpoint, 커넥터, token, 커넥터의 도구 목록으로 하는 연결 확인, OAuth 로그인)과 개인정보 필터가 있습니다.
+notes 설정과 평가 설정도 Settings에 있습니다.
 5초마다 서버에서 상태를 다시 읽습니다.
+
+**카드마다 따로 저장하는 설정.** 인바운드 endpoint, webhook, ARD registry, notes, 평가 카드는 각각 설정의 자기 부분만 저장합니다.
+저장에는 충돌 확인이 있습니다. 카드가 읽은 뒤에 서버에서 그 부분이 바뀌었으면 아무것도 저장하지 않습니다.
+그러면 카드가 "Load the server's version"과 "Save anyway"를 보여 줍니다.
+저장은 설정 파일과 같은 검사와 서버 규칙을 지납니다. 예를 들어 운영자의 ARD publisher 도메인 목록과 주소 규칙입니다.
+설정 파일과 이 카드들은 같은 설정을 바꿉니다.
+
+- **Inbound endpoint and ARD listing**(Agent 화면): 켜고 끄기, 공개 listener, server card의 설명과 제목, ARD 등록(publisher 도메인, namespace, agent 이름, 잘 답하는 질문을 한 줄에 하나씩)을 정합니다.
+  양식 위에는 listener마다 endpoint 주소, 등록 identifier, 등록한 catalog, catalog가 빼는 이유를 하나씩 보여 줍니다(`bunsind inbound`와 같습니다).
+- **Webhooks**(Agent 화면): webhook을 더하고 지웁니다. 각 webhook의 주소와 서명 secret 저장 여부를 보여 줍니다.
+  secret은 가린 입력란에 넣어 저장합니다. 창은 저장된 secret을 보여 주지 않고, 입력한 secret은 어떤 label에도 없습니다.
+- **ARD registries**(Agent 화면): registry를 더하고 지웁니다.
+- **Notes**(Settings 화면): 자동 적용, 페이지가 오래됐다고 보는 날 수, 서버의 점검 간격, 서로 다른 말을 하는 페이지 점검을 정합니다.
+  카드는 자동 적용이 하지 않는 일을 적습니다. 자동 적용은 미리 읽기, 인바운드 질문, webhook 이벤트에서 나온 변경을 적용하지 않습니다.
+  사용자가 쓴 페이지도 덮어쓰지 않습니다.
+- **Evaluation**(Settings 화면): 통과 기준(입력란 세 개, 셋 다 비우면 기준 없음)과 LLM 심판을 정합니다.
+
+![인바운드 endpoint 카드](docs/screens/agent-publishing-light.png)
+
+![webhook과 ARD registry 카드](docs/screens/agent-webhooks-light.png)
+
+![notes와 평가 설정 카드](docs/screens/settings-checks-light.png)
 
 **승인 전 수정.** 규칙이 글의 자리를 정한 대기 호출에는 "Edit the text" 버튼이 있습니다.
 버튼을 누르면 자리마다 입력란이 하나씩 열립니다. `{ "arg": "text" }`는 하나, `blocks.*.text`는 목록의 항목마다 하나입니다.

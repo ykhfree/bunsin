@@ -1,7 +1,7 @@
 //! The built-in ARD search with the real backends, against local stub registries.
 
 use axum::extract::State;
-use bunsin_api::{ApiError, EngineApi, Outcome, ProfileConfig};
+use bunsin_api::{ApiError, ArdRegistriesUpdate, EngineApi, Expected, Outcome, ProfileConfig};
 use bunsin_core::ard::ArdRegistry;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
@@ -281,4 +281,60 @@ async fn registries_pass_the_address_rules_and_the_name_rules() {
         followup.contains("`registry` must name a registry of the profile"),
         "{followup}"
     );
+}
+
+#[tokio::test]
+async fn a_narrow_save_of_the_registries_reaches_the_next_search_and_passes_the_address_rules() {
+    let first = Registry::start(json!({"results": []})).await;
+    let second = Registry::start(json!({"results": []})).await;
+    let setup = setup(local(), Vec::new()).await;
+    let ignore = json!({"kind": "ignore", "rationale": "none", "summary": null, "tool": null, "args_json": null});
+    let save = |registries: Vec<ArdRegistry>, expected: Vec<ArdRegistry>| {
+        let update = ArdRegistriesUpdate {
+            registries,
+            expected: Expected::Value(expected),
+        };
+        setup.engine.set_ard_registries("kim", update)
+    };
+    let searched = |text: &str| {
+        setup.llm.reply(&search(text), 10).reply(&ignore.to_string(), 10);
+        setup.engine.ingest(
+            "kim",
+            InboundEvent {
+                external_id: text.into(),
+                ..event("find helpers")
+            },
+        )
+    };
+
+    let corp = vec![registry("corp", &first.url)];
+    save(corp.clone(), Vec::new()).await.unwrap();
+    assert_eq!(setup.engine.ard_registries("kim").await.unwrap(), corp);
+    searched("one").await.unwrap();
+    assert_eq!(first.bodies().len(), 1);
+
+    // The search of the next event uses the new list, not the client built for the old one.
+    let other = vec![registry("corp", &second.url)];
+    save(other.clone(), corp.clone()).await.unwrap();
+    searched("two").await.unwrap();
+    assert_eq!((first.bodies().len(), second.bodies().len()), (1, 1));
+
+    // A save that started from the old list is a conflict, and an address the server does not
+    // allow is refused. Neither changes the stored list.
+    let stale = save(Vec::new(), corp).await.unwrap_err();
+    assert!(matches!(stale, ApiError::Conflict(_)), "{stale:?}");
+    let outside = vec![registry("corp", "https://registry.example/v1")];
+    let error = save(outside, other.clone()).await.unwrap_err();
+    assert!(
+        matches!(&error, ApiError::Invalid(m) if m.contains("ARD registry `corp`")),
+        "{error:?}"
+    );
+    assert_eq!(setup.engine.ard_registries("kim").await.unwrap(), other);
+    let audit = setup.engine.snapshot("kim").await.unwrap().audit;
+    let changes: Vec<&Value> = audit
+        .iter()
+        .filter(|a| a.kind == "ard_registries_changed")
+        .map(|a| &a.detail)
+        .collect();
+    assert_eq!(changes.len(), 2);
 }

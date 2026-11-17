@@ -66,6 +66,16 @@
 //! | DELETE | `/v1/profiles/{p}/callers/{id}` | | |
 //! | GET | `/v1/profiles/{p}/inbound` | | `InboundStatus` |
 //! | PUT | `/v1/profiles/{p}/webhooks/{name}/secret` | `WebhookSecretBody` | |
+//! | POST | `/v1/profiles/{p}/inbound-settings` | | `InboundConfig` |
+//! | POST | `/v1/profiles/{p}/set-inbound-settings` | `InboundUpdate` | |
+//! | POST | `/v1/profiles/{p}/ard-registries` | | `[ArdRegistry]` |
+//! | POST | `/v1/profiles/{p}/set-ard-registries` | `ArdRegistriesUpdate` | |
+//! | POST | `/v1/profiles/{p}/webhooks` | | `{name: WebhookConfig}` |
+//! | POST | `/v1/profiles/{p}/set-webhooks` | `WebhooksUpdate` | |
+//! | POST | `/v1/profiles/{p}/notes-settings` | | `NotesConfig` |
+//! | POST | `/v1/profiles/{p}/set-notes-settings` | `NotesSettingsUpdate` | |
+//! | POST | `/v1/profiles/{p}/eval-settings` | | `EvalConfig` |
+//! | POST | `/v1/profiles/{p}/set-eval-settings` | `EvalSettingsUpdate` | |
 //!
 //! The newer calls use `POST /v1/profiles/{p}/<method name in kebab case>`, with the arguments
 //! as a JSON body.

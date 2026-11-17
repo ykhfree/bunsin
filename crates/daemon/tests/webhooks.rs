@@ -1,7 +1,7 @@
 //! Webhooks of Slack and Jira Cloud over real TCP: signature checks, a fast answer, the later handling
 //! through the intake, repeated deliveries, and the settings rules.
 
-use bunsin_api::{ApiConnectorUpdate, ApiError, EngineApi, Expected, ProfileConfig, TokenChange};
+use bunsin_api::{ApiConnectorUpdate, ApiError, EngineApi, Expected, ProfileConfig, TokenChange, WebhooksUpdate};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::inbound::InboundScope;
 use bunsin_core::policy::ToolRule;
@@ -501,4 +501,47 @@ async fn the_settings_refuse_a_webhook_that_cannot_work_and_its_secret_goes_with
         slack(&rig.public, SLACK_HOOK, &body, SLACK_SECRET, NOW).await.status(),
         reqwest::StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn a_narrow_save_of_the_webhooks_checks_them_and_takes_the_secret_of_a_removed_one() {
+    let rig = rig().await;
+    let loaded = rig.engine.webhooks("kim").await.unwrap();
+    assert_eq!(loaded.keys().collect::<Vec<_>>(), ["jira-events", "slack-events"]);
+    let save = |webhooks, expected| {
+        let update = WebhooksUpdate {
+            webhooks,
+            expected: Expected::Value(expected),
+        };
+        rig.engine.set_webhooks("kim", update)
+    };
+    // A webhook of a connector that is not a REST API connector of Slack or Jira is refused.
+    let mut wrong = loaded.clone();
+    wrong.insert("x".into(), hook("nothing", InboundScope::Internal));
+    let error = save(wrong, loaded.clone()).await.unwrap_err();
+    assert!(
+        matches!(&error, ApiError::Invalid(m) if m.contains("needs a REST API connector")),
+        "{error:?}"
+    );
+
+    // Removed, the Slack webhook takes its secret with it, and its deliveries are refused.
+    let mut fewer = loaded.clone();
+    fewer.remove("slack-events");
+    save(fewer.clone(), loaded.clone()).await.unwrap();
+    let body = slack_body("Ev1", "U-LEE", "Hello");
+    assert_eq!(
+        slack(&rig.public, SLACK_HOOK, &body, SLACK_SECRET, NOW).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    // A save that started from the old list is a conflict.
+    let stale = save(loaded.clone(), loaded.clone()).await.unwrap_err();
+    assert!(matches!(stale, ApiError::Conflict(_)), "{stale:?}");
+    save(loaded, fewer).await.unwrap();
+    let status = rig.engine.inbound_status("kim").await.unwrap();
+    let stored: Vec<(&str, bool)> = status
+        .webhooks
+        .iter()
+        .map(|h| (h.name.as_str(), h.secret_stored))
+        .collect();
+    assert_eq!(stored, [("jira-events", true), ("slack-events", false)]);
 }

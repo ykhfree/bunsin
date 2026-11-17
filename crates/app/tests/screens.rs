@@ -410,6 +410,17 @@ fn options() -> WindowOptions {
     }
 }
 
+/// Scrolls the page so that the top of element `id` is `y` pixels below the top of the window.
+/// The scroll goes to the page through the first element of `on_page` that is on screen.
+fn bring(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App, on_page: &[&'static str], id: &'static str, y: f32) {
+    let top = window.find(id).bounds().origin.y;
+    let anchor = *on_page
+        .iter()
+        .find(|anchor| window.try_find(**anchor).is_some_and(|element| element.visible()))
+        .expect("an element of the page is on screen");
+    window.scroll(anchor, ScrollDelta::Pixels(point(px(0.), px(y) - top)), cx);
+}
+
 fn shot(cx: &mut HeadlessAppContext, window: AnyWindowHandle, dir: &Path, name: &str) {
     cx.run_until_parked();
     cx.update_window(window, |_, window, cx| window.render_frame(cx))
@@ -660,7 +671,13 @@ fn draw(
     // The callers card is below the polls.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.scroll("principle-edit-1", ScrollDelta::Pixels(point(px(0.), px(-1400.))), cx);
+        bring(
+            window,
+            cx,
+            &["principle-edit-1", "principles-count"],
+            "callers-help",
+            100.,
+        );
     })
     .unwrap();
     shot(&mut cx, window, dir, &name("agent-callers"));
@@ -759,7 +776,13 @@ fn draw(
     // The command form is taller than the address form, so the page scrolls again.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.scroll("connector-name", ScrollDelta::Pixels(point(px(0.), px(-400.))), cx);
+        bring(
+            window,
+            cx,
+            &["connector-name", "connector-count"],
+            "connector-name",
+            140.,
+        );
     })
     .unwrap();
     cx.run_until_parked();
@@ -780,7 +803,13 @@ fn draw(
     // The secret variables of the command: one that was added, and one that is being typed.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.scroll("connector-command", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
+        bring(
+            window,
+            cx,
+            &["connector-command", "connector-name"],
+            "secret-name",
+            420.,
+        );
     })
     .unwrap();
     cx.run_until_parked();
@@ -869,6 +898,143 @@ fn draw(
     states.send(coding).unwrap();
     click(&mut cx, "tab-inbox");
     shot(&mut cx, window, dir, &name("inbox-coding"));
+
+    // The publishing cards and the checks cards of profile lee, in a new window whose forms hold no
+    // draft. Lee's settings are not in any picture of kim.
+    let (commands, _received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (publishing, _shell) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options(), cx, |window, cx| {
+                cx.new(|cx| Shell::new(receiver, commands, window, cx))
+            })
+        })
+        .unwrap();
+    let window: AnyWindowHandle = publishing.into();
+    states.send(rt.block_on(publishing_state(rig))).unwrap();
+    // Opens view `tab` and scrolls its page so that element `id` is near the top.
+    let to_top = |cx: &mut HeadlessAppContext, tab: &'static str, id: &'static str| {
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(tab, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let on_page = [
+                "principles-count",
+                "callers-help",
+                "inbound-help",
+                "connections-help",
+                "llm-token-state",
+                "privacy-help",
+            ];
+            bring(window, cx, &on_page, id, 100.);
+        })
+        .unwrap();
+    };
+    to_top(&mut cx, "tab-agent", "inbound-help");
+    shot(&mut cx, window, dir, &name("agent-publishing"));
+    to_top(&mut cx, "tab-agent", "webhooks-help");
+    shot(&mut cx, window, dir, &name("agent-webhooks"));
+    to_top(&mut cx, "tab-settings", "auto-apply-help");
+    shot(&mut cx, window, dir, &name("settings-checks"));
+}
+
+/// Gives lee a listed inbound endpoint on an internal listener, a Slack webhook with its secret,
+/// an ARD registry, and settings for the notes and the evaluation. Returns the state of lee.
+async fn publishing_state(rig: &common::Rig) -> UiState {
+    use bunsin_api::{
+        ApiConnectorUpdate, ArdRegistriesUpdate, EvalSettingsUpdate, InboundUpdate, NotesSettingsUpdate, WebhooksUpdate,
+    };
+    use bunsin_core::ard::ArdRegistry;
+    use bunsin_core::eval::{EvalConfig, EvalPass};
+    use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope};
+    use bunsin_core::settings::{ApiAuthMethod, ApiConfig, ApiService};
+    use bunsin_core::webhook::WebhookConfig;
+    use bunsin_core::wiki::NotesConfig;
+    let engine = &rig.engine;
+    engine.add_outer_listener(bunsin_engine::OuterListener {
+        scope: InboundScope::Internal,
+        url: "https://agents.acme.com".into(),
+    });
+    let inbound = InboundConfig {
+        enabled: true,
+        scope: InboundScope::Internal,
+        title: Some("Lee's agent".into()),
+        description: "Questions about the release calendar.".into(),
+        ard: Some(ArdListing {
+            publisher: common::PUBLISHER.into(),
+            namespace: Some("team".into()),
+            agent_name: "lee".into(),
+            representative_queries: vec!["When is the next release?".into(), "Who approves a release?".into()],
+        }),
+    };
+    let update = InboundUpdate {
+        inbound,
+        expected: Expected::Unchecked,
+    };
+    engine.set_inbound_settings("lee", update).await.unwrap();
+    let slack = ApiConnectorUpdate {
+        api: ApiConfig {
+            service: ApiService::Slack,
+            base_url: "https://slack.com/api".into(),
+            auth: ApiAuthMethod::Bearer,
+            email: None,
+        },
+        token: TokenChange::Set("fixture-token".into()),
+        expected: Expected::Unchecked,
+    };
+    engine.set_api_connector("lee", "slackapi", slack).await.unwrap();
+    let hook = WebhookConfig {
+        connector: "slackapi".into(),
+        scope: InboundScope::Internal,
+        skip_authors: vec!["U-LEE".into()],
+    };
+    let update = WebhooksUpdate {
+        webhooks: [("slack-events".to_owned(), hook)].into(),
+        expected: Expected::Unchecked,
+    };
+    engine.set_webhooks("lee", update).await.unwrap();
+    engine
+        .set_webhook_secret("lee", "slack-events", "fixture-secret".into())
+        .await
+        .unwrap();
+    let registries = ArdRegistriesUpdate {
+        registries: vec![ArdRegistry {
+            name: "corp".into(),
+            url: "https://registry.acme.com/v1".into(),
+        }],
+        expected: Expected::Unchecked,
+    };
+    engine.set_ard_registries("lee", registries).await.unwrap();
+    let notes = NotesSettingsUpdate {
+        notes: NotesConfig {
+            auto_apply: true,
+            stale_days: Some(30),
+            lint_every_hours: Some(24),
+            lint_conflicts: false,
+        },
+        expected: Expected::Unchecked,
+    };
+    engine.set_notes_settings("lee", notes).await.unwrap();
+    let eval = EvalSettingsUpdate {
+        eval: EvalConfig {
+            pass: Some(EvalPass {
+                kind_percent: 80,
+                overlap_percent: 40,
+                boundary_percent: 100,
+            }),
+            judge: false,
+        },
+        expected: Expected::Unchecked,
+    };
+    engine.set_eval_settings("lee", eval).await.unwrap();
+    let mut state = UiState::default();
+    apply(&**engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
+    state
 }
 
 /// Writes a waiting coding call and the draft of an ended job beside the engine, once, and loads the state.

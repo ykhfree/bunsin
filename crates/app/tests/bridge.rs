@@ -1164,3 +1164,26 @@ async fn a_sign_in_without_a_callback_or_for_another_connector_or_profile_saves_
     let audit = rig.engine.snapshot("kim").await.unwrap().audit;
     assert!(!audit.iter().any(|entry| entry.kind == "oauth_signed_in"));
 }
+
+#[tokio::test]
+async fn a_typed_signing_secret_is_in_no_debug_text_and_a_refused_one_is_the_cards_result() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let command = UiCommand::SetWebhookSecret {
+        profile: "kim".into(),
+        name: "nothing".into(),
+        secret: bunsin_app::bridge::Typed("hook-secret-7a1c".into()),
+    };
+    assert!(!format!("{command:?}").contains("hook-secret-7a1c"));
+    apply(&*rig.engine, &mut state, command).await;
+    // The server has no such webhook. The failure belongs to the card, not to the error line.
+    match &state.part_result {
+        Some((bunsin_app::bridge::Part::WebhookSecret, Err(SaveError::Failed(error)))) => {
+            assert!(error.contains("webhook `nothing`"), "{error}");
+        }
+        other => panic!("expected a failed secret, got {other:?}"),
+    }
+    assert_eq!((state.error.as_deref(), state.part_saves), (None, 1));
+    assert!(!format!("{state:?}").contains("hook-secret-7a1c"));
+}

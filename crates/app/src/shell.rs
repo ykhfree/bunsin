@@ -1,8 +1,10 @@
 //! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
-//! polls, learning, privacy settings, connections, caller tokens and the setup of an agent.
+//! polls, learning, privacy settings, connections, caller tokens, the inbound endpoint with its ARD
+//! listing, webhooks, ARD registries, the settings of the notes and the evaluation, and the setup of an agent.
 
 use crate::bridge::{UiCommand, UiState};
 use crate::callers_form::CallersForm;
+use crate::checks_form::ChecksForm;
 use crate::connections_form::ConnectionsForm;
 use crate::draft_editor::DraftEditor;
 use crate::learning_form::LearningForm;
@@ -11,6 +13,7 @@ use crate::permissions_form::PermissionsForm;
 use crate::polls_form::PollsForm;
 use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
+use crate::publishing_form::PublishingForm;
 use crate::setup_form::SetupForm;
 use crate::theme::{card, code_block, icon, notice, palette, quiet, state_mark, utc_minute};
 use bunsin_api::{Autonomy, Resolution};
@@ -40,6 +43,8 @@ pub struct Shell {
     pub(crate) polls: PollsForm,
     pub(crate) learning: LearningForm,
     pub(crate) setup: SetupForm,
+    pub(crate) publishing: PublishingForm,
+    pub(crate) checks: ChecksForm,
     /// The edit of a waiting call in the inbox, if one is open.
     pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
@@ -59,13 +64,13 @@ pub enum View {
     Notes,
     /// What the agent may do with each approved tool.
     Permissions,
-    /// How the agent works: the owner's principles, the searches that find events, and the caller
-    /// tokens of its inbound endpoint.
+    /// How the agent works: the owner's principles, the searches that find events, the caller
+    /// tokens and the settings of its inbound endpoint, its webhooks and its ARD registries.
     Agent,
     /// What the agent learns and how the owner checks it: corrections, principle candidates,
     /// evaluation and the thresholds of the autonomy suggestions.
     Learning,
-    /// The connections and the privacy filter.
+    /// The connections, the privacy filter, and the settings of the notes and the evaluation.
     Settings,
     /// The setup of an agent, step by step. It opens by itself for a profile that nobody has set up,
     /// and from the Agent view.
@@ -90,6 +95,8 @@ impl Shell {
                     shell.principles.receive(&state, window, cx);
                     shell.polls.receive(&state, window, cx);
                     shell.learning.receive(&state, window, cx);
+                    shell.publishing.receive(&state, window, cx);
+                    shell.checks.receive(&state, window, cx);
                     if shell.setup.receive(&state, window, cx) {
                         shell.view = View::Setup;
                     }
@@ -120,6 +127,8 @@ impl Shell {
             polls: PollsForm::new(window, cx),
             learning: LearningForm::new(window, cx),
             setup: SetupForm::new(window, cx),
+            publishing: PublishingForm::new(window, cx),
+            checks: ChecksForm::new(window, cx),
             draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
@@ -797,6 +806,8 @@ impl Render for Shell {
         // The forms are built first. They need `cx` for writing.
         let notes = (self.view == View::Notes).then(|| self.notes_section(cx).into_any_element());
         let callers = (self.view == View::Agent).then(|| self.callers_section(cx).into_any_element());
+        let publishing = (self.view == View::Agent).then(|| self.publishing_cards(cx));
+        let checks = (self.view == View::Settings).then(|| self.checks_cards(cx));
         let forms = (self.view == View::Settings).then(|| {
             (
                 self.connections_section(cx).into_any_element(),
@@ -831,6 +842,7 @@ impl Render for Shell {
                 .child(self.principles_section(cx))
                 .child(self.polls_section(cx))
                 .children(callers)
+                .children(publishing.into_iter().flatten())
                 .into_any_element()
         } else if let Some(notes) = notes {
             notes
@@ -847,6 +859,7 @@ impl Render for Shell {
                 .overflow_y_scroll()
                 .child(connections)
                 .child(privacy)
+                .children(checks.into_iter().flatten())
                 .into_any_element()
         } else {
             let activity = audit.iter().take(AUDIT_ROWS).map(|entry| {

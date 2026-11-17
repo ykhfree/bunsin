@@ -192,7 +192,7 @@ fn an_evaluation_runs_from_the_view_and_a_case_is_deleted(cx: &mut TestAppContex
         assert_eq!(label(window, "result-2"), "#2 escalate → escalate (ok)");
         assert_eq!(
             label(window, "eval-pass"),
-            "No pass mark. Set eval.pass in the settings file."
+            "No pass mark. Set it in Settings, under Evaluation."
         );
         window.click("delete-case-2", cx);
     });

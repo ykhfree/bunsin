@@ -112,7 +112,7 @@ pub fn run_text(report: &EvalReport) -> String {
 /// Whether the run meets the owner's pass mark.
 pub fn pass_text(report: &EvalReport) -> String {
     let Some(pass) = &report.pass else {
-        return "No pass mark. Set eval.pass in the settings file.".to_owned();
+        return "No pass mark. Set it in Settings, under Evaluation.".to_owned();
     };
     let verdict = match report.passed {
         Some(true) => "passed",

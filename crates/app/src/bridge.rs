@@ -4,19 +4,24 @@
 //! and shows the state that comes back.
 
 use bunsin_api::{
-    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, Autonomy, AutonomyThresholdsUpdate,
-    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, LlmTest, LlmUpdate,
-    NewCallerToken, Outcome, Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate,
-    PrivacyUpdate, ProfileSnapshot, ReplayCase, Resolution, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, EvalSettingsUpdate,
+    InboundStatus, InboundUpdate, LlmTest, LlmUpdate, NewCallerToken, NotesSettingsUpdate, Outcome, Permissions,
+    PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate, ProfileSnapshot,
+    ReplayCase, Resolution, ToolsReport, WebhooksUpdate, WikiPageUpdate,
 };
+use bunsin_core::ard::ArdRegistry;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
-use bunsin_core::eval::ReplayCaseRecord;
+use bunsin_core::eval::{EvalConfig, ReplayCaseRecord};
+use bunsin_core::inbound::InboundConfig;
 use bunsin_core::lint::LintFinding;
 use bunsin_core::poll::PollConfig;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::records::{CallerToken, CorrectionRecord, ProfileInfo};
 use bunsin_core::tool::PinSet;
-use bunsin_core::wiki::{WikiPage, WikiSummary};
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::{NotesConfig, WikiPage, WikiSummary};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -209,6 +214,58 @@ pub enum UiCommand {
         profile: String,
         id: i64,
     },
+    /// Replaces the settings of the inbound endpoint and its ARD listing.
+    SaveInbound {
+        profile: String,
+        update: InboundUpdate,
+    },
+    /// Replaces the ARD registries.
+    SaveArdRegistries {
+        profile: String,
+        update: ArdRegistriesUpdate,
+    },
+    /// Replaces the webhooks. A removed webhook loses its signing secret on the server.
+    SaveWebhooks {
+        profile: String,
+        update: WebhooksUpdate,
+    },
+    /// Stores the signing secret of a webhook. A typed secret travels only in this command.
+    SetWebhookSecret {
+        profile: String,
+        name: String,
+        secret: Typed,
+    },
+    /// Replaces the settings of the notes.
+    SaveNotesSettings {
+        profile: String,
+        update: NotesSettingsUpdate,
+    },
+    /// Replaces the evaluation settings.
+    SaveEvalSettings {
+        profile: String,
+        update: EvalSettingsUpdate,
+    },
+}
+
+/// A secret that the owner typed. Its debug form leaves the value out.
+#[derive(Clone, PartialEq)]
+pub struct Typed(pub String);
+
+impl std::fmt::Debug for Typed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+/// A part of the settings that a card of the window saves by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    Inbound,
+    ArdRegistries,
+    Webhooks,
+    WebhookSecret,
+    Notes,
+    Eval,
 }
 
 /// The page of the notes that the window has open.
@@ -289,8 +346,8 @@ pub enum ConnectionResult {
     },
 }
 
-/// What the window shows. Every field comes from the engine. No access token is ever in it, and
-/// a caller token only in `new_caller`, from its creation until the next command.
+/// What the window shows. Every field comes from the engine. No access token and no signing secret
+/// is ever in it, and a caller token only in `new_caller`, from its creation until the next command.
 /// The arguments and the plain environment variables of a command connector are in it. The value
 /// of a secret variable is not: the state holds only its name.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -366,6 +423,24 @@ pub struct UiState {
     pub callers: Option<Vec<CallerToken>>,
     /// The token that the last command created. The server cannot show it again.
     pub new_caller: Option<NewCallerToken>,
+    /// Where the inbound endpoint and the webhooks are served, and why the ARD catalogs leave the
+    /// listing out. It never holds a signing secret, only whether one is stored.
+    pub inbound_status: Option<InboundStatus>,
+    /// The settings of the inbound endpoint and its ARD listing, as the server has them.
+    pub inbound: Option<InboundConfig>,
+    /// The ARD registries, as the server has them.
+    pub ard_registries: Option<Vec<ArdRegistry>>,
+    /// The webhooks by name, as the server has them.
+    pub webhooks: Option<BTreeMap<String, WebhookConfig>>,
+    /// The settings of the notes, as the server has them.
+    pub notes_settings: Option<NotesConfig>,
+    /// The evaluation settings, as the server has them.
+    pub eval_settings: Option<EvalConfig>,
+    /// The part and the result of the last command, if it saved one part of the settings.
+    /// A failed save is shown in its card, not in `error`.
+    pub part_result: Option<(Part, Result<(), SaveError>)>,
+    /// How many commands that save a part the bridge has run.
+    pub part_saves: u64,
     /// The failure of the last command, if it failed.
     pub error: Option<String>,
     /// False until the engine answers, and again when it stops answering.
@@ -429,6 +504,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     state.preload_result = None;
     state.cases_result = None;
     state.new_caller = None;
+    state.part_result = None;
     let selected = state.selected.clone();
     let selected = selected.as_deref();
     let result = match (command, selected) {
@@ -625,6 +701,36 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
         (UiCommand::RevokeCaller { profile, id }, _) => {
             for_profile(selected, &profile, api.revoke_caller_token(&profile, id)).await
         }
+        (UiCommand::SaveInbound { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_inbound_settings(&profile, update)).await;
+            state.part_result = Some((Part::Inbound, result));
+            Ok(())
+        }
+        (UiCommand::SaveArdRegistries { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_ard_registries(&profile, update)).await;
+            state.part_result = Some((Part::ArdRegistries, result));
+            Ok(())
+        }
+        (UiCommand::SaveWebhooks { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_webhooks(&profile, update)).await;
+            state.part_result = Some((Part::Webhooks, result));
+            Ok(())
+        }
+        (UiCommand::SetWebhookSecret { profile, name, secret }, _) => {
+            let call = api.set_webhook_secret(&profile, &name, secret.0);
+            state.part_result = Some((Part::WebhookSecret, save_for(selected, &profile, call).await));
+            Ok(())
+        }
+        (UiCommand::SaveNotesSettings { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_notes_settings(&profile, update)).await;
+            state.part_result = Some((Part::Notes, result));
+            Ok(())
+        }
+        (UiCommand::SaveEvalSettings { profile, update }, _) => {
+            let result = save_for(selected, &profile, api.set_eval_settings(&profile, update)).await;
+            state.part_result = Some((Part::Eval, result));
+            Ok(())
+        }
         (UiCommand::DismissFinding { profile, id }, _) => {
             for_profile(selected, &profile, api.dismiss_finding(&profile, id)).await
         }
@@ -683,6 +789,9 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
     if state.poll_result.is_some() {
         state.poll_commands += 1;
     }
+    if state.part_result.is_some() {
+        state.part_saves += 1;
+    }
     if let Err(error) = result {
         state.error = Some(error);
     }
@@ -705,6 +814,12 @@ struct Loaded {
     eval_report: EvalReport,
     lint_findings: Vec<LintFinding>,
     callers: Vec<CallerToken>,
+    inbound_status: InboundStatus,
+    inbound: InboundConfig,
+    ard_registries: Vec<ArdRegistry>,
+    webhooks: BTreeMap<String, WebhookConfig>,
+    notes_settings: NotesConfig,
+    eval_settings: EvalConfig,
     /// The open page. None if no page is open or the server has no such page.
     page: Option<WikiPage>,
     /// The revisions of the open page, if the window shows them.
@@ -728,6 +843,12 @@ async fn load_profile(api: &dyn EngineApi, profile: &str, open: Option<(&str, bo
         eval_report: api.eval_report(profile).await?,
         lint_findings: api.lint_findings(profile).await?,
         callers: api.caller_tokens(profile).await?,
+        inbound_status: api.inbound_status(profile).await?,
+        inbound: api.inbound_settings(profile).await?,
+        ard_registries: api.ard_registries(profile).await?,
+        webhooks: api.webhooks(profile).await?,
+        notes_settings: api.notes_settings(profile).await?,
+        eval_settings: api.eval_settings(profile).await?,
         history: match open {
             Some((slug, true)) => Some(api.wiki_history(profile, slug).await?),
             _ => None,
@@ -759,6 +880,12 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
     state.eval_report = None;
     state.lint_findings = None;
     state.callers = None;
+    state.inbound_status = None;
+    state.inbound = None;
+    state.ard_registries = None;
+    state.webhooks = None;
+    state.notes_settings = None;
+    state.eval_settings = None;
     state.connected = false;
     match api.list_profiles().await {
         Ok(profiles) => state.profiles = profiles,
@@ -800,6 +927,12 @@ async fn reload(api: &dyn EngineApi, state: &mut UiState) {
                 state.eval_report = Some(loaded.eval_report);
                 state.lint_findings = Some(loaded.lint_findings);
                 state.callers = Some(loaded.callers);
+                state.inbound_status = Some(loaded.inbound_status);
+                state.inbound = Some(loaded.inbound);
+                state.ard_registries = Some(loaded.ard_registries);
+                state.webhooks = Some(loaded.webhooks);
+                state.notes_settings = Some(loaded.notes_settings);
+                state.eval_settings = Some(loaded.eval_settings);
                 if let Some(open) = &mut state.open_note {
                     open.page = loaded.page;
                     open.history = loaded.history;
