@@ -517,7 +517,7 @@
     - §4.5.1 결속: `build_entry`가 manifest를 두 항목에 싣고, `validate`가 `TrustIdentityMismatch`(MUST)를 낸다. 그래서 다른 domain의 identity는 `check_ard`가 저장을 거부하고,
       규칙 전에 저장된 설정(또는 운영자가 검사 없이 만든 설정)은 catalog가 두 항목을 모두 뺀다. `identity_domain`은 `spiffe://`, `https://`, `did:web:`만 읽으므로 `did:key`는 거부된다.
     - 서명은 검증하지 않는다. §4.5.2는 절차를 신뢰 체계(`trustSchema`)에 맡기고 ARD는 정하지 않는다.
-    - 감사 `inbound_settings_changed`는 `a2a`와 `trust_manifest: bool`만 남긴다. manifest의 글은 남기지 않는다.
+    - 감사 `inbound_settings_changed`는 `enabled`, `scope`, `a2a`, `ard: bool`, `trust_manifest: bool`을 남긴다. manifest의 글은 남기지 않는다.
     - 창은 manifest를 보이거나 고치지 않는다. 카드가 읽은 값(`track.base`)을 그대로 저장한다. 목록을 끄면 manifest도 사라진다.
   - `GET /.well-known/ard.json`(외부 리스너마다, 인증 없음, `Access-Control-Allow-Origin: *`): 요청마다 `bunsin_ard::catalog`로 만든다.
     endpoint가 켜지고 publisher가 허용된 모든 프로필을 넘겨 identifier 중복을 전체에서 검사하고, catalog의 scope 규칙(공개 리스너는 `public`만)이 `served_on`과 같은 것을 고른다.
@@ -541,7 +541,8 @@
     `manifest <파일>` 모드는 네트워크 없이 돈다. Python `jsonschema`가 있으면 같은 스키마 검사도 한다. 이 도구는 CI에서 돌리지 않는다.
   - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 A2A, Agent Card URL(`a2a_served_on`일 때),
     항목마다(`ard: Vec<ArdStatus>`, MCP 다음 A2A) `media_type`, identifier, 싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고, 그리고 `dns_records`.
-    - 새 필드는 `#[serde(default)]`이다. `ard`는 `Option`에서 목록으로 바뀌었으므로, 옛 서버가 보낸 객체는 새 창이 읽지 못한다. 창과 서버를 함께 배포한다.
+    - 새 필드는 `#[serde(default)]`이다. 이 속성은 키가 없을 때만 돕는다. `ard`는 `Option`에서 목록으로 바뀌었으므로, 옛 서버가 보낸 `null`이나 객체를 새 창이 읽지 못하고,
+      옛 창도 새 서버의 목록을 읽지 못한다. 창과 서버를 함께 배포한다.
 - 아직 없는 것: 호출자용 OAuth.
 
 ## 8. AI 표시

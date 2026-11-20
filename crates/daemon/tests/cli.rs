@@ -245,6 +245,12 @@ fn the_operator_names_the_ard_publishers_and_the_owner_reads_the_listing() {
         lines[3].starts_with("warning\tthe entry has 1 representative queries"),
         "{shown}"
     );
+    // An IP address cannot be an SVCB target, so the DNS line says why there is no record.
+    assert_eq!(
+        lines[4],
+        "dns\t; no _entries._agents record for http://127.0.0.1/: \
+         the SVCB target must be a host name, not an IP address"
+    );
 
     // Another domain is refused when the settings are stored.
     config["inbound"]["ard"]["publisher"] = serde_json::json!("other.example");
