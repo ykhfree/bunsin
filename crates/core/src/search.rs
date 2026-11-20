@@ -96,10 +96,20 @@ pub fn term_query(term: &str) -> TermQuery {
 /// `ln(1 + total / df)` over the terms it matches, where `df` is the number of rows of the term.
 /// Rows with the same score are ordered by `tie`, lowest first.
 pub fn rank<K: Ord + Clone, T: Ord>(total: usize, hits: &[BTreeSet<K>], tie: impl Fn(&K) -> T) -> Vec<K> {
+    rank_scored(total, hits, tie).into_iter().map(|(row, _)| row).collect()
+}
+
+/// Like [`rank`], with the score of each candidate as an integer from 1 to 100.
+///
+/// The integer is `round(100 * s / s_max)`, at least 1. `s` is the score of the row. `s_max` is
+/// the sum of the weights of all terms that match a row, so a row that matches all of them gets 100.
+pub fn rank_scored<K: Ord + Clone, T: Ord>(total: usize, hits: &[BTreeSet<K>], tie: impl Fn(&K) -> T) -> Vec<(K, u8)> {
     let rare_limit = (total / 4).max(2);
     let mut scores: BTreeMap<K, (f64, bool)> = BTreeMap::new();
+    let mut max_score = 0.0;
     for rows in hits.iter().filter(|rows| !rows.is_empty()) {
         let weight = (1.0 + total as f64 / rows.len() as f64).ln();
+        max_score += weight;
         let rare = rows.len() <= rare_limit;
         for row in rows {
             let entry = scores.entry(row.clone()).or_insert((0.0, false));
@@ -113,7 +123,10 @@ pub fn rank<K: Ord + Clone, T: Ord>(total: usize, hits: &[BTreeSet<K>], tie: imp
         .map(|(row, (score, _))| (row, score))
         .collect();
     candidates.sort_by(|(a, a_score), (b, b_score)| b_score.total_cmp(a_score).then_with(|| tie(a).cmp(&tie(b))));
-    candidates.into_iter().map(|(row, _)| row).collect()
+    candidates
+        .into_iter()
+        .map(|(row, score)| (row, ((100.0 * score / max_score).round() as u8).max(1)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -201,6 +214,34 @@ mod tests {
         assert_eq!(rank(3, &[set(&[1, 2])], |row: &i64| Reverse(*row)), [2, 1]);
         assert!(rank(3, &[set(&[1, 2, 3])], |row: &i64| Reverse(*row)).is_empty());
         assert!(rank(0, &[set(&[])], |row: &i64| Reverse(*row)).is_empty());
+    }
+
+    #[test]
+    fn a_full_match_scores_100_and_a_partial_match_its_share() {
+        // Ten rows. `rare` matches row 1, `also` rows 1 and 2, `none` no row.
+        let hits = [set(&[1]), set(&[1, 2]), set(&[])];
+        let scored = rank_scored(10, &hits, |row: &i64| *row);
+        let rare = 11f64.ln();
+        let also = 6f64.ln();
+        let share = (100.0 * also / (rare + also)).round() as u8;
+        // A term that matches no row does not lower the best score.
+        assert_eq!(scored, [(1, 100), (2, share)]);
+        assert!((1..100).contains(&share), "{share}");
+        // The order is the order of `rank`.
+        let order: Vec<i64> = scored.iter().map(|(row, _)| *row).collect();
+        assert_eq!(order, rank(10, &hits, |row: &i64| *row));
+    }
+
+    #[test]
+    fn a_tiny_share_still_scores_1() {
+        // Row 2 matches only a term found in 3 of 1000 rows; row 1 also matches 250 terms of one row
+        // each. The share of row 2 rounds to 0, and the score keeps it at 1.
+        let mut hits: Vec<BTreeSet<i64>> = (0..250).map(|_| set(&[1])).collect();
+        hits.push(set(&[1, 2, 3]));
+        let scored = rank_scored(1000, &hits, |row: &i64| *row);
+        assert_eq!(scored[0], (1, 100));
+        assert_eq!(scored[1], (2, 1));
+        assert!(rank_scored(1000, &[set(&[])], |row: &i64| *row).is_empty());
     }
 
     #[test]

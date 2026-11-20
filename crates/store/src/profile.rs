@@ -4,17 +4,16 @@ pub use intake::IntakeRow;
 mod learning;
 mod lint;
 
-use crate::{Result, StoreError};
+use crate::{Result, StoreError, term_hits};
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::Correction;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::records::{
     ArtifactMeta, AuditEntry, CorrectionRecord, DecisionCounts, DecisionKind, InboxBody, InboxItem, LlmUsage, ReadNote,
 };
-use bunsin_core::search::{TermQuery, rank, term_query};
+use bunsin_core::search::rank;
 use bunsin_core::sha256_hex;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiSource, WikiSummary, WikiText};
-use rusqlite::types::FromSql;
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior};
 use serde_json::Value;
 use std::cmp::Reverse;
@@ -198,28 +197,6 @@ fn create_search_indexes(db: &mut Connection) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
-}
-
-/// For each term, the keys of the rows that match it. `match_sql` and `like_sql` take the
-/// argument of `search::term_query` as `?1`.
-fn term_hits<K: FromSql + Ord>(
-    db: &Connection,
-    terms: &[String],
-    match_sql: &str,
-    like_sql: &str,
-) -> Result<Vec<BTreeSet<K>>> {
-    terms
-        .iter()
-        .map(|term| {
-            let (sql, arg) = match term_query(term) {
-                TermQuery::Match(phrase) => (match_sql, phrase),
-                TermQuery::Like(pattern) => (like_sql, pattern),
-            };
-            let mut statement = db.prepare_cached(sql)?;
-            let rows = statement.query_map([arg], |row| row.get(0))?;
-            Ok(rows.collect::<rusqlite::Result<BTreeSet<K>>>()?)
-        })
-        .collect()
 }
 
 /// A secret as it is stored: encrypted, with the address it belongs to.

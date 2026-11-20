@@ -1124,6 +1124,7 @@ dependencies = [
 name = "bunsin-engine"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bunsin-api",
  "bunsin-ard",
  "bunsin-core",

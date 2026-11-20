@@ -11,7 +11,7 @@
             ▲                                    ▲
             │ 제어 리스너 --listen                │ 내부·공개 리스너 --internal-listen, --public-listen
             │ HTTPS + 프로필별 접속 token          │ 인바운드 MCP(호출자 token), server card,
-            │ (bunsin-api::http)                 │ ARD catalog, webhook(서명)
+            │ (bunsin-api::http)                 │ ARD catalog, ARD registry, webhook(서명)
             ▼                                    ▼
 [내 컴퓨터]  GPUI app, bunsind의 원격 명령        [다른 사람의 agent, ARD client, Slack, Jira Cloud]
             (bunsin-client)
@@ -21,7 +21,7 @@
 - GPUI app은 관리 화면이다. app은 엔진을 품지 않고, `EngineApi`의 원격 구현(`RemoteEngine`)으로 서버에 접속한다.
 - 같은 컴퓨터에서 시험할 때는 `bunsind serve`를 `127.0.0.1`에 띄우고 app이 그 주소로 접속한다.
 - data dir 하나에 엔진 하나만 뜬다. `engine.lock` 파일의 배타 잠금이 이중 폴링과 이중 실행을 막는다.
-- 서버 운영자의 명령(`profile-add`, `token-add`, `token-list`, `token-revoke`)은 저장소 파일을 직접 다룬다.
+- 서버 운영자의 명령(`profile-add`, `token-add`, `token-list`, `token-revoke`, `registry-status`)은 저장소 파일을 직접 다룬다.
   엔진 잠금이 필요 없으므로 서버가 도는 동안에도 실행된다. 두 프로세스가 같은 SQLite 파일을 쓰므로 busy timeout을 둔다.
 - 서버는 SIGTERM이나 Ctrl-C를 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다린 뒤에 종료한다.
   그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다. 다음 시작이 그 항목을 `unknown`으로 옮긴다(아래 "재개").
@@ -73,6 +73,7 @@
   - 제어(`--listen`): `/v1/...`만 있다. 접속 token을 받는다.
   - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
     인바운드 MCP와 server card, ARD catalog(7절), webhook(11절)이 여기에 있다.
+    운영자가 `--ard-registry`로 켜면 ARD registry(18절)도 리스너 루트에 있다. 켜지 않은 리스너에서는 그 경로가 404이다.
   - 리스너 L은 `InboundConfig::served_on(L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
     MCP 경로, card, ARD catalog가 이 함수 하나를 쓴다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다). daemon의 `served_on(config, Reach)`는 이 함수를 부른다.
   - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
@@ -88,15 +89,15 @@
 | Crate | 역할 | 의존 |
 |---|---|---|
 | `bunsin-core` | 정책, 제안 검증, 승인 상태 머신, AI 표시, 도구 pin 비교, 설정 형식, `LlmClient`·`Connector`·`Coder` trait. IO가 없다. | 없음 |
-| `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그, 봉인된 비밀 값의 행 | core |
+| `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그, 봉인된 비밀 값의 행, ARD registry index(`registry.db`) | core |
 | `bunsin-llm` | LLM 어댑터 | core |
 | `bunsin-connectors` | MCP 커넥터, REST API 커넥터, webhook 서명 검사와 해석 | core |
-| `bunsin-ard` | ARD 항목 검사, catalog, registry 검색 client | 없음 |
+| `bunsin-ard` | ARD 항목 검사, catalog, registry 검색 client, registry 요청 해석과 필터(`query.rs`) | 없음 |
 | `bunsin-coding` | 코딩 위임 실행기(git worktree, 코딩 CLI 백엔드) | 없음 |
 | `bunsin-api` | `EngineApi` trait과 DTO, HTTP 경로와 요청 본문(`http` 모듈) | core |
-| `bunsin-engine` | 하네스 파이프라인, `EngineApi`의 구현, 비밀 값 봉인(`secrets.rs`). LLM, 커넥터, 코딩 실행기는 `Backends` trait으로 받는다. | api, ard, core, store |
+| `bunsin-engine` | 하네스 파이프라인, `EngineApi`의 구현, 비밀 값 봉인(`secrets.rs`), ARD registry의 수집과 순위(`registry.rs`). LLM, 커넥터, 코딩 실행기는 `Backends` trait으로 받는다. | api, ard, core, store |
 | `bunsin-client` | `RemoteEngine`: HTTPS로 서버에 접속하는 `EngineApi` 구현 | api, core |
-| `bunsin-daemon` | HTTP 서버와 리스너, 프로필 설정으로 실제 LLM client, 커넥터, ARD 검색, 코딩 실행기를 만드는 `RealBackends`, 실행 파일 `bunsind` | api, ard, client, coding, connectors, core, engine, llm, store |
+| `bunsin-daemon` | HTTP 서버와 리스너, ARD registry 경로와 task, 프로필 설정으로 실제 LLM client, 커넥터, ARD 검색, 코딩 실행기를 만드는 `RealBackends`, 실행 파일 `bunsind` | api, ard, client, coding, connectors, core, engine, llm, store |
 | `bunsin-app` | GPUI 창 | api, client, core |
 | `bunsin-testkit` | 테스트용 가짜 LLM, 가짜 커넥터 | core |
 
@@ -995,6 +996,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI, 창). 게시 본문은 스펙 JSON 스키마 검사를 통과한다. 공식 conformance 도구는 실행해 보지 않았다. |
 | ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버, 창의 목록 편집). 로컬 stub registry로만 테스트 |
+| ARD registry phase 1(운영자 플래그, `registry.db`, 자기 catalog 수집, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. 공식 conformance 도구는 실행해 보지 않았다. 외부 seed crawl은 phase 2이고 아직 없다. |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
 | 배포 패키지(Linux 서버 tarball과 systemd unit, macOS `Bunsin.app`, CI artifact) | 구현. macOS에서 두 스크립트를 실행해 확인. unit은 systemd로 시작해 보지 않았고, 앱은 서명하지 않았다. |
@@ -1008,3 +1010,93 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - 임베딩 검색의 제공 여부.
 - macOS 앱의 bundle ID와 Developer ID 서명의 주체. 지금은 서명하지 않고, bundle ID는 로컬용 기본값이다. 앱 아이콘도 없다.
 - 인바운드 호출자의 OAuth. 지금은 호출자 token만 있다.
+- ARD registry의 외부 seed crawl(phase 2). 지금은 서버 자신의 catalog만 index에 넣는다.
+
+## 18. ARD registry
+
+운영자가 켜면 서버는 ARD Registry(§5.3)가 된다. phase 1은 서버 자신의 catalog만 index에 넣는다.
+외부 seed의 crawl(`--ard-registry-source`, `--ard-registry-public-source`, domain 해석, in-page markup)은 phase 2이고, 아직 없다.
+
+- **켜기**: `bunsind serve --ard-registry internal|public`. 플래그가 없으면 registry 경로가 없다(404).
+  `internal`은 내부 리스너, `public`은 두 리스너에 둔다. 판단은 `reaches(scope, listener)` 하나이다(engine `registry_serves`).
+  기각: 소유자 설정. registry는 서버 전체의 서비스이고, crawl은 서버의 네트워크를 쓴다.
+- **경로**(daemon `registry.rs`): 리스너 루트의 `POST /search`, `POST /explore`, `GET /agents`. base URL은 `--*-url`이다.
+  이유: SVCB 레코드는 host와 port만 담고 경로 자리가 없다. `/ard/...` 같은 경로는 기각했다.
+  - 인증은 없다. 호출자 token은 프로필의 것이고, 접속 token은 외부 리스너에서 쓰지 않는다.
+  - 리스너마다 1분에 600 요청까지 답한다(메모리, 재시작하면 초기화). 넘으면 429이다.
+  - 본문은 64 KiB까지 읽는다. 넘으면 400이다.
+  - 모든 응답에 `Access-Control-Allow-Origin: *`를 붙인다. 브라우저의 preflight(`OPTIONS`)에는 204로 답한다.
+  - 오류 본문은 Appendix B의 `{errorCode, message}`이다. status는 400, 404, 429, 500이다. 내부 오류의 문구는 서버 내용을 담지 않는다.
+- **index**: `<data>/registry.db`(store `RegistryStore`). app.db는 요청마다 token 표를 읽으므로 crawl 쓰기와 겹친다. agent.db는 프로필의 것이다.
+  ```
+  sources(id, url UNIQUE, kind seed|discovered|self, scope, parent_id,
+          next_fetch_at, last_ok_at, failures, last_error)
+  entries(id, source_id, identifier, on_internal, on_public, publisher, display_name,
+          media_type, entry, terms, search_text, first_seen_at, changed_at, UNIQUE(source_id, identifier))
+  entries_fts(search_text) USING fts5(tokenize='trigram', content='entries')
+  refusals(source_id, identifier, reason)
+  ```
+  - source의 종류와 범위가 행을 보는 리스너를 정한다(`RegistryStore::replace`).
+    `self:internal`은 (on_internal 1, on_public 0), `self:public`은 (0, 1), 내부 seed는 (1, 0), 공개 seed는 (1, 1)이다.
+    내부 catalog가 공개 프로필도 내부 주소로 싣기 때문에, `self:public`은 내부 리스너에 보이지 않는다.
+  - 읽기에 성공하면 그 source의 행과 거부를 통째로 바꾼다. 같은 identifier는 `first_seen_at`을 유지하고, 항목 JSON이 바뀔 때만 `changed_at`을 옮긴다.
+    `last_error`에는 Bunsin 문구와 HTTP status만 쓴다.
+  - 같은 identifier가 여러 source에 있으면 응답에는 하나만 나온다. self source의 행이 이기고, 다음은 작은 source ID이다.
+  - 항목 수락(engine `index_source`): MUST 위반이 없다(SHOULD 위반은 받는다), JSON 64 KiB 이하, source당 500개, 전체 10,000개.
+    거부 이유는 고정 낱말이다: `invalid`, `too_large`, `duplicate`, `source_full`, `index_full`.
+    자기 catalog에는 결속 검사가 없다. 운영자의 `--ard-publisher-domain`이 이미 publisher를 정하기 때문이다.
+  - `terms`는 최상위 키를 IRI로 바꾼 사본이다(값은 그대로). phase 1은 기반 context의 core 용어, `ard:` 이름, 절대 IRI만 바꾼다(`bunsin_ard::base_term_iri`).
+    `type`은 `ard:mediaType`이다. JSON-LD 전개가 들어오면 이 함수가 바뀐다.
+  - `search_text`는 `displayName`, `description`, `representativeQueries`, `capabilities`, `tags`의 글이다.
+- **수집**(daemon `crawl.rs`): registry task 하나가 시작할 때 한 번, 그 뒤 60초마다 돈다. 서버가 멈추면 다른 task와 함께 멈춘다(`Poller::stop`).
+  phase 1의 tick은 registry가 닿는 리스너마다 `ard_catalog(scope)`로 `self:<scope>`의 행을 바꾼다. 실패는 stderr에 쓴다.
+  phase 2는 seed source(`kind seed`, `url`은 `<domain>` 또는 `<domain>=<https URL>`)를 더하고, 때가 된 source를 하나씩 가져와 같은 `index_source`로 넣는다.
+- **순위**: core `query_terms` → store `term_hits`(store `lib.rs`. profile 저장소와 registry가 함께 쓴다) → core `rank_scored`.
+  - s는 행이 맞은 term의 `ln(1+N/df)` 합이다. s_max는 보이는 행 중 어느 행엔가 있는 query term의 가중치 합이다.
+    score는 정수 `round(100·s/s_max)`이고 1~100이다. 모든 term을 가진 행은 100이다.
+  - cutoff는 `rank`의 희귀 term 규칙이다. `rank`는 `rank_scored`를 부르므로 규칙은 한 곳에 있다.
+    Search와 Explore는 같은 함수(engine `matched`)로 일치 집합을 만든다(§5.3.3). 쓸 수 있는 term이 없는 text는 둘 다에서 아무것도 맞지 않는다.
+  - score는 관련도이다. 신뢰 판단이 아니다(§5.3.2).
+- **경계**: `N`, `df`, `s_max`, cutoff, identifier 중복 제거, facet count, `total`은 모두 그 리스너가 보는 행으로만 센다.
+  `term_hits`의 SQL이 보는 열로 거르고, 엔진이 중복 제거한 행과 다시 교차한다.
+  이유: 전체 index로 세면 공개 호출자가 `<공개 term> <탐침 term>`의 score 변화로 내부 항목에 그 낱말이 있는지 1비트씩 알아낸다.
+- **요청**(ard `query.rs`): OpenAPI의 `additionalProperties: false` 객체(`SearchRequest`, `ExploreRequest`, `QueryModel`, `ExploreFacetRequest`)에
+  모르는 멤버가 있으면 400이다. `resultType`은 열려 있다.
+  - 필터 키와 facet field: core 용어, `ard:` 이름, `publisher`(URN에서), 절대 IRI(`scheme://` 형태),
+    `trustManifest.`·`metadata.`·`data.` 아래의 글자 그대로 경로. 그 밖의 점 경로, 묶이지 않은 prefix, 기반 context에 없는 이름은 400이다(§5.3.1 MAY).
+    `query.@context`가 묶은 이름과 prefix는 phase 1에서 400("not supported yet")이다. JSON-LD 전개가 들어오면 받는다.
+  - 필터 값은 문자열이나 문자열 배열이다(빈 배열은 400). 한 키 안은 OR, 키 사이는 AND이다. 항목의 값이 배열이면 원소 하나만 맞아도 된다.
+    `publisher`는 대소문자를 무시하고, 그 밖은 문자열이 정확히 같아야 한다. 숫자와 참·거짓은 JSON 글자로 비교한다.
+  - `/search`: `query.text`가 필요하다. `federation`의 `auto`, `referrals`, `none`은 모두 자기 index만 찾고(§5.4, 상류가 없다), 응답에 `referrals`가 없다.
+    그 밖의 값은 400이다. `pageSize`는 기본 10, 100을 넘으면 100, 1보다 작으면 400이다.
+    `pageToken`은 base64url(offset, 요청 digest)이고, offset은 1,000까지이다. 다른 요청의 token은 400이다.
+    결과는 저장한 항목에서 `representativeQueries`를 빼고 정수 `score`와 `source`(리스너 base URL)를 더한 것이다.
+  - `/explore`: facet 1~10개, 같은 field 두 번은 400. `limit`은 기본 20(최대 100), `minCount`는 기본 1이다.
+    한 항목은 값마다 한 번 센다. bucket은 count 내림, value 오름 순서이다. `otherCount`는 잘린 bucket의 count 합이고, 잘린 것이 없으면 없다.
+    세 endpoint를 모두 구현하므로 501은 쓰지 않는다.
+  - `/agents`: Appendix A와 OpenAPI 예가 함께 허용하는 부분 문법만 받는다. 나머지와 모르는 parameter, 반복 parameter는 400이다.
+    ```
+    filter = clause *(" AND " clause)
+    clause = ("displayName" / "type" / "publisherId") " = " quoted
+           / ("createdAfter" / "updatedAfter") " > " quoted
+    quoted = "'" value *("," value) "'"      ; 쉼표 = OR (Appendix A)
+    ```
+    `displayName`은 대소문자를 무시한 부분 일치이다. `createdAfter`는 `first_seen_at`, `updatedAfter`는 `changed_at`과 비교한다(게시자의 `updatedAt`은 없거나 틀릴 수 있다).
+    시각은 RFC 3339이거나 날짜(`2026-01-01`은 그날 0시 UTC)이다.
+    `orderBy`는 `displayName|name`, `createdAt|created_at`, `updatedAt|updated_at`, `identifier`와 `ASC|DESC`이고, 기본은 `identifier ASC`이다.
+    쪽은 기본 20, 최대 100이다. 응답은 `{items, total, pageToken?}`이다.
+- **자기 소개 항목**: registry가 닿는 리스너의 `ard.json`(engine `ard_catalog`)에 `urn:air:<domain>:registry:bunsin`, `application/ai-registry+json`,
+  `url` = 리스너 주소를 싣는다. `<domain>`은 `--ard-publisher-domain` 중 리스너 host와 같거나 host의 label 끝부분인 가장 긴 것이다(`agents.acme.com` → `acme.com`).
+  맞는 것이 없으면 싣지 않는다. 이유: 운영자의 허용 목록을 우회하지 않는다. 프로필이 같은 identifier를 이미 쓰면 이 항목을 싣지 않는다.
+- **DNS**: 서버는 레코드를 쓰지 않고, 시작할 때 stderr에 보인다. 자기 소개 항목이 있는 리스너마다
+  `_search._agents.<domain>. 3600 IN SVCB 1 <host>. ; the registry of the <리스너> listener`이다. port가 443이 아니면 `<host>.` 뒤에 ` port=<port>`를 붙인다.
+  리스너 주소에 경로가 있으면 레코드 대신 경고를 낸다.
+- **운영자 명령** `bunsind registry-status --data-dir <dir>`: `registry.db`를 직접 연다(엔진 잠금이 필요 없다).
+  source마다 `source<TAB>url<TAB>kind<TAB>scope<TAB>N entries<TAB>last ok <RFC 3339|never><TAB>N failures<TAB><last_error|->` 한 줄을 쓰고,
+  그 뒤 거부 이유마다 `refused<TAB>url<TAB>reason<TAB>count`를 쓴다.
+- crawl한 글은 LLM에 가지 않는다. `trustManifest`는 검증하지 않은 주장으로 결과와 필터에 그대로 둔다.
+- **테스트**: core `rank_scored`. store `registry.rs`(시각 유지, 보는 리스너, 중복, term hits, 상태). ard `query.rs`(`unknown_members_and_unbound_prefixes_get_400`,
+  `the_list_filter_accepts_only_the_appendix_a_subset`). 엔진 `tests/registry.rs`(`scores_are_integers_and_a_full_match_scores_100`, `explore_and_search_share_the_cutoff`,
+  `the_public_listener_never_sees_internal_rows`, `an_internal_row_changes_no_public_score_count_or_total`, `self_entries_name_the_card_of_their_listener`).
+  daemon `tests/registry.rs`(`answers_follow_the_openapi_shapes`는 응답을 `ard.openapi.yaml` 응답 스키마의 JSON 사본으로 검사한다. 경로, 400, 429, task, CLI `registry_status_lists_sources_and_counts`).
+- **아직 없는 것**: 외부 seed crawl(phase 2), `query.@context`로 묶은 필터 키, `trustManifest`의 검증.

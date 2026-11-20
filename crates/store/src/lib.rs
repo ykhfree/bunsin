@@ -2,11 +2,16 @@
 //! so one profile cannot read another profile's data through a missed filter.
 
 mod profile;
+mod registry;
 
 pub use profile::{EventStart, IntakeRow, LlmCall, ProfileStore, SealedSecret, WikiWrite};
+pub use registry::{IndexedRow, NewEntry, Refusal, RegistryStore, SourceKind, SourceStatus};
 
 use bunsin_core::records::{Caller, CallerToken, ProfileInfo};
+use bunsin_core::search::{TermQuery, term_query};
 use rusqlite::Connection;
+use rusqlite::types::FromSql;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -35,6 +40,28 @@ pub enum StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 pub(crate) const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// For each term, the keys of the rows that match it. `match_sql` and `like_sql` take the
+/// argument of `search::term_query` as `?1`.
+pub(crate) fn term_hits<K: FromSql + Ord>(
+    db: &Connection,
+    terms: &[String],
+    match_sql: &str,
+    like_sql: &str,
+) -> Result<Vec<BTreeSet<K>>> {
+    terms
+        .iter()
+        .map(|term| {
+            let (sql, arg) = match term_query(term) {
+                TermQuery::Match(phrase) => (match_sql, phrase),
+                TermQuery::Like(pattern) => (like_sql, pattern),
+            };
+            let mut statement = db.prepare_cached(sql)?;
+            let rows = statement.query_map([arg], |row| row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<BTreeSet<K>>>()?)
+        })
+        .collect()
+}
 
 /// An access token as the operator lists it. The token value is not stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
