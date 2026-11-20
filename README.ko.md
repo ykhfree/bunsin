@@ -900,7 +900,7 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 - 질문을 처리하며 agent가 제안한 페이지 변경은 `notes.auto_apply`가 켜져 있어도 언제나 소유자를 기다립니다.
 - **endpoint**는 MCP 서버(streamable HTTP, 무상태)이고 주소는 `<리스너 URL>/agents/<프로필>/mcp`입니다. 도구는 둘입니다.
   `ask {question}`은 즉시 `{request_id, pending_approval: true}`를 돌려줍니다.
-  `get_request {request_id}`는 `{request_id, status, answer?}`를 돌려줍니다. status는 `working`, `pending_approval`, `answered`, `declined`, `failed` 중 하나입니다.
+  `get_request {request_id}`는 `{request_id, status, answer?}`를 돌려줍니다. status는 `working`, `pending_approval`, `answered`, `declined`, `failed`, `canceled`(호출자가 A2A로 취소함) 중 하나입니다.
   호출자는 소유자의 결정만 봅니다. `declined`는 소유자가 항목을 기각했다는 뜻이고, `failed`는 승인한 답을 전하지 못했다는 뜻입니다.
   agent가 답하지 않으면 소유자에게 기각할 항목이 생기고, 호출자는 소유자가 결정할 때까지 `pending_approval`을 봅니다.
   그렇지 않으면 질문이 agent의 선택을 읽은 내용에 따르게 만들어, 호출자가 그 내용을 알아낼 수 있기 때문입니다.
@@ -966,6 +966,54 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
   항목마다 identifier, 항목을 싣는 리스너, catalog가 항목을 빼는 이유(예: 운영자가 더 이상 허용하지 않는 publisher 도메인), 경고도 보여 줍니다.
   `dns` 줄은 DNS 글입니다.
 - 아직 만들지 않은 것: 호출자용 OAuth.
+
+#### A2A로 묻기
+
+endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼져 있습니다. `inbound`에 `"a2a": true`를 넣으면 켜집니다.
+그러면 MCP endpoint를 제공하는 리스너가 A2A도 제공합니다.
+
+- **주소:** `POST <리스너 URL>/agents/<프로필>/a2a`. 호출자는 같은 호출자 token을 보냅니다: `Authorization: Bearer <호출자 token>`.
+- **Agent Card:** `GET <리스너 URL>/agents/<프로필>/a2a/agent-card.json`(`application/json`, token 불필요).
+  제목(없으면 프로필 ID), 설명, endpoint URL, 보안 방식 `callerToken`(HTTP Bearer), skill `ask` 하나를 담습니다.
+  skill의 예는 ARD 항목의 대표 질문입니다. token과 소유자 이름은 담지 않습니다.
+  `/.well-known/agent-card.json`은 두지 않습니다. 그 주소는 domain마다 agent 하나만 허용하기 때문입니다.
+- **버전:** 헤더 `A2A-Version: 1.0` 또는 query parameter `A2A-Version=1.0`을 보냅니다. 1.0만 받습니다. `1.0.2` 같은 patch 번호는 보지 않습니다.
+  버전이 없으면 0.3으로 봅니다(A2A §3.6.2). 그래서 버전 없는 호출은 `-32009`를 받습니다.
+- **SendMessage에는 `"configuration": {"returnImmediately": true}`가 필요합니다.** 이 값을 보내지 않는 client는 `-32004`(UnsupportedOperationError)를 받습니다.
+  이 값이 없으면 A2A는 task가 끝날 때까지 호출이 기다려야 한다고 정하고(§3.2.2), 소유자의 승인은 며칠 걸릴 수 있습니다.
+  그러니 이 값을 보내고, `GetTask`로 상태를 다시 읽습니다.
+
+  ```json
+  {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+    "message": {"role": "ROLE_USER", "messageId": "msg-1", "parts": [{"text": "When do we deploy?"}]},
+    "configuration": {"returnImmediately": true}}}
+  ```
+
+- **메시지:** role은 `ROLE_USER`, `messageId`가 있어야 하고, text part만 받습니다(media type이 없거나 `text/*`). 서버는 text part들을 줄바꿈으로 잇습니다.
+  다른 part는 `-32005`를 받고, 서버는 `url` part를 가져오지 않습니다. `contextId`는 선택입니다(보이는 ASCII 1~128자). 없으면 context는 task ID입니다.
+  agent는 같은 context의 앞 질문을 보지 않습니다. `taskId`가 있는 메시지는 `-32004`를 받습니다. 기다리는 질문에 글을 더하면 소유자가 승인하는 질문이 바뀌기 때문입니다.
+  같은 호출자의 같은 `messageId`는 처음 task를 돌려주고 한 번만 셉니다.
+- **task 상태**는 `get_request`처럼 소유자의 결정만 보여 줍니다.
+
+  | 요청 상태 | task 상태 | task가 담는 것 |
+  |---|---|---|
+  | `working`, `pending_approval` | `TASK_STATE_WORKING` | 고정 문구 "The owner of this agent approves every answer. Poll GetTask."와 질문이 도착한 시각 |
+  | `answered` | `TASK_STATE_COMPLETED` | artifact `answer`: 소유자가 승인한 글(AI 표시와 소유자의 수정 포함) |
+  | `declined` | `TASK_STATE_REJECTED` | 고정 문구와 소유자가 결정한 시각 |
+  | `failed` | `TASK_STATE_FAILED` | 고정 문구 |
+  | `canceled` | `TASK_STATE_CANCELED` | 취소한 시각 |
+
+  task에는 history와 agent가 쓴 글이 없습니다. 소유자가 결정하기 전에는 시각이 질문이 도착한 시각으로 남습니다.
+  서버는 `INPUT_REQUIRED`와 `AUTH_REQUIRED`를 쓰지 않습니다. 두 상태는 client에게 행동을 요구하지만, 소유자의 승인은 agent 안의 일입니다.
+- **메서드:** `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`. `ListTasks`는 그 호출자의 task만 보여 줍니다. MCP로 물은 질문도 포함하고(최근 500개), 상태 시각이 최근인 것부터입니다.
+  `pageSize`(1~100, 기본 50), `pageToken`, `status`, `contextId`, `statusTimestampAfter`, `includeArtifacts`를 받습니다.
+  `SendStreamingMessage`, `SubscribeToTask`, `GetExtendedAgentCard`는 `-32004`, push 알림 메서드 넷은 `-32003`, 그 밖의 메서드는 `-32601`을 받습니다.
+- **CancelTask**는 그 질문의 기다리는 항목을 승인함에서 거둡니다. 이것은 소유자의 기각으로 세지 않습니다. 취소된 task를 다시 취소하면 같은 task를 돌려줍니다.
+  완료, 기각, 실패한 task는 `-32002`를 받습니다. 소유자가 같은 순간에 답을 승인하면 취소가 이기고, 서버는 답을 보내지 않습니다.
+- **한도**는 MCP와 같습니다. `SendMessage`는 `ask`처럼 셉니다(호출자당 시간당 20개, 처리하지 않은 질문 50개).
+  `GetTask`, `ListTasks`, `CancelTask`는 `get_request`의 1분 120번을 함께 씁니다. 한도를 넘으면 `-32000`과 이유 `RATE_LIMIT_EXCEEDED`를 받습니다.
+  token, `Host`, 본문 크기, 동시 요청 검사는 MCP와 같습니다(`401`, `403`, `413`, `503`). JSON-RPC 오류는 HTTP 200으로 옵니다.
+  없는 task와 다른 호출자의 task는 같은 `-32001`을 받습니다.
 
 ### agent와 일하기
 

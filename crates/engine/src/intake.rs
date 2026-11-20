@@ -11,20 +11,22 @@ use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::ToolHint;
 use bunsin_core::event::{Channel, InboundEvent};
 use bunsin_core::inbound::{
-    Asked, INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS, MAX_QUESTION_CHARS, REPLY_TEXT, REPLY_TOOL,
-    RequestState, is_inbound_tool, reply_description, reply_schema, request_status,
+    Asked, CallerRequest, INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS, MAX_QUESTION_CHARS, REPLY_TEXT,
+    REPLY_TOOL, RequestState, RequestStatus, is_inbound_tool, reply_description, reply_schema, request_status,
 };
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::privacy::RedactionCounts;
 use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{Caller, InboxBody, InboxItem};
-use bunsin_store::ProfileStore;
+use bunsin_store::{IntakeMessage, IntakeRow, ProfileStore};
 use serde_json::json;
 
 /// How many stored events of one profile one drain hands to the agent.
 const DRAIN_BATCH: u32 = 10;
 /// The wait before the next try of a failed event, per try made.
 const RETRY_STEP_SECS: i64 = 60;
+/// How many of a caller's newest requests `caller_requests` returns.
+pub const MAX_LISTED_REQUESTS: u32 = 500;
 
 impl Engine {
     /// The reply tool for an inbound event with a rule for it. Other events never see it.
@@ -88,10 +90,51 @@ impl Engine {
 
     /// Stores a caller's question as an event for the agent and returns its request ID at once.
     pub fn ask(&self, caller: &Caller, question: &str) -> ApiResult<Asked> {
+        let stored = self.store_question(caller, question, IntakeMessage::default(), "mcp")?;
+        Ok(Asked {
+            request_id: stored.request_id,
+            pending_approval: true,
+        })
+    }
+
+    /// Stores the question of an A2A message like `ask`. A message ID that this caller sent before
+    /// returns the request of the first message and counts nothing, so a resent message is no new question.
+    pub fn send_message(
+        &self,
+        caller: &Caller,
+        question: &str,
+        message_id: &str,
+        context_id: Option<&str>,
+    ) -> ApiResult<CallerRequest> {
+        let message = IntakeMessage {
+            message_id: Some(message_id),
+            context_id,
+        };
+        self.store_question(caller, question, message, "a2a")
+    }
+
+    fn store_question(
+        &self,
+        caller: &Caller,
+        question: &str,
+        message: IntakeMessage<'_>,
+        protocol: &str,
+    ) -> ApiResult<CallerRequest> {
         let store = self.store(&caller.profile)?;
         let config = Self::config(&store)?;
         if !config.inbound.enabled {
             return Err(ApiError::NotAllowed("this agent takes no questions".into()));
+        }
+        let sent_before = |store: &ProfileStore| -> ApiResult<Option<IntakeRow>> {
+            match message.message_id {
+                Some(id) => store
+                    .caller_message_intake(INBOUND_SOURCE, caller.id, id)
+                    .map_err(store_error),
+                None => Ok(None),
+            }
+        };
+        if let Some(row) = sent_before(&store)? {
+            return Self::caller_view(&store, row);
         }
         let question = question.trim();
         if question.is_empty() || question.chars().count() > MAX_QUESTION_CHARS {
@@ -130,32 +173,109 @@ impl Engine {
         // The filter runs before the question is stored, so removed text is in no table.
         let mut counts = RedactionCounts::new();
         let event = Self::redact_event(&Self::redactor(&config)?, event, &mut counts);
-        store
-            .add_intake(INBOUND_SOURCE, &request_id, Some(caller.id), &event, now)
+        let stored = store
+            .add_message_intake(INBOUND_SOURCE, &request_id, Some(caller.id), message, &event, now)
             .map_err(store_error)?;
-        let detail = json!({"request": request_id, "caller": caller.id, "redacted": counts});
+        if !stored {
+            // A send of the same message at the same time stored its row first.
+            return match sent_before(&store)? {
+                Some(row) => Self::caller_view(&store, row),
+                None => Err(internal("the question was not stored")),
+            };
+        }
+        let detail = json!({"request": request_id, "caller": caller.id, "redacted": counts, "protocol": protocol});
         self.audit(&store, "inbound_asked", Some(&event.dedupe_key()), detail)?;
-        Ok(Asked {
-            request_id,
-            pending_approval: true,
+        let row = Self::own_row(&store, caller, &request_id)?;
+        Self::caller_view(&store, row)
+    }
+
+    /// The intake row of a request of this caller. Another caller's request and a request that does
+    /// not exist give the same error.
+    fn own_row(store: &ProfileStore, caller: &Caller, request_id: &str) -> ApiResult<IntakeRow> {
+        store
+            .caller_intake(INBOUND_SOURCE, request_id, caller.id)
+            .map_err(store_error)?
+            .ok_or_else(|| ApiError::NotFound(format!("request `{request_id}` of this caller")))
+    }
+
+    /// What the caller may see of a stored request. Only `request_status` decides it.
+    fn caller_view(store: &ProfileStore, row: IntakeRow) -> ApiResult<CallerRequest> {
+        let items = store.inbox_for_event(&row.event_key).map_err(store_error)?;
+        let found = request_status(row.outcome.as_deref(), row.canceled_at, &items);
+        Ok(CallerRequest {
+            context_id: row.context_id.unwrap_or_else(|| row.delivery_id.clone()),
+            request_id: row.delivery_id,
+            status: found.status,
+            answer: found.answer,
+            // Before a decision, the time the question arrived: the agent's own work shows no time.
+            status_at: found.decided_at.unwrap_or(row.received_at),
         })
     }
 
-    /// The state of a request of this caller. Another caller's request and a request that does not
-    /// exist give the same error.
+    /// The state of a request of this caller, as `get_request` shows it.
     pub fn request(&self, caller: &Caller, request_id: &str) -> ApiResult<RequestState> {
-        let store = self.store(&caller.profile)?;
-        let row = store
-            .caller_intake(INBOUND_SOURCE, request_id, caller.id)
-            .map_err(store_error)?
-            .ok_or_else(|| ApiError::NotFound(format!("request `{request_id}` of this caller")))?;
-        let items = store.inbox_for_event(&row.event_key).map_err(store_error)?;
-        let (status, answer) = request_status(row.outcome.as_deref(), &items);
+        let found = self.caller_request(caller, request_id)?;
         Ok(RequestState {
-            request_id: request_id.to_owned(),
-            status,
-            answer,
+            request_id: found.request_id,
+            status: found.status,
+            answer: found.answer,
         })
+    }
+
+    /// A request of this caller. Another caller's request and a request that does not exist give
+    /// the same error.
+    pub fn caller_request(&self, caller: &Caller, request_id: &str) -> ApiResult<CallerRequest> {
+        let store = self.store(&caller.profile)?;
+        let row = Self::own_row(&store, caller, request_id)?;
+        Self::caller_view(&store, row)
+    }
+
+    /// The newest requests of this caller, the newest arrival first, at most `MAX_LISTED_REQUESTS`.
+    /// The questions that the caller asked over MCP are in it too.
+    pub fn caller_requests(&self, caller: &Caller) -> ApiResult<Vec<CallerRequest>> {
+        let store = self.store(&caller.profile)?;
+        store
+            .caller_intakes(INBOUND_SOURCE, caller.id, MAX_LISTED_REQUESTS)
+            .map_err(store_error)?
+            .into_iter()
+            .map(|row| Self::caller_view(&store, row))
+            .collect()
+    }
+
+    /// Cancels a request of this caller that no decision ended yet, and returns the request.
+    /// A request that a decision or a cancel ended stays as it is.
+    /// The draft and pending items of its event are withdrawn. An answer that the owner approved
+    /// already is stopped when it runs (`answer_request`).
+    pub fn cancel_request(&self, caller: &Caller, request_id: &str) -> ApiResult<CallerRequest> {
+        let store = self.store(&caller.profile)?;
+        let row = Self::own_row(&store, caller, request_id)?;
+        let current = Self::caller_view(&store, row.clone())?;
+        if !matches!(current.status, RequestStatus::Working | RequestStatus::PendingApproval) {
+            return Ok(current);
+        }
+        if store.cancel_intake(row.id, self.now()).map_err(store_error)? {
+            let withdrawn = self.withdraw_items(&store, &row.event_key)?;
+            let detail = json!({"request": request_id, "caller": caller.id, "withdrawn": withdrawn});
+            self.audit(&store, "inbound_canceled", Some(&row.event_key), detail)?;
+        }
+        let row = Self::own_row(&store, caller, request_id)?;
+        Self::caller_view(&store, row)
+    }
+
+    /// Moves the draft and pending items of an event to `rejected` and returns their IDs.
+    /// The caller withdrew them, so no rejection of the owner is counted (`reject_item` counts one).
+    fn withdraw_items(&self, store: &ProfileStore, event_key: &str) -> ApiResult<Vec<i64>> {
+        let mut withdrawn = Vec::new();
+        for item in store.inbox_for_event(event_key).map_err(store_error)? {
+            if matches!(item.state, ApprovalState::Draft | ApprovalState::Pending)
+                && store
+                    .move_inbox_state(item.id, item.state, ApprovalState::Rejected, self.now())
+                    .map_err(store_error)?
+            {
+                withdrawn.push(item.id);
+            }
+        }
+        Ok(withdrawn)
     }
 
     /// Hands the stored events that are due to the agent, for every profile whose kill switch is off.
@@ -179,6 +299,8 @@ impl Engine {
         for row in store.due_intake(self.now(), DRAIN_BATCH).map_err(store_error)? {
             let from_caller = row.event.source == INBOUND_SOURCE;
             let outcome = self.ingest_event(profile, row.event).await;
+            // The caller may cancel while the agent works. Then what the agent made is withdrawn.
+            let canceled = from_caller && self.withdraw_if_canceled(&store, &row.event_key)?;
             match outcome {
                 Ok(Outcome::Failed { .. }) | Err(_) => {
                     // A failed event stays open in `events`, so the next try is a retry there. The try after
@@ -200,7 +322,11 @@ impl Engine {
                     let word = word["outcome"].as_str().unwrap_or("handled").to_owned();
                     // The caller sees only the owner's decisions. If the agent gave no answer, the owner
                     // decides; otherwise the LLM's choice after its reads would tell the caller one bit.
-                    if from_caller && matches!(outcome, Outcome::Ignored | Outcome::Denied { .. } | Outcome::Recorded) {
+                    // A canceled question needs no decision of the owner.
+                    if from_caller
+                        && !canceled
+                        && matches!(outcome, Outcome::Ignored | Outcome::Denied { .. } | Outcome::Recorded)
+                    {
                         let summary = format!(
                             "The agent gave no answer to a caller's question ({word}). Dismiss this item to \
                              decline the question."
@@ -223,13 +349,42 @@ impl Engine {
         Ok(())
     }
 
+    /// Withdraws the items of a question's event if its caller canceled it. Returns true if so.
+    fn withdraw_if_canceled(&self, store: &ProfileStore, event_key: &str) -> ApiResult<bool> {
+        let row = store.intake_for_event(INBOUND_SOURCE, event_key).map_err(store_error)?;
+        let Some(row) = row.filter(|row| row.canceled_at.is_some()) else {
+            return Ok(false);
+        };
+        let withdrawn = self.withdraw_items(store, event_key)?;
+        if !withdrawn.is_empty() {
+            let detail = json!({"request": row.delivery_id, "withdrawn": withdrawn});
+            self.audit(store, "inbound_canceled", Some(event_key), detail)?;
+        }
+        Ok(true)
+    }
+
     /// Runs an approved answer that is `executing`: it marks the caller's request as answered.
     /// No connector is called. The caller reads the text with `get_request`.
+    /// If the caller canceled the request, the answer fails and goes nowhere.
     pub(crate) fn answer_request(&self, ctx: &Ctx, item: &InboxItem) -> ApiResult<Outcome> {
         let store: &ProfileStore = &ctx.store;
-        if !store.has_intake(INBOUND_SOURCE, &item.event_key).map_err(store_error)? {
+        let row = store
+            .intake_for_event(INBOUND_SOURCE, &item.event_key)
+            .map_err(store_error)?;
+        let Some(row) = row else {
             let error = "no inbound request belongs to this answer".to_owned();
             return self.execution_failed(ctx, item, REPLY_TOOL, error);
+        };
+        if row.canceled_at.is_some() {
+            store
+                .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
+                .map_err(store_error)?;
+            let detail = json!({"inbox_id": item.id, "request": row.delivery_id});
+            self.audit(store, "inbound_reply_canceled", Some(&item.event_key), detail)?;
+            return Ok(Outcome::ExecutionFailed {
+                inbox_id: item.id,
+                error: "the caller canceled the request, so the answer was not sent".into(),
+            });
         }
         store
             .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Executed, self.now())

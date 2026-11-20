@@ -30,6 +30,10 @@ getrandom = "0.3"
 url = "2"
 # The inbound endpoint: a stateless MCP server on the outer listeners. The same rmcp as the connectors.
 rmcp = { version = "=3.10.0", default-features = false, features = ["auth", "server", "transport-streamable-http-server"] }
+# The A2A v1.0 wire types of the inbound A2A endpoint (a2aproject/a2a-rs). It is 0.x, so the version is exact.
+a2a-lf = "=0.4.2"
+# The time type of the A2A task status. The same chrono as a2a-lf.
+chrono = { version = "0.4", default-features = false }
 # The versions that rmcp uses. The OAuth client of connectors is built with them.
 async-trait = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

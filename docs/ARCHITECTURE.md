@@ -449,7 +449,7 @@
 
 ## 7. 인바운드 호출 인터페이스
 
-- v1은 MCP 서버 카드를 쓴다. A2A는 두 번째 프로토콜 스택이 되므로 미룬다.
+- 프로토콜은 둘이다. MCP endpoint와 server card가 기본이고, 소유자가 `inbound.a2a`를 켜면 같은 리스너에 A2A v1.0 endpoint와 Agent Card가 더해진다(아래 "A2A endpoint").
 - 도구는 둘이다: `ask`는 즉시 `{request_id, pending_approval}`을 돌려주고, `get_request(id)`가 결과를 돌려준다.
 - 인바운드 요청은 신뢰하지 않는 데이터로 수신 단계에 들어간다. 승인함을 우회하지 않는다.
   - 질문을 처리하다 나온 쓰기와 삭제는 규칙이 `autonomous`여도 승인을 기다린다. 엔진은 이벤트의 글이 아니라 `intake` 행으로 질문인지 판단한다.
@@ -458,7 +458,11 @@
 - **설정** `inbound: {enabled(기본 false), scope(internal | public, 기본 internal), title?, description}`(`bunsin_core::inbound`).
   켜져 있으면 description은 1~100자, title은 1~100자이다. server card의 스키마가 100자까지만 받기 때문이다(설계의 500자에서 바꿈).
   `set_profile_config`가 endpoint를 꺼짐에서 켜짐으로 바꾸고 답 규칙이 없으면 `{class: write, tier: approve, outgoing_text: {arg: "text"}}`를 넣는다.
-- **intake**(agent.db): `intake(id, channel, delivery_id, caller_id, event, event_key, received_at, attempts, next_try_at, outcome, UNIQUE(channel, delivery_id))`.
+- **intake**(agent.db): `intake(id, channel, delivery_id, caller_id, event, event_key, received_at, attempts, next_try_at, outcome, context_id, message_id, canceled_at, UNIQUE(channel, delivery_id))`
+  와 `UNIQUE INDEX (caller_id, message_id) WHERE message_id IS NOT NULL`.
+  - 뒤의 세 열은 A2A 것이다. 옛 표는 열기 때 `pragma_table_info`로 확인해 열을 더하고, 그 뒤에 index를 만든다(`intake::migrate`).
+  - 취소된 행은 처리 대상(`due_intake`)도, 열린 질문(`open_intake_count`)도 아니다. 시간당 한도에는 계속 센다.
+    `finish_intake`가 `outcome`을 조건 없이 덮으므로, 취소는 자기 열 `canceled_at`에 쓴다(처음 시각만).
   - `ask`는 질문을 필터를 거친 `InboundEvent`(source `bunsin.inbound`, external_id = request ID, author `caller:<label>`, channel outside)로 저장하고 바로 답한다.
     `ingest`는 LLM을 기다리기 때문이다. request ID는 `req_`와 OS 난수 16바이트의 hex이다.
   - 한도: 질문 1~4,000자, 호출자당 시간당 20개, 프로필당 처리하지 않은 질문 50개. 한도는 `intake` 행으로 세므로 재시작 뒤에도 유지된다.
@@ -466,8 +470,10 @@
     행마다 `ingest_event`를 부른다. `Failed`나 `Err`이면 `60초 × 시도 수` 뒤에 다시 한다(이벤트는 `events`에서 열린 채이다).
     `MAX_EVENT_ATTEMPTS`+1번째 호출은 포기 항목을 넣고 `Failed`를 돌려주므로, 그 뒤 `outcome`을 `failed`로 쓴다. 그 밖의 결과는 `Outcome`의 이름이 `outcome`이 된다.
   - SIGTERM이면 intake task도 폴링 task처럼 진행 중인 주기를 끝내고 멈춘다(`Poller::stop`).
-- **요청 상태**(`request_status`, 처음 맞는 규칙): `outcome`이 없으면 `working`. 항목이 failed이면 `failed`.
+- **요청 상태**(`request_status(outcome, canceled_at, items)`, 처음 맞는 규칙): `canceled_at`이 있으면 `canceled`. `outcome`이 없으면 `working`. 항목이 failed이면 `failed`.
   답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
+  - 같은 함수가 결정 시각(`decided_at`)도 정한다: 취소 시각, 또는 상태를 정한 항목의 `updated_at`. 결정이 없으면 없다.
+    A2A가 이 시각을 보이고, 없으면 질문이 도착한 시각(`received_at`)을 보인다. 그래서 agent가 일을 끝낸 시각은 어디에도 없다.
   - 호출자는 소유자의 결정만 본다. agent의 선택(무시, 거부된 호출, 기록만, 포기)은 `pending_approval`로 보인다.
     질문이 그 선택을 agent가 읽은 내용에 따르게 만들면, 호출자가 승인 없이 1비트씩 알아내기 때문이다.
   - 그래서 agent가 답하지 않은 질문(ignored, denied, recorded)에는 넘김 항목이 생긴다. 소유자가 기각하면 `declined`가 된다.
@@ -479,14 +485,50 @@
     이유: 자율 답은 호출자 token을 읽기 도구 전체에 대한 질의 창구로 만든다. 7절 "승인함을 우회하지 않는다"를 지킨다.
   - 규칙은 class `write`, outgoing text `{arg: "text"}`여야 한다. 다른 `bunsin.inbound/*` 도구는 없다.
   - `decide`는 이 도구에 pin 검사를 하지 않는다(명세가 코드에 있다). `execute`는 connector를 부르지 않는다. intake 행이 있는지 보고 항목을 `executed`로 옮긴다(감사 `inbound_answered`).
+    행이 취소되었으면 항목을 `failed`로 옮기고 감사 `inbound_reply_canceled`를 남기며, 답을 보내지 않는다. 취소는 `approved`·`executing` 항목을 옮기지 못하기 때문이다(취소와 승인이 겹치면 취소가 이긴다).
   - 그래서 AI 표시, 정지 스위치, 수정의 교정 기록, 1회 실행이 다른 쓰기와 같다. 기각: 새 `InboxBody` variant(CLI와 app이 전부 match한다).
 - 인바운드 질문에서 나온 notes 변경은 자동 반영하지 않는다(channel outside, source 검사 둘 다).
+- **A2A endpoint**(daemon `a2a.rs`, A2A v1.0 JSON-RPC binding): `POST /agents/{p}/a2a`, `GET /agents/{p}/a2a/agent-card.json`.
+  - 설정 `inbound.a2a`(기본 false). `InboundConfig::a2a_served_on(L) = a2a && served_on(L)`이다. 새 공개 표면은 소유자가 켠다.
+    `/.well-known/agent-card.json`은 domain당 agent 하나를 전제하므로 두지 않는다. 발견은 ARD 항목과 직접 설정이다(A2A §8.2).
+  - 자료형은 `a2a-lf =0.4.2`(a2aproject/a2a-rs)이고, JSON-RPC 분기는 axum으로 직접 한다. 기각: `a2a-server-lf`(자기 task 저장소와 실행 모델), jsonrpsee(자체 서버 스택).
+    `a2a::Task`는 `contextId`를 요구하지만 A2A §4.1.1에서는 선택이다. endpoint는 task를 쓰기만 하고 언제나 context를 넣으므로 crate 자료형을 그대로 쓴다.
+  - 검사 순서: ① MCP와 같은 미들웨어(`inbound::admit`): `{p}`의 호출자 token, `a2a_served_on`, 리스너당 동시 64. 어긋나면 MCP와 같은 401(`WWW-Authenticate: Bearer`).
+    ② `Host`가 리스너 host가 아니면 403, 본문 64 KiB 초과는 413. rmcp가 MCP에서 하는 일을 직접 한다.
+    ③ JSON이 아니면 -32700. 요청 객체 하나(`jsonrpc: "2.0"`, `id`, `method`)가 아니면 -32600(batch와 notification 포함).
+    ④ 버전: `A2A-Version` 헤더, 없으면 같은 이름의 query parameter(§3.6.1). Major.Minor만 보고 `1.0`만 받는다. 빈 값은 0.3이다(§3.6.2). 그 밖은 -32009, ErrorInfo `supportedVersions: "1.0"`.
+    ⑤ 분기. JSON-RPC 오류도 HTTP 200이다. 오류의 `data`는 `google.rpc.ErrorInfo` 하나이다(§9.5).
+  - 메서드: `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`. `SendStreamingMessage`, `SubscribeToTask`, `GetExtendedAgentCard`는 -32004, push 설정 넷은 -32003, 모르는 메서드는 -32601(§3.3.4).
+  - **SendMessage**: `configuration.returnImmediately: true`가 아니면 -32004이다. §3.2.2는 이 값이 없으면 끝 상태까지 기다리라고 하고, 승인은 며칠 걸린다.
+    이 규칙은 `a2a.rs`의 함수 `refuse_blocking`과 상수 `BLOCKING_REFUSED`에만 있다.
+    `role`이 `ROLE_USER`가 아니거나 `messageId`가 비면 -32602. text part만 읽는다(`mediaType`이 없거나 `text/*`). 다른 part는 -32005이고 `url`은 가져오지 않는다.
+    text들은 줄바꿈으로 잇는다. `acceptedOutputModes`에 `text/plain`·`text/*`·`*/*`가 없으면 -32005. push 설정이 있으면 -32003.
+    `taskId`가 있으면 이 호출자의 task가 아닐 때 -32001, 맞으면 -32004이다. 진행 중인 질문에 글을 더하면 소유자가 보는 질문이 바뀌기 때문이다.
+    `contextId`(1~128자의 보이는 ASCII, 아니면 -32602)는 저장한다. 없으면 context는 request ID이다. 같은 context의 앞 질문은 agent에게 주지 않는다(§3.4.1의 SHOULD를 따르지 않는다).
+    나머지는 `ask`와 같다(engine `send_message`): 필터, 한도, intake 깨우기, 감사 `inbound_asked`(`protocol: "a2a"`, MCP는 `"mcp"`). 같은 호출자의 같은 `messageId`는 처음 task를 돌려주고 한도를 다시 세지 않는다(§3.3.1).
+  - **Task**는 `request_status`의 출력(core `CallerRequest`)만으로 만든다. `working`과 `pending_approval`은 `TASK_STATE_WORKING`과 고정 문구
+    "The owner of this agent approves every answer. Poll GetTask."이고, `answered`는 `COMPLETED`와 artifact `answer`, `declined`는 `REJECTED`, `failed`는 `FAILED`(둘 다 고정 문구), `canceled`는 `CANCELED`이다.
+    `INPUT_REQUIRED`와 `AUTH_REQUIRED`는 쓰지 않는다: 두 상태는 클라이언트에게 행동을 넘기지만(§4.1.3, §7.6), 소유자 승인은 agent 안의 일이다.
+    `history`는 돌려주지 않는다(저장된 질문은 필터를 거친 글이라 소유자의 필터를 드러낸다). agent가 쓴 글과 agent가 끝낸 시각은 어디에도 없다. 상태 시각은 요청 상태의 결정 시각, 없으면 도착 시각이다.
+  - **ListTasks**: 이 호출자의 task만(MCP로 물은 것 포함, 최근 500개), 상태 시각 내림차순(같으면 request ID). `pageSize` 1~100(기본 50, 밖이면 -32602).
+    `pageToken`은 커서 `<상태 시각>:<request ID>`이다. 필터는 `status`, `contextId`, `statusTimestampAfter`(이상)이다. `includeArtifacts`가 참이 아니면 `artifacts`를 뺀다. 마지막 쪽의 `nextPageToken`은 `""`이다.
+  - **CancelTask**: 없거나 남의 task는 -32001. `COMPLETED`·`REJECTED`·`FAILED`는 -32002. `CANCELED`는 같은 task를 다시 돌려준다.
+    §3.3.1은 취소가 멱등이라고 하고, §3.1.5는 "already canceled"도 -32002의 예로 든다. 멱등을 고른 이유: 응답을 잃은 client의 재시도가 오류가 되지 않는다.
+    `WORKING`이면 engine `cancel_request`가 `canceled_at`을 쓰고, 이벤트의 `draft`·`pending` 항목을 `rejected`로 옮기고(`reject_item`은 쓰지 않는다: 소유자의 기각으로 센다), 감사 `inbound_canceled`를 남긴다.
+    drain 중의 취소는 `drain_profile`이 `ingest_event` 뒤에 본다. agent가 만든 항목을 같은 방법으로 옮기고, 답하지 않은 질문의 넘김 항목은 만들지 않는다.
+  - **한도**: `GetTask`·`ListTasks`·`CancelTask`는 MCP `get_request`와 같은 `may_read`(호출자당 분당 120, 같은 리스너 state)를 쓴다. `SendMessage`는 `ask`와 같은 intake 한도이다.
+    한도 초과는 -32000과 ErrorInfo `RATE_LIMIT_EXCEEDED`이다. `ApiError`는 `Invalid`→-32602, `NotFound`→-32001, `NotAllowed`→-32000, 그 밖→-32603(고정 문구)이다.
+  - **Agent Card**(인증 없음, `a2a_served_on`이 아니면 404): `application/json`, CORS `*`, `max-age=300`, `ETag`(server card와 같은 `card_response`).
+    `name`은 title 또는 프로필 ID, `supportedInterfaces`는 JSONRPC 1.0 하나, `capabilities`는 셋 다 false, 보안은 `callerToken`(HTTP Bearer), skill은 `ask` 하나(tags `["questions"]`, examples는 ARD 대표 질문). token과 소유자 이름은 없다.
+  - 적합성: `crates/daemon/tests/a2a.rs`가 §6·§8.5·§9의 JSON 예를 crate 자료형으로 왕복하고, 실제로 내는 Agent Card와 Task를 A2A v1.0.0 JSON schema 사본(`tests/fixtures/a2a-v1.0.0.schema.json`)으로 검사한다.
+    이 schema는 A2A 저장소가 커밋하지 않는 비규범 빌드 산출물이고(`specification/json/README.md`), `required`가 없다. 그래서 필수 필드와 빈 배열은 테스트가 따로 본다.
 - **MCP endpoint** `POST /agents/{p}/mcp`(daemon `inbound.rs`): rmcp `StreamableHttpService`, 세션 없음(`NeverSessionManager`, legacy session mode off, JSON 응답).
   - 무상태인 이유: 열린 stream은 폐기된 token보다 오래 살고 종료 대기 300초를 붙잡는다. POST 하나가 응답 하나이고, GET은 405이다.
   - `route_layer`의 미들웨어가 먼저 확인한다: `Bearer` 값이 `caller_tokens`의 유효한 token이고, 그 프로필이 경로의 `{p}`이고, `served_on`이다.
-    하나라도 아니면 같은 본문의 401이다. 통과하면 `Caller`를 request extension에 넣고, 도구 handler가 `http::request::Parts`의 extension에서 읽는다.
+    하나라도 아니면 같은 본문의 401(`WWW-Authenticate: Bearer`)이다. 통과하면 `Caller`를 request extension에 넣고, 도구 handler가 `http::request::Parts`의 extension에서 읽는다.
   - rmcp 설정: `allowed_hosts`는 `--*-url`의 host 하나(다른 Host는 403, DNS rebinding 방어), 본문 64 KiB(넘으면 413).
   - 리스너당 동시 요청 64(semaphore, 넘으면 503). `get_request`는 호출자당 1분에 120번(메모리, 재시작하면 초기화). `ask`의 한도는 위의 intake 행으로 센다.
+    semaphore와 읽기 횟수는 리스너의 `Inbound` state 하나에 있고, A2A endpoint가 같은 state를 쓴다.
   - 도구 오류(검사 실패, 한도, 남의 ID)는 MCP tool 오류 결과이다. 내부 오류의 문구는 서버 내용을 담지 않는다.
   - `ask`가 성공하면 `Notify`로 intake task를 깨운다. 그래서 질문은 5초 tick을 기다리지 않는다.
   - 기각: token만으로 프로필 고르기. card와 ARD 항목은 프로필마다 URL이 필요하다.
@@ -1062,6 +1104,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
+| A2A v1.0 endpoint(JSON-RPC, Agent Card, 버전 검사, SendMessage·GetTask·ListTasks·CancelTask, 취소, messageId 중복 제거, MCP와 같은 한도) | 구현, 테스트 있음(core, store, 엔진, 서버). 서버 테스트는 실제 TCP에서 직접 만든 JSON-RPC 요청을 보낸다. 스펙 예의 왕복과 v1.0.0 JSON schema 검사를 통과한다. 다른 A2A client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구는 실행해 보지 않았다. |
 | ARD 도구(search·explore·list·resolve 내장 읽기 도구, referral 없음, domain 해석과 결속 규칙, JSON-LD 최소 전개, 제3자 주소 fetcher, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, ard, 서버, 창의 registry 목록 편집). 로컬 stub registry와 stub catalog로만 테스트. 도메인만 적은 해석은 서버 테스트가 loopback으로 닿지 못해(https 443) ard의 메모리 web으로만 테스트. 창에는 `ard_domains` 편집이 없다. |
 | ARD registry phase 1(운영자 플래그, `registry.db`, 자기 catalog 수집, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. 공식 conformance 도구는 실행해 보지 않았다. 외부 seed crawl은 phase 2이고 아직 없다. |

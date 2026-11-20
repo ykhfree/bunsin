@@ -308,6 +308,8 @@ pub enum RequestStatus {
     Declined,
     /// The agent could not handle the question.
     Failed,
+    /// The caller canceled the question before a decision ended it.
+    Canceled,
 }
 
 /// The reply of `get_request`.
@@ -319,32 +321,66 @@ pub struct RequestState {
     pub answer: Option<String>,
 }
 
-/// The status of a request from the outcome of its handling and the inbox items of its event.
-/// `outcome` is `None` while the agent has not handled it. The first rule that fits wins.
+/// A caller's request as the A2A endpoint shows it. It holds only the owner's decisions and the cancel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerRequest {
+    pub request_id: String,
+    /// The context that the caller gave with the question, or else the request ID.
+    pub context_id: String,
+    pub status: RequestStatus,
+    /// The approved answer, only for `answered`.
+    pub answer: Option<String>,
+    /// When the status began: the time of the decision, or the time the question arrived.
+    pub status_at: i64,
+}
+
+/// What `request_status` found for a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusFound {
+    pub status: RequestStatus,
+    /// The approved answer, only for `answered`.
+    pub answer: Option<String>,
+    /// When the decision that ended the request was made: the cancel, or the last change of the
+    /// deciding item. `None` while no decision ended it.
+    pub decided_at: Option<i64>,
+}
+
+/// The status of a request from the outcome of its handling, the time the caller canceled it and
+/// the inbox items of its event. `outcome` is `None` while the agent has not handled it.
+/// The first rule that fits wins.
 /// Past `working`, only the owner's decisions show. The agent's own choice (ignore, a refused
 /// call, giving up) shows as `pending_approval`: a caller could make that choice depend on what
 /// the agent read, and so learn it without the owner.
-pub fn request_status(outcome: Option<&str>, items: &[InboxItem]) -> (RequestStatus, Option<String>) {
+pub fn request_status(outcome: Option<&str>, canceled_at: Option<i64>, items: &[InboxItem]) -> StatusFound {
+    let found = |status, answer, decided_at| StatusFound {
+        status,
+        answer,
+        decided_at,
+    };
+    if canceled_at.is_some() {
+        return found(RequestStatus::Canceled, None, canceled_at);
+    }
     if outcome.is_none() {
-        return (RequestStatus::Working, None);
+        return found(RequestStatus::Working, None, None);
     }
     // Only an approved answer can fail in the run, so this state follows the owner's approval.
-    if items.iter().any(|item| item.state == ApprovalState::Failed) {
-        return (RequestStatus::Failed, None);
+    if let Some(item) = items.iter().find(|item| item.state == ApprovalState::Failed) {
+        return found(RequestStatus::Failed, None, Some(item.updated_at));
     }
     let answer = items.iter().find_map(|item| match &item.body {
-        InboxBody::ToolCall { tool, args } if tool == REPLY_TOOL && item.state == ApprovalState::Executed => {
-            args.get(REPLY_TEXT).and_then(Value::as_str).map(str::to_owned)
-        }
+        InboxBody::ToolCall { tool, args } if tool == REPLY_TOOL && item.state == ApprovalState::Executed => args
+            .get(REPLY_TEXT)
+            .and_then(Value::as_str)
+            .map(|text| (text.to_owned(), item.updated_at)),
         _ => None,
     });
-    if let Some(answer) = answer {
-        return (RequestStatus::Answered, Some(answer));
+    if let Some((answer, at)) = answer {
+        return found(RequestStatus::Answered, Some(answer), Some(at));
     }
-    if items.iter().any(|item| item.state == ApprovalState::Rejected) {
-        return (RequestStatus::Declined, None);
+    if let Some(item) = items.iter().find(|item| item.state == ApprovalState::Rejected) {
+        return found(RequestStatus::Declined, None, Some(item.updated_at));
     }
-    (RequestStatus::PendingApproval, None)
+    found(RequestStatus::PendingApproval, None, None)
 }
 
 #[cfg(test)]
@@ -360,7 +396,7 @@ mod tests {
             basis: Vec::new(),
             state,
             created_at: 0,
-            updated_at: 0,
+            updated_at: 500,
             autonomous: false,
             retry_of: None,
         }
@@ -390,7 +426,7 @@ mod tests {
     fn the_status_follows_the_first_rule_that_fits() {
         use ApprovalState::{Draft, Executed, Pending, Rejected};
         use RequestStatus::*;
-        let status = |outcome: Option<&str>, items: &[InboxItem]| request_status(outcome, items).0;
+        let status = |outcome: Option<&str>, items: &[InboxItem]| request_status(outcome, None, items).status;
         assert_eq!(status(None, &[reply("hi", Executed)]), Working);
         // The agent's own choices do not show: giving up, ignoring, a refused or recorded call.
         for outcome in ["failed", "ignored", "denied", "recorded"] {
@@ -412,8 +448,12 @@ mod tests {
             Failed
         );
         assert_eq!(
-            request_status(Some("pending_approval"), &[reply("Friday.", Executed)]),
-            (Answered, Some("Friday.".into()))
+            request_status(Some("pending_approval"), None, &[reply("Friday.", Executed)]),
+            StatusFound {
+                status: Answered,
+                answer: Some("Friday.".into()),
+                decided_at: Some(500)
+            }
         );
         assert_eq!(status(Some("pending_approval"), &[reply("a", Rejected)]), Declined);
         assert_eq!(
@@ -430,6 +470,50 @@ mod tests {
             Executed,
         );
         assert_eq!(status(Some("executed"), &[other]), PendingApproval);
+    }
+
+    #[test]
+    fn only_a_decision_has_a_time_and_it_is_the_time_of_the_deciding_item() {
+        use ApprovalState::{Draft, Executed, Pending, Rejected};
+        let at = |outcome: Option<&str>, items: &[InboxItem]| request_status(outcome, None, items).decided_at;
+        let mut late = escalation(Rejected);
+        late.updated_at = 900;
+        // The agent's work changes items, but no time shows until a decision.
+        assert_eq!(at(None, &[]), None);
+        assert_eq!(
+            at(Some("pending_approval"), &[reply("a", Pending), escalation(Draft)]),
+            None
+        );
+        assert_eq!(at(Some("ignored"), &[late.clone()]), Some(900));
+        // The executed answer decides, not a later rejected item.
+        assert_eq!(at(Some("executed"), &[reply("a", Executed), late.clone()]), Some(500));
+        let mut failed = escalation(ApprovalState::Failed);
+        failed.updated_at = 700;
+        assert_eq!(at(Some("executed"), &[late, failed]), Some(700));
+    }
+
+    #[test]
+    fn a_canceled_request_is_canceled_whatever_its_items() {
+        use ApprovalState::{Draft, Executed, Failed, Pending, Rejected};
+        let items = [
+            vec![],
+            vec![reply("Friday.", Executed)],
+            vec![escalation(Failed)],
+            vec![reply("No.", Rejected)],
+            vec![reply("a", Pending), escalation(Draft)],
+        ];
+        for outcome in [None, Some("executed"), Some("ignored")] {
+            for list in &items {
+                let found = request_status(outcome, Some(42), list);
+                let canceled = StatusFound {
+                    status: RequestStatus::Canceled,
+                    answer: None,
+                    decided_at: Some(42),
+                };
+                assert_eq!(found, canceled, "{outcome:?} {list:?}");
+            }
+        }
+        assert_eq!(serde_json::to_value(RequestStatus::Canceled).unwrap(), "canceled");
     }
 
     #[test]

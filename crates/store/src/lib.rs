@@ -4,7 +4,7 @@
 mod profile;
 mod registry;
 
-pub use profile::{EventStart, IntakeRow, LlmCall, ProfileStore, SealedSecret, WikiWrite};
+pub use profile::{EventStart, IntakeMessage, IntakeRow, LlmCall, ProfileStore, SealedSecret, WikiWrite};
 pub use registry::{IndexedRow, NewEntry, Refusal, RegistryStore, SourceKind, SourceStatus};
 
 use bunsin_core::records::{Caller, CallerToken, ProfileInfo};
