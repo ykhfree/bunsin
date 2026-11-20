@@ -62,6 +62,9 @@ pub struct InboundConfig {
     /// The entry of the endpoint in the ARD catalogs of the listeners. `None`: not listed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ard: Option<ArdListing>,
+    /// True if the listeners that serve the endpoint also serve it over A2A (JSON-RPC) with an Agent Card.
+    #[serde(default)]
+    pub a2a: bool,
 }
 
 /// How the endpoint is listed in `/.well-known/ard.json`. The identifier is
@@ -85,6 +88,12 @@ impl InboundConfig {
     /// and the ARD catalog use this one check.
     pub fn served_on(&self, listener: InboundScope) -> bool {
         self.enabled && reaches(self.scope, listener)
+    }
+
+    /// True if a listener of `listener` serves the A2A endpoint and its Agent Card: it serves the
+    /// endpoint, and the owner turned A2A on.
+    pub fn a2a_served_on(&self, listener: InboundScope) -> bool {
+        self.a2a && self.served_on(listener)
     }
 
     /// Refuses a title or a description that the server card cannot hold, and an ARD listing of an
@@ -304,6 +313,25 @@ mod tests {
         assert!(config(true, Public).served_on(Public));
         assert!(!config(false, Public).served_on(Internal));
         assert!(!config(false, Public).served_on(Public));
+    }
+
+    #[test]
+    fn a2a_is_served_only_where_the_endpoint_is_and_only_when_turned_on() {
+        use InboundScope::{Internal, Public};
+        let config = |enabled, scope, a2a| InboundConfig {
+            enabled,
+            scope,
+            a2a,
+            ..InboundConfig::default()
+        };
+        assert!(config(true, Public, true).a2a_served_on(Public));
+        assert!(config(true, Internal, true).a2a_served_on(Internal));
+        assert!(!config(true, Internal, true).a2a_served_on(Public));
+        assert!(!config(true, Public, false).a2a_served_on(Internal));
+        assert!(!config(false, Public, true).a2a_served_on(Internal));
+        // Settings from before this field load with A2A off.
+        let old: InboundConfig = serde_json::from_str(r#"{"enabled": true, "description": "x"}"#).unwrap();
+        assert!(!old.a2a);
     }
 
     #[test]

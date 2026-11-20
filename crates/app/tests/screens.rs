@@ -971,6 +971,7 @@ async fn publishing_state(rig: &common::Rig) -> UiState {
             agent_name: "lee".into(),
             representative_queries: vec!["When is the next release?".into(), "Who approves a release?".into()],
         }),
+        a2a: false,
     };
     let update = InboundUpdate {
         inbound,

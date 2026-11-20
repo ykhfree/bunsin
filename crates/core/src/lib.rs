@@ -20,6 +20,7 @@ pub mod proposal;
 pub mod records;
 pub mod search;
 pub mod settings;
+pub mod time;
 pub mod tool;
 pub mod webhook;
 pub mod wiki;

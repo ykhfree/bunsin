@@ -105,6 +105,8 @@ impl InboundForm {
                 agent_name: text(&self.agent, cx),
                 representative_queries: queries.lines().filter(|q| !q.is_empty()).map(str::to_owned).collect(),
             }),
+            // The card has no A2A switch yet: it keeps the value that it loaded.
+            a2a: self.track.base.as_ref().is_some_and(|base| base.a2a),
         }
     }
 

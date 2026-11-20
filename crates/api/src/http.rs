@@ -105,6 +105,16 @@ pub fn server_card_path(profile: &str) -> String {
     format!("{}/server-card", inbound_mcp_path(profile))
 }
 
+/// The inbound A2A endpoint (JSON-RPC binding) of a profile on a listener for callers.
+pub fn inbound_a2a_path(profile: &str) -> String {
+    format!("/agents/{profile}/a2a")
+}
+
+/// The A2A Agent Card of a profile: the A2A endpoint address and `/agent-card.json`.
+pub fn agent_card_path(profile: &str) -> String {
+    format!("{}/agent-card.json", inbound_a2a_path(profile))
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookSecretBody {
     pub secret: String,
