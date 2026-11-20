@@ -162,7 +162,7 @@ enum Command {
         ard_publisher_domains: Vec<String>,
         /// Serve an ARD registry at the root of the listeners for callers: POST /search, POST /explore
         /// and GET /agents. `internal`: on the internal listener. `public`: on both listeners. It indexes
-        /// the ARD catalogs of this server in registry.db in the data directory.
+        /// the ARD catalogs of this server, and the seeds of --ard-registry-source, in registry.db in the data directory.
         #[arg(long = "ard-registry", value_parser = ["internal", "public"])]
         ard_registry: Option<String>,
         /// A domain whose ARD entries the registry indexes for the internal listener: `<domain>`, or

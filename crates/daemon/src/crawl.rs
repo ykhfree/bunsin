@@ -32,8 +32,8 @@ pub fn parse_seed(text: &str) -> Result<Seed, String> {
     }
 }
 
-/// Checks the seeds before the server starts: their form, their count, and the address that each
-/// one fetches first, by the server's rules for upstream addresses.
+/// Checks the seeds before the server starts: their form, their count, a seed given twice, and the
+/// address that each one fetches first, by the server's rules for upstream addresses.
 pub fn check_seeds(seeds: &[(String, InboundScope)], upstream: &UpstreamPolicy) -> Result<(), String> {
     if seeds.len() > MAX_SEEDS {
         return Err(format!(
@@ -41,7 +41,10 @@ pub fn check_seeds(seeds: &[(String, InboundScope)], upstream: &UpstreamPolicy) 
             seeds.len()
         ));
     }
-    for (text, _) in seeds {
+    for (index, (text, _)) in seeds.iter().enumerate() {
+        if seeds[..index].iter().any(|(earlier, _)| earlier == text) {
+            return Err(format!("the registry source `{text}` is given twice"));
+        }
         let seed = parse_seed(text).map_err(|e| format!("the registry source `{text}` cannot be used: {e}"))?;
         let first = match seed.catalog_url() {
             Some(url) => url.to_string(),
@@ -54,13 +57,16 @@ pub fn check_seeds(seeds: &[(String, InboundScope)], upstream: &UpstreamPolicy) 
 
 /// One run of the registry task. A failure is written to stderr and does not stop the task.
 /// Without a fetcher, only the own catalogs are indexed. `stopped` ends the run between two seeds.
+/// A run starts no new seed after [`CRAWL_TICK`], so the own catalogs are indexed again soon;
+/// the seeds left stay due for the next run.
 pub async fn tick(engine: &Engine, fetcher: Option<&Fetcher>, stopped: &tokio::sync::watch::Receiver<bool>) {
+    let began = std::time::Instant::now();
     if let Err(error) = engine.refresh_own_catalogs() {
         eprintln!("the registry could not index the catalogs of this server: {error}");
     }
     let Some(fetcher) = fetcher else { return };
     let mut read = Vec::new();
-    while !*stopped.borrow() {
+    while !*stopped.borrow() && began.elapsed() < CRAWL_TICK {
         let (source, text) = match engine.due_registry_seed() {
             Ok(Some(due)) => due,
             Ok(None) => break,
@@ -164,5 +170,11 @@ mod tests {
             .collect();
         assert!(check_seeds(&many, &open).unwrap_err().contains("at most 200"));
         assert!(check_seeds(&many[..MAX_SEEDS], &open).is_ok());
+        // The same seed twice, in one flag or in both, is refused.
+        let twice = [
+            ("acme.com".to_owned(), InboundScope::Internal),
+            ("acme.com".to_owned(), InboundScope::Public),
+        ];
+        assert!(check_seeds(&twice, &open).unwrap_err().contains("given twice"));
     }
 }

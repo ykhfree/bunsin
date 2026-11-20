@@ -1162,13 +1162,14 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - **seed**(9절 A1): `--ard-registry-source <seed>`(내부 리스너)와 `--ard-registry-public-source <seed>`(두 리스너, `--ard-registry public`일 때만). 둘 다 반복한다.
   - `<seed>`는 `<domain>`이거나 `<domain>=<URL>`이다. 앞의 것은 3절의 domain 해석(ard.json, `Link`·`<link rel="ard">`, robots `Agentmap`, 알린 주소)이다.
     뒤의 것은 그 주소 하나만 가져온다(JSON manifest 또는 HTML 속 JSON-LD). 두 형태 모두 결속 domain은 `<domain>`이다. URL의 host로 결속하는 규칙은 없다.
-  - 시작할 때 모든 seed를 검사한다: 형태, 개수(200 이하, 자기 catalog는 세지 않는다), 처음 가져올 주소(`https://<domain>/` 또는 URL)의 `UpstreamPolicy::check`.
+  - 시작할 때 모든 seed를 검사한다: 형태, 개수(200 이하, 자기 catalog는 세지 않는다), 두 번 적은 seed(한 플래그든 두 플래그든), 처음 가져올 주소(`https://<domain>/` 또는 URL)의 `UpstreamPolicy::check`.
     하나라도 어기면 키를 읽기 전에 시작하지 않는다. 운영자 host 목록이 있으면 그 host만, 없으면 https와 공개 주소만 받는다.
   - 시작할 때 seed 표를 플래그와 맞춘다(`set_registry_seeds`). 빠진 seed나 범위가 바뀐 seed는 행, 항목, 거부를 잃는다. 새 seed는 바로 때가 된다.
 - **수집**(daemon `crawl.rs`): registry task 하나가 시작할 때 한 번, 그 뒤 60초마다 돈다. 서버가 멈추면 다른 task와 함께 멈춘다(`Poller::stop`).
   1. registry가 닿는 리스너마다 `ard_catalog(scope)`로 `self:<scope>`의 행을 바꾼다.
   2. 때가 된 seed를 하나씩 `Fetcher::resolve`(daemon `fetch.rs`, 해석 30 s, 요청 10 s, 응답 1 MiB, redirect 3번, hop마다 주소 규칙)로 읽는다.
      stop 신호가 오면 다음 seed 앞에서 멈춘다. 한 tick에 한 seed는 한 번만 읽는다.
+     tick이 60초를 넘으면 새 seed를 시작하지 않는다. 남은 seed는 다음 tick에 읽으므로, 1단계는 seed가 많아도 늦지 않는다.
   - 한 해석이 가져온 entry source는 seed 아래에 둔다(자기 행이 없다). 이유: 해석 한 번이 그 source를 모두 한 시간 한도로 가져오고, 결속 domain도 seed의 것이다.
     따로 행을 두면 일정과 실패를 두 번 세야 한다.
   - entry source 하나라도 읽히면 성공이다. 읽힌 source의 항목으로 그 seed의 행을 통째로 바꾸고(`crawl_succeeded`), 1시간 뒤에 다시 읽는다.

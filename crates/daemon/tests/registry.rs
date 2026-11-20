@@ -563,7 +563,7 @@ fn registry_status_lists_sources_and_counts() {
                 1_767_225_599,
             )
             .unwrap();
-        // A seed source as phase 2 will write it: one read with refusals, then two failures.
+        // A seed source as the crawl writes it: one read with refusals, then two failures.
         let seed = store
             .source("beta.com", SourceKind::Seed, InboundScope::Internal)
             .unwrap();
@@ -576,8 +576,8 @@ fn registry_status_lists_sources_and_counts() {
                 seed,
                 &[entry("urn:air:beta.com:a")],
                 &[
-                    refusal("urn:air:evil.com:a", "binding"),
-                    refusal("urn:air:evil.com:b", "binding"),
+                    refusal("urn:air:evil.com:a", "other_publisher"),
+                    refusal("urn:air:evil.com:b", "other_publisher"),
                     refusal("x", "invalid"),
                 ],
                 0,
@@ -592,8 +592,8 @@ fn registry_status_lists_sources_and_counts() {
         String::from_utf8(output.stdout).unwrap(),
         "source\tself:public\tself\tpublic\t2 entries\tlast ok 2025-12-31T23:59:59Z\tnext -\t0 failures\t-\n\
          source\tbeta.com\tseed\tinternal\t1 entries\tlast ok 1970-01-01T00:00:00Z\tnext 1970-01-01T00:00:00Z\t2 failures\tthe answer is larger than 1 MiB\n\
-         refused\tbeta.com\tbinding\t2\n\
-         refused\tbeta.com\tinvalid\t1\n"
+         refused\tbeta.com\tinvalid\t1\n\
+         refused\tbeta.com\tother_publisher\t2\n"
     );
 }
 
@@ -762,6 +762,92 @@ fn crawled_entry(identifier: &str, name: &str) -> Value {
         "description": format!("{name} answers questions"),
         "representativeQueries": ["where is my parcel", "who signs refunds"]
     })
+}
+
+/// The server as the operator runs it: an internal seed reaches only the internal listener,
+/// a public seed both listeners.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_seed_flag_reaches_the_listeners_of_its_scope() {
+    use std::io::{BufRead, BufReader};
+    let site = web(vec![
+        (
+            "/a.json",
+            "application/json",
+            json!({"entries": [crawled_entry("urn:air:a.test:inner", "Inner desk")]}).to_string(),
+        ),
+        (
+            "/b.json",
+            "application/json",
+            json!({"entries": [crawled_entry("urn:air:b.test:outer", "Outer desk")]}).to_string(),
+        ),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"))
+        .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(dir.path())
+        .args([
+            "--internal-listen",
+            "127.0.0.1:0",
+            "--internal-url",
+            "https://agents.corp.example",
+        ])
+        .args([
+            "--public-listen",
+            "127.0.0.1:0",
+            "--public-url",
+            "https://agents.example.org",
+        ])
+        .args(["--ard-registry", "public", "--allow-upstream-host", "127.0.0.1"])
+        .arg("--ard-registry-source")
+        .arg(format!("a.test={}/a.json", site.base))
+        .arg("--ard-registry-public-source")
+        .arg(format!("b.test={}/b.json", site.base))
+        .env_remove("BUNSIN_DATA_DIR")
+        .env_remove("BUNSIN_MASTER_KEY_FILE")
+        .env("BUNSIN_KEY_STORE", "file")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut next_address = |word: &str| {
+        let line = lines.next().unwrap().unwrap();
+        line.strip_prefix(word).unwrap_or_else(|| panic!("{line}")).to_owned()
+    };
+    next_address("listening on ");
+    let internal = next_address("internal listener on ");
+    let public = next_address("public listener on ");
+    let listed = |address: String| async move {
+        let answer: Value = reqwest::get(format!("{address}/agents"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["identifier"].as_str().unwrap().to_owned())
+            .collect::<Vec<String>>()
+    };
+    let mut seen = (Vec::new(), Vec::new());
+    for _ in 0..200 {
+        seen = (listed(internal.clone()).await, listed(public.clone()).await);
+        if seen.0.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(seen.0, ["urn:air:a.test:inner", "urn:air:b.test:outer"]);
+    assert_eq!(seen.1, ["urn:air:b.test:outer"]);
 }
 
 #[tokio::test]

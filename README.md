@@ -264,7 +264,7 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     registry resolves through `/.well-known/ard.json`, `rel="ard"` links and `Agentmap` lines,
     or `<domain>=<URL>`, which reads only that one catalog address. Either way, an entry is kept
     only if its URN names that domain. The server checks every seed address with the upstream
-    rules (`--allow-upstream-host`) and does not start if one fails.
+    rules (`--allow-upstream-host`) and does not start if one fails or a seed is given twice.
   - **Schedule.** The registry reads one seed at a time. It reads a seed again 1 hour after a
     success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
     keeps the entries. A seed without a success for 7 days loses its entries until it is read

@@ -679,9 +679,9 @@ mod tests {
                 seed,
                 &[entry("urn:air:acme.com:a", "x"), entry("urn:air:acme.com:b", "y")],
                 &[
-                    refusal("urn:air:evil.com:x", "binding"),
+                    refusal("urn:air:evil.com:x", "other_publisher"),
                     refusal("bad", "invalid"),
-                    refusal("urn:air:evil.com:y", "binding"),
+                    refusal("urn:air:evil.com:y", "other_publisher"),
                 ],
                 50,
             )
@@ -715,7 +715,7 @@ mod tests {
                     next_fetch_at: 7_250,
                     failures: 2,
                     last_error: Some("HTTP 504".into()),
-                    refusals: vec![("binding".into(), 2), ("invalid".into(), 1)],
+                    refusals: vec![("invalid".into(), 1), ("other_publisher".into(), 2)],
                 },
             ]
         );

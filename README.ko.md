@@ -220,7 +220,7 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     (`--ard-registry public`일 때만). 여러 번 줄 수 있고, seed는 200개까지입니다.
     seed는 `<domain>`이거나 `<domain>=<URL>`입니다. 앞의 것은 `/.well-known/ard.json`, `rel="ard"` 링크, `Agentmap` 줄로 그 도메인을 해석합니다.
     뒤의 것은 그 catalog 주소 하나만 읽습니다. 어느 쪽이든 URN이 그 도메인을 가리키는 항목만 넣습니다.
-    서버는 시작할 때 모든 seed 주소를 접속 대상 규칙(`--allow-upstream-host`)으로 검사하고, 하나라도 어기면 시작하지 않습니다.
+    서버는 시작할 때 모든 seed 주소를 접속 대상 규칙(`--allow-upstream-host`)으로 검사합니다. 하나라도 어기거나 같은 seed를 두 번 적으면 시작하지 않습니다.
   - **일정.** registry는 seed를 하나씩 읽습니다. 성공하면 1시간 뒤에 다시 읽습니다.
     n번 연속 실패하면 1시간 × 2^(n−1)(최대 24시간) 뒤에 다시 읽고, 항목은 그대로 둡니다.
     7일 동안 성공이 없으면 그 seed의 항목을 지우고, 다음 성공이 다시 채웁니다.
