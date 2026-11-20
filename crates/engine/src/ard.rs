@@ -109,7 +109,7 @@ impl Engine {
         outer.push(listener);
     }
 
-    fn outer_listener(&self, scope: InboundScope) -> Option<OuterListener> {
+    pub(crate) fn outer_listener(&self, scope: InboundScope) -> Option<OuterListener> {
         let outer = self.outer.lock().expect("engine lock");
         outer.iter().find(|listener| listener.scope == scope).cloned()
     }
@@ -160,6 +160,7 @@ impl Engine {
 
     /// The catalog of the listener of `scope`: the entries of every profile that this listener serves
     /// and that has an ARD listing with an allowed publisher. Profiles that cannot be read are left out.
+    /// A listener that serves the registry lists it too, unless a profile already uses its identifier.
     pub fn ard_catalog(&self, scope: InboundScope) -> Catalog {
         let Some(listener) = self.outer_listener(scope) else {
             return catalog(&[], ard_scope(scope));
@@ -189,7 +190,17 @@ impl Engine {
                     .map(|listing| PublishedProfile { scope, listing }),
             );
         }
-        catalog(&published, ard_scope(scope))
+        let mut out = catalog(&published, ard_scope(scope));
+        if let Some(entry) = self.registry_entry(&listener)
+            && !out
+                .manifest
+                .entries
+                .iter()
+                .any(|known| known.identifier == entry.identifier)
+        {
+            out.manifest.entries.push(entry);
+        }
+        out
     }
 
     pub(crate) fn read_inbound_status(&self, profile: &str) -> ApiResult<InboundStatus> {

@@ -1079,8 +1079,15 @@ pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig, wake: Arc<Not
         scope: config.reach.scope(),
         url: config.url.as_str().to_owned(),
     });
-    let router = crate::inbound::routes(engine.clone(), &config, wake.clone())
-        .merge(crate::webhooks::routes(engine, &config, wake));
+    let mut router = crate::inbound::routes(engine.clone(), &config, wake.clone()).merge(crate::webhooks::routes(
+        engine.clone(),
+        &config,
+        wake,
+    ));
+    // The registry routes exist only on a listener that serves the registry. Elsewhere they are 404.
+    if engine.registry_serves(config.reach.scope()) {
+        router = router.merge(crate::registry::routes(engine, &config));
+    }
     // Every answer of this listener names its ARD catalog (§5.1 rel="ard"), a 404 too. Bunsin has
     // no HTML page for a `<link rel="ard">`.
     let catalog = config.url_of(bunsin_api::http::ARD_CATALOG);
@@ -1144,8 +1151,11 @@ pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterCon
     }
     let control = serve(engine.clone(), config).await?;
     let mut listeners = Vec::new();
-    for listener in outer {
+    for listener in outer.clone() {
         listeners.push(serve_outer(engine.clone(), listener, wake.clone()).await?);
+    }
+    for line in crate::registry::svcb_records(&engine, &outer) {
+        eprintln!("{line}");
     }
     for (profile, error) in engine.resume_approved(interrupted).await {
         eprintln!("an approved call of profile {profile} was not resumed: {error}");
@@ -1161,11 +1171,12 @@ pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterCon
 const POLL_TICK: Duration = Duration::from_secs(5);
 
 /// The background tasks: one repeats the searches of all profiles, one hands stored questions
-/// to the agent. A stop ends both.
+/// to the agent, and one keeps the registry index up to date if the registry is on. A stop ends all.
 pub struct Poller {
     stop: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
     intake: tokio::task::JoinHandle<()>,
+    registry: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Poller {
@@ -1179,6 +1190,20 @@ impl Poller {
         let (stop, mut stopped) = tokio::sync::watch::channel(false);
         let mut intake_stopped = stopped.clone();
         let drainer = engine.clone();
+        // The internal listener serves every registry, so this is true if the registry is on.
+        let registry = engine.registry_serves(InboundScope::Internal).then(|| {
+            let indexer = engine.clone();
+            let mut registry_stopped = stopped.clone();
+            tokio::spawn(async move {
+                loop {
+                    crate::crawl::tick(&indexer);
+                    tokio::select! {
+                        _ = tokio::time::sleep(crate::crawl::CRAWL_TICK) => {}
+                        _ = registry_stopped.changed() => break,
+                    }
+                }
+            })
+        });
         // One task drains, so a stored question is never handed to the agent twice at once.
         let intake = tokio::spawn(async move {
             loop {
@@ -1206,17 +1231,25 @@ impl Poller {
                 }
             }
         });
-        Self { stop, task, intake }
+        Self {
+            stop,
+            task,
+            intake,
+            registry,
+        }
     }
 
     /// Lets the running cycles finish, then ends the tasks.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
-        let both = async {
+        let all = async {
             let _ = self.task.await;
             let _ = self.intake.await;
+            if let Some(registry) = self.registry {
+                let _ = registry.await;
+            }
         };
-        if tokio::time::timeout(SHUTDOWN_GRACE, both).await.is_err() {
+        if tokio::time::timeout(SHUTDOWN_GRACE, all).await.is_err() {
             eprintln!("the background tasks did not finish in {} s", SHUTDOWN_GRACE.as_secs());
         }
     }

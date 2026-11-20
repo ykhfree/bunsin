@@ -1,6 +1,6 @@
 //! `bunsind`: the Bunsin server and its command line.
 //!
-//! Operator commands (`serve`, `profile-add`, `token-*`) work on the data directory
+//! Operator commands (`serve`, `profile-add`, `token-*`, `registry-status`) work on the data directory
 //! of this machine. All other commands talk to a running server over HTTPS.
 
 use bunsin_api::{
@@ -9,6 +9,7 @@ use bunsin_api::{
 };
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundScope;
 use bunsin_core::records::InboxBody;
 use bunsin_core::settings::{ApiConfig, ConnectorKind, McpConfig, Wire};
 use bunsin_daemon::keystore::KeyStore;
@@ -16,7 +17,7 @@ use bunsin_daemon::server::{OuterConfig, Reach, ServeConfig, check_listeners, st
 use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
 use bunsin_engine::Engine;
 use bunsin_engine::{KeyFile, KeySource};
-use bunsin_store::AppStore;
+use bunsin_store::{AppStore, RegistryStore};
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -159,6 +160,11 @@ enum Command {
         /// for example acme.com. Repeat it for more domains. Without it, no profile is published.
         #[arg(long = "ard-publisher-domain")]
         ard_publisher_domains: Vec<String>,
+        /// Serve an ARD registry at the root of the listeners for callers: POST /search, POST /explore
+        /// and GET /agents. `internal`: on the internal listener. `public`: on both listeners. It indexes
+        /// the ARD catalogs of this server in registry.db in the data directory.
+        #[arg(long = "ard-registry", value_parser = ["internal", "public"])]
+        ard_registry: Option<String>,
         /// Let profiles start coding jobs: a coding agent CLI changes a repository on a new branch,
         /// after the profile owner approves each job. The CLI runs as the user of this server, with its
         /// own permission settings. Needs --coding-repo-root.
@@ -191,6 +197,11 @@ enum Command {
         /// `master.key` in the data directory. Keep this file out of backups of the data directory.
         #[arg(long, env = "BUNSIN_MASTER_KEY_FILE")]
         master_key_file: Option<PathBuf>,
+    },
+    /// Operator: show the sources of the ARD registry index: entries, last read, failures and refusals.
+    RegistryStatus {
+        #[command(flatten)]
+        local: Local,
     },
     /// Operator: create a profile that can do nothing until it gets settings.
     ProfileAdd {
@@ -960,6 +971,7 @@ async fn run_server(
     backends: RealBackends,
     store: KeyStore,
     accept_new_key: bool,
+    registry: Option<InboundScope>,
 ) -> Result<(), String> {
     // A start that is refused for its addresses must not read or move the key.
     check_listeners(&config, &outer).map_err(|e| e.to_string())?;
@@ -973,6 +985,9 @@ async fn run_server(
     };
     let engine =
         Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
+    if let Some(scope) = registry {
+        engine.serve_registry(scope).map_err(|e| e.to_string())?;
+    }
     let engine = Arc::new(engine);
     let reaches: Vec<Reach> = outer.iter().map(|listener| listener.reach).collect();
     let started = start(engine, config, outer).await.map_err(|e| e.to_string())?;
@@ -1007,6 +1022,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_stdio_connectors,
             allow_upstream_hosts,
             ard_publisher_domains,
+            ard_registry,
             allow_coding,
             coding_repo_root,
             coding_programs,
@@ -1045,7 +1061,37 @@ async fn run(cli: Cli) -> Result<(), String> {
                 tls: tls_cert.zip(tls_key),
             };
             let outer = outer.configs()?;
-            run_server(local, config, outer, backends, store, accept_new_key).await?;
+            let registry = ard_registry.map(|scope| match scope.as_str() {
+                "public" => InboundScope::Public,
+                _ => InboundScope::Internal,
+            });
+            run_server(local, config, outer, backends, store, accept_new_key, registry).await?;
+        }
+        Command::RegistryStatus { local } => {
+            std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
+            let sources = RegistryStore::open(&local.data_dir)
+                .and_then(|store| store.status())
+                .map_err(|e| e.to_string())?;
+            if sources.is_empty() {
+                println!("no sources: a server with --ard-registry fills the index");
+            }
+            for source in sources {
+                let scope = json(&source.scope).trim_matches('"').to_owned();
+                let last_ok = source
+                    .last_ok_at
+                    .map_or("never".to_owned(), bunsin_core::time::utc_text);
+                println!(
+                    "source\t{}\t{}\t{scope}\t{} entries\tlast ok {last_ok}\t{} failures\t{}",
+                    source.url,
+                    source.kind.as_str(),
+                    source.entries,
+                    source.failures,
+                    source.last_error.as_deref().unwrap_or("-")
+                );
+                for (reason, count) in &source.refusals {
+                    println!("refused\t{}\t{reason}\t{count}", source.url);
+                }
+            }
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;

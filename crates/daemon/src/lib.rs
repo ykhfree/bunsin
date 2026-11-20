@@ -9,9 +9,11 @@
 
 pub mod ard_search;
 pub mod coding;
+pub mod crawl;
 pub mod inbound;
 pub mod keystore;
 pub mod oauth;
+pub mod registry;
 pub mod rules;
 pub mod server;
 pub mod webhooks;

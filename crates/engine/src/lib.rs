@@ -19,6 +19,7 @@ mod poll_settings;
 mod polling;
 mod preload;
 mod principles;
+mod registry;
 mod resume;
 mod secrets;
 mod settings_parts;
@@ -223,6 +224,8 @@ pub struct Engine {
     outer: Mutex<Vec<OuterListener>>,
     /// Taken by every write of OAuth credentials. See `oauth::ProfileWriter`.
     oauth_writes: Arc<Mutex<()>>,
+    /// The ARD registry, if the server operator turned it on. See `registry`.
+    registry: std::sync::OnceLock<registry::Registry>,
     /// Held for the life of the engine. A second engine on the same directory fails to open.
     _lock: File,
 }
@@ -314,6 +317,7 @@ impl Engine {
             secret_box,
             outer: Mutex::new(Vec::new()),
             oauth_writes: Arc::new(Mutex::new(())),
+            registry: std::sync::OnceLock::new(),
             _lock: lock,
         })
     }

@@ -212,6 +212,23 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **ARD 게시.** `--ard-publisher-domain acme.com`(여러 번 줄 수 있음)은 프로필이 endpoint를 게시할 수 있는 도메인을 정합니다.
   이 옵션이 없으면 어떤 프로필도 게시되지 않고, 서버는 `inbound.ard`가 있는 설정을 거부합니다.
   호출자용 리스너는 자기가 제공하는 프로필의 ARD catalog `/.well-known/ard.json`을 제공합니다.
+- **ARD registry.** `--ard-registry internal`은 내부 리스너를, `--ard-registry public`은 두 리스너를 ARD registry로 만듭니다.
+  이 옵션이 없으면 registry 경로가 없습니다(404). registry 리스너는 루트에서 `POST /search`, `POST /explore`, `GET /agents`에 답합니다.
+  그래서 base URL은 그 리스너의 `--*-url`입니다. registry에는 token이 필요 없습니다.
+  - **넣는 것.** 지금은 이 서버 자신의 catalog만 넣습니다. 60초마다 `<data dir>/registry.db`의 내용을 바꿉니다.
+    다른 도메인의 crawl은 phase 2이고, 아직 없습니다.
+  - **리스너마다 보는 것.** 공개 리스너는 공개 항목만 봅니다. 순위와 개수도 그 항목으로만 셉니다.
+    그래서 공개 리스너의 답은 내부 항목에 대해 아무것도 알려 주지 않습니다.
+  - **한도.** 리스너마다 1분에 600 요청까지 답하고, 넘으면 429입니다. 요청 본문은 64 KiB까지입니다.
+    한 쪽은 결과 100개까지이고, page token은 1,000번째 결과까지 갑니다.
+    `federation`의 모든 값은 이 index만 찾고, 답에 `referrals`는 없습니다.
+  - **자기 항목.** registry 리스너는 자기 `ard.json`에 registry를 `urn:air:<domain>:registry:bunsin`으로 싣습니다.
+    `<domain>`은 `--ard-publisher-domain` 중 리스너 host와 같거나 host의 끝부분인 가장 긴 도메인입니다(예: `agents.acme.com`이면 `acme.com`).
+    그런 도메인이 없으면 registry 항목을 싣지 않습니다.
+  - **DNS.** 서버는 시작할 때 그런 리스너마다 stderr에 한 줄을 씁니다(예: `_search._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.`).
+    이 줄을 DNS zone에 넣으십시오. 서버는 DNS 레코드를 쓰지 않습니다.
+  - **상태.** `bunsind registry-status`는 이 컴퓨터의 `registry.db`를 읽습니다. 서버가 도는 동안에도 됩니다.
+    source마다 항목 수, 마지막 성공, 실패 수, 마지막 오류, 거부한 항목의 이유별 개수를 보입니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
 ## agent 설정 (프로필 소유자)

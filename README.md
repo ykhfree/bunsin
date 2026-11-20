@@ -252,6 +252,29 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   domains that profiles may publish their endpoint under. Without it, no profile is published,
   and the server refuses settings with `inbound.ard`. A listener for callers serves the ARD
   catalog `/.well-known/ard.json` of the profiles it serves.
+- **ARD registry.** `--ard-registry internal` makes the internal listener an ARD registry,
+  and `--ard-registry public` makes both listeners one. Without the flag the registry routes
+  do not exist (404). A registry listener answers `POST /search`, `POST /explore` and
+  `GET /agents` at its root, so its base URL is its `--*-url`. The registry needs no token.
+  - **What it indexes.** For now, only this server's own catalogs. Every 60 seconds it
+    replaces them in `<data dir>/registry.db`. Crawling other domains is phase 2 and does not
+    exist yet.
+  - **What each listener sees.** The public listener sees only public entries. It ranks and
+    counts only those entries, so its answers say nothing about internal entries.
+  - **Limits.** Each listener answers 600 requests a minute; more get 429. A request body is
+    at most 64 KiB. A page has at most 100 results, and a page token reaches at most the
+    1,000th result. Every `federation` mode searches only this index, and no answer has
+    `referrals`.
+  - **Its own entry.** A registry listener lists the registry in its `ard.json` as
+    `urn:air:<domain>:registry:bunsin`. `<domain>` is the longest `--ard-publisher-domain`
+    that is the listener host or ends it, for example `acme.com` for `agents.acme.com`.
+    Without such a domain, the listener lists no registry entry.
+  - **DNS.** On start, the server writes one line to stderr for each such listener, for
+    example `_search._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.` Add it to your DNS
+    zone. The server does not write DNS records.
+  - **Status.** `bunsind registry-status` reads `registry.db` on this machine, also while the
+    server runs. For each source it shows the entry count, the last successful read, the
+    failures, the last error, and the refused entries by reason.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 
