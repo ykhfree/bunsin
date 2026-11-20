@@ -15,6 +15,9 @@
 
 mod catalog;
 mod entry;
+mod html;
+mod jsonld;
+mod resolve;
 mod search;
 
 pub use catalog::{Catalog, PublishedProfile, Refused, Scope, catalog};
@@ -26,6 +29,19 @@ pub use search::{
     DeclineReason, Declined, ErrorCode, Failed, Federated, Federation, MAX_ERROR_MESSAGE_BYTES, MAX_RESPONSE_BYTES,
     Page, Query, REGISTRY_TYPES, Referral, SearchClient, SearchError, SearchRequest, SearchResponse, SearchResult,
     search_endpoint,
+};
+
+pub use search::{
+    Bucket, ExploreRequest, ExploreResponse, FacetRequest, FacetResult, ListFilter, ListRequest, ListResponse,
+    ResultType, get_document,
+};
+
+// The Consumer's resolution of a domain, shared with a crawl.
+pub use html::{MAX_BLOCK_BYTES, MAX_BLOCKS, Markup, markup_entries, read_markup};
+pub use jsonld::{ARD_NAMESPACE, BASE_CONTEXT_URL, Context, UnsupportedContext, expand_terms};
+pub use resolve::{
+    Accepted, Fetch, FetchError, Fetched, Found, MAX_ANNOUNCED, MAX_ENTRY_BYTES, RejectReason, Rejected, Resolution,
+    Seed, Source, SourceError, accept_entry, resolve,
 };
 
 /// The ARD specification version that this crate implements.

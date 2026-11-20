@@ -1,10 +1,14 @@
-//! The Consumer search client (§5.3.2, §5.4, Appendix B).
+//! The Consumer client of the registry API: Search (§5.3.2, §5.4), Explore (§5.3.3),
+//! List (§5.3.4, Appendix A) and the error codes (Appendix B).
 //!
 //! Search results are data written by others. This module returns them as they are.
 //! It does not act on their text, and no policy check may take `score` as input (§4.5.2, §5.3.2).
 
+use crate::resolve::{FetchError, Fetched};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use url::Url;
@@ -32,11 +36,13 @@ pub struct SearchRequest {
     pub page_token: Option<String>,
 }
 
-/// The query object (§5.3.1). Search requires `text` (§5.3.2).
+/// The query object (§5.3.1). Search requires `text` (§5.3.2). Explore does not, so an
+/// empty `text` is left out of the body.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Query {
     #[serde(rename = "@context", skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub text: String,
     /// Keys are term paths. Values are arrays or single values (§5.3.1).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +107,112 @@ pub struct Referral {
     pub media_type: String,
     /// The complete search endpoint. A client MUST NOT append `/search` to it (§5.3).
     pub url: String,
+}
+
+/// The body of `POST /explore` (§5.3.3).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExploreRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<Query>,
+    pub result_type: ResultType,
+}
+
+/// The shape of an Explore result. Facets are the only shape that §5.3.3 defines.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResultType {
+    pub facets: Vec<FacetRequest>,
+}
+
+/// One facet to compute. The registry's defaults apply to `limit` and `minCount`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FacetRequest {
+    /// A term path, with the syntax of a filter key (§5.3.1).
+    pub field: String,
+}
+
+/// The body of a successful `POST /explore` answer (§5.3.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExploreResponse {
+    pub result_type: String,
+    pub facets: BTreeMap<String, FacetResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacetResult {
+    pub buckets: Vec<Bucket>,
+    /// The number of matching entries in the buckets past the limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_count: Option<u64>,
+}
+
+/// One facet value. A registry MAY leave out `count` (§5.3.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bucket {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+}
+
+/// The query parameters of `GET /agents` (§5.3.4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ListRequest {
+    /// An Appendix A expression, such as the one [`ListFilter::expression`] makes.
+    pub filter: Option<String>,
+    pub order_by: Option<String>,
+    pub page_size: Option<u32>,
+    pub page_token: Option<String>,
+}
+
+/// The constraints of a List filter (Appendix A). Across fields: AND. Within a field: OR.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListFilter {
+    pub types: Vec<String>,
+    pub publishers: Vec<String>,
+    pub display_name: Option<String>,
+    pub created_after: Option<String>,
+    pub updated_after: Option<String>,
+}
+
+impl ListFilter {
+    /// Makes the expression, such as `type = 'a,b' AND publisherId = 'acme.com'`.
+    ///
+    /// The syntax is the part that Appendix A and the OpenAPI example share: `=` or `>`,
+    /// a quoted value, commas for OR, and ` AND `. A value with `'` or `,` cannot be quoted,
+    /// so it is refused. Returns `None` if there is no constraint.
+    pub fn expression(&self) -> Result<Option<String>, String> {
+        let mut clauses = Vec::new();
+        let mut add = |field: &str, operator: &str, values: &[String]| -> Result<(), String> {
+            if values.is_empty() {
+                return Ok(());
+            }
+            if let Some(bad) = values.iter().find(|v| v.is_empty() || v.contains(['\'', ','])) {
+                return Err(format!("the `{field}` value `{bad}` is empty or has `'` or `,`"));
+            }
+            clauses.push(format!("{field} {operator} '{}'", values.join(",")));
+            Ok(())
+        };
+        add("type", "=", &self.types)?;
+        add("publisherId", "=", &self.publishers)?;
+        add("displayName", "=", self.display_name.as_slice())?;
+        add("createdAfter", ">", self.created_after.as_slice())?;
+        add("updatedAfter", ">", self.updated_after.as_slice())?;
+        Ok((!clauses.is_empty()).then(|| clauses.join(" AND ")))
+    }
+}
+
+/// The body of a successful `GET /agents` answer (§5.3.4, schema `ListResponse`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResponse {
+    /// Entries with the terms that the registry chose. They have no `score` or `source`.
+    pub items: Vec<SearchResult>,
+    #[serde(default)]
+    pub total: Option<u64>,
+    #[serde(default)]
+    pub page_token: Option<String>,
 }
 
 /// The error codes of Appendix B.
@@ -220,17 +332,22 @@ pub struct Federated {
 /// Returns the search endpoint of a registry base URL: the base with `/search` appended (§5.3).
 /// Use it only for a base URL, never for a referral `url`.
 pub fn search_endpoint(base: &Url) -> Url {
+    endpoint(base, "search")
+}
+
+/// The base URL with one path segment appended.
+fn endpoint(base: &Url, segment: &str) -> Url {
     let mut endpoint = base.clone();
-    endpoint.set_path(&format!("{}/search", base.path().trim_end_matches('/')));
+    endpoint.set_path(&format!("{}/{segment}", base.path().trim_end_matches('/')));
     endpoint
 }
 
-/// A search client for the registries of one profile.
+/// A client for the registries of one profile.
 #[derive(Debug, Clone)]
 pub struct SearchClient {
     http: reqwest::Client,
-    /// The search endpoints of the allowed registries.
-    endpoints: Vec<Url>,
+    /// The base URLs of the allowed registries.
+    registries: Vec<Url>,
     max_hops: u32,
 }
 
@@ -246,9 +363,47 @@ impl SearchClient {
             .map_err(|e| SearchError::Transport(error_chain(&e)))?;
         Ok(Self {
             http,
-            endpoints: registries.iter().map(search_endpoint).collect(),
+            registries: registries.to_vec(),
             max_hops,
         })
+    }
+
+    /// The endpoint `segment` of `registry`, if the registry is in the list.
+    fn allowed(&self, registry: &Url, segment: &str) -> Result<Url, SearchError> {
+        let target = endpoint(registry, segment);
+        if self.registries.iter().any(|base| endpoint(base, segment) == target) {
+            Ok(target)
+        } else {
+            Err(SearchError::NotAllowed(registry.to_string()))
+        }
+    }
+
+    /// Sends `request` to `POST <registry>/explore`. A registry without Explore answers 501.
+    pub async fn explore(&self, registry: &Url, request: &ExploreRequest) -> Result<ExploreResponse, SearchError> {
+        let endpoint = self.allowed(registry, "explore")?;
+        self.send(self.post(&endpoint, request)).await
+    }
+
+    /// Sends `GET <registry>/agents` with the parameters of `request`.
+    pub async fn list(&self, registry: &Url, request: &ListRequest) -> Result<ListResponse, SearchError> {
+        let mut endpoint = self.allowed(registry, "agents")?;
+        let page_size = request.page_size.map(|n| n.to_string());
+        let pairs = [
+            ("filter", &request.filter),
+            ("orderBy", &request.order_by),
+            ("pageSize", &page_size),
+            ("pageToken", &request.page_token),
+        ];
+        for (name, value) in pairs {
+            if let Some(value) = value {
+                endpoint.query_pairs_mut().append_pair(name, value);
+            }
+        }
+        let request = self
+            .http
+            .get(endpoint)
+            .header(reqwest::header::ACCEPT, "application/json");
+        self.send(request).await
     }
 
     /// Sends `request` to `POST <registry>/search`, then follows the referrals in the answers.
@@ -261,11 +416,8 @@ impl SearchClient {
     /// Fails if `registry` is not allowed or the first registry fails. A failed referred
     /// registry goes into [`Federated::failed`].
     pub async fn search(&self, registry: &Url, request: &SearchRequest) -> Result<Federated, SearchError> {
-        let first = search_endpoint(registry);
-        if !self.endpoints.contains(&first) {
-            return Err(SearchError::NotAllowed(registry.to_string()));
-        }
-        let response = self.post(&first, request).await?;
+        let first = self.allowed(registry, "search")?;
+        let response = self.send(self.post(&first, request)).await?;
         let referred_request = SearchRequest {
             page_token: None,
             ..request.clone()
@@ -294,7 +446,7 @@ impl SearchClient {
                     }
                 };
                 visited.push(endpoint.clone());
-                match self.post(&endpoint, &referred_request).await {
+                match self.send(self.post(&endpoint, &referred_request)).await {
                     Ok(response) => out.pages.push(Page {
                         endpoint,
                         hop,
@@ -316,7 +468,7 @@ impl SearchClient {
         // The referral url is already the complete search endpoint. It is used as it is.
         let endpoint = Url::parse(&referral.url)
             .ok()
-            .filter(|url| self.endpoints.contains(url))
+            .filter(|url| self.registries.iter().any(|base| search_endpoint(base) == *url))
             .ok_or(DeclineReason::NotAllowed)?;
         if visited.contains(&endpoint) {
             return Ok(None);
@@ -327,14 +479,18 @@ impl SearchClient {
         Ok(Some(endpoint))
     }
 
-    async fn post(&self, endpoint: &Url, request: &SearchRequest) -> Result<SearchResponse, SearchError> {
-        let body = serde_json::to_string(request).expect("a search request always serializes");
-        let response = self
-            .http
+    fn post(&self, endpoint: &Url, body: &impl Serialize) -> reqwest::RequestBuilder {
+        let body = serde_json::to_string(body).expect("a request body always serializes");
+        self.http
             .post(endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
             .body(body)
+    }
+
+    /// Sends a request and reads a JSON answer of type `R`, or the registry's error.
+    async fn send<R: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<R, SearchError> {
+        let response = request
             .send()
             .await
             .map_err(|e| SearchError::Transport(error_chain(&e)))?;
@@ -342,7 +498,10 @@ impl SearchClient {
         if status.is_redirection() {
             return Err(SearchError::Redirected(status.as_u16()));
         }
-        let body = read_limited(response).await?;
+        let body = read_body(response).await.map_err(|error| match error {
+            FetchError::Transport(text) => SearchError::Transport(text),
+            other => SearchError::InvalidResponse(other.to_string()),
+        })?;
         if !status.is_success() {
             return Err(registry_error(status.as_u16(), &body));
         }
@@ -350,18 +509,47 @@ impl SearchClient {
     }
 }
 
+/// Sends `GET url` with `client` and reads the answer as an entry source (§5.1).
+///
+/// The client sets the address and redirect rules: a redirect it refuses is
+/// [`FetchError::Refused`]. A status other than success is an error. The body limit is
+/// [`MAX_RESPONSE_BYTES`].
+pub async fn get_document(client: &reqwest::Client, url: &Url) -> Result<Fetched, FetchError> {
+    let response = client
+        .get(url.clone())
+        .header(reqwest::header::ACCEPT, "application/json, text/html;q=0.9, */*;q=0.1")
+        .send()
+        .await
+        .map_err(|e| match e.is_redirect() {
+            true => FetchError::Refused(error_chain(&e)),
+            false => FetchError::Transport(error_chain(&e)),
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(FetchError::Status(status.as_u16()));
+    }
+    let url = response.url().clone();
+    let links = response
+        .headers()
+        .get_all(reqwest::header::LINK)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .collect();
+    let body = read_body(response).await?;
+    Ok(Fetched { url, links, body })
+}
+
 /// Reads the body, and fails if it is larger than [`MAX_RESPONSE_BYTES`].
-async fn read_limited(mut response: reqwest::Response) -> Result<Vec<u8>, SearchError> {
+async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, FetchError> {
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| SearchError::Transport(error_chain(&e)))?
+        .map_err(|e| FetchError::Transport(error_chain(&e)))?
     {
         if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(SearchError::InvalidResponse(format!(
-                "the body is larger than {MAX_RESPONSE_BYTES} bytes"
-            )));
+            return Err(FetchError::TooLarge(MAX_RESPONSE_BYTES));
         }
         body.extend_from_slice(&chunk);
     }
@@ -458,6 +646,80 @@ mod tests {
                 "pageSize": 5
             })
         );
+    }
+
+    #[test]
+    fn the_list_filter_joins_fields_with_and_and_values_with_commas() {
+        let filter = ListFilter {
+            types: vec![
+                "application/mcp-server-card+json".into(),
+                "application/a2a-agent-card+json".into(),
+            ],
+            publishers: vec!["acme.com".into()],
+            display_name: Some("Expense Bot".into()),
+            created_after: Some("2026-01-01T00:00:00Z".into()),
+            updated_after: None,
+        };
+        assert_eq!(
+            filter.expression().unwrap().unwrap(),
+            "type = 'application/mcp-server-card+json,application/a2a-agent-card+json' \
+             AND publisherId = 'acme.com' AND displayName = 'Expense Bot' AND createdAfter > '2026-01-01T00:00:00Z'"
+        );
+        assert_eq!(ListFilter::default().expression(), Ok(None));
+        // A quote would end the value early, and a comma would add an OR value.
+        for bad in [
+            ListFilter {
+                display_name: Some("x' OR type = 'y".into()),
+                ..ListFilter::default()
+            },
+            ListFilter {
+                publishers: vec!["acme.com,evil.example".into()],
+                ..ListFilter::default()
+            },
+            ListFilter {
+                types: vec![String::new()],
+                ..ListFilter::default()
+            },
+        ] {
+            assert!(bad.expression().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_explore_request_leaves_out_an_empty_text_and_query() {
+        let facets = ResultType {
+            facets: vec![FacetRequest { field: "type".into() }],
+        };
+        let without = ExploreRequest {
+            query: None,
+            result_type: facets.clone(),
+        };
+        assert_eq!(
+            serde_json::to_value(&without).unwrap(),
+            json!({"resultType": {"facets": [{"field": "type"}]}})
+        );
+        let with = ExploreRequest {
+            query: Some(Query {
+                filter: Some(Map::from_iter([("tags".to_owned(), json!(["finance"]))])),
+                ..Query::default()
+            }),
+            result_type: facets,
+        };
+        assert_eq!(
+            serde_json::to_value(&with).unwrap(),
+            json!({"query": {"filter": {"tags": ["finance"]}}, "resultType": {"facets": [{"field": "type"}]}})
+        );
+        // The answer example of §5.3.3 parses. A bucket without a count is accepted.
+        let answer: ExploreResponse = serde_json::from_value(json!({
+            "resultType": "facets",
+            "facets": {
+                "type": {"buckets": [{"value": "application/mcp-server-card+json", "count": 1247}], "otherCount": 23},
+                "publisher": {"buckets": [{"value": "acme.com"}]}
+            }
+        }))
+        .unwrap();
+        assert_eq!(answer.facets["type"].other_count, Some(23));
+        assert_eq!(answer.facets["publisher"].buckets[0].count, None);
     }
 
     #[test]
