@@ -22,7 +22,7 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   ([이벤트 찾기](#이벤트-찾기-폴링) 참고). Slack과 Jira Cloud는 webhook으로 이벤트를 보낼 수도 있습니다([Webhook](#webhook) 참고).
   두 방식 모두 테스트 서버로만 실행해 보았습니다.
 - **agent는 허용한 도구로만 읽습니다.** 제안하기 전에 `read` 도구(예: 검색)를 최대 5번 호출하고, notes의 페이지를 최대 5번 읽고, 그 결과를 씁니다.
-  ARD registry 검색은 도구 읽기로 셉니다.
+  ARD 도구 호출([ARD로 agent와 도구 찾기](#ard로-agent와-도구-찾기) 참고)은 도구 읽기로 셉니다.
   오래 쓸 사실은 notes에 정리하고, 사용자가 한 쪽씩 승인합니다([Notes](#notes) 참고).
   notes는 agent가 이벤트를 처리하며 읽은 것과 사용자가 시작한 읽기로 채워집니다. 검색 품질은 MCP 서버에 달려 있습니다.
 - **개인정보 필터는 패턴과 사용자의 단어 목록으로 동작합니다.** 이메일, 전화번호 같은 정해진 형식은 찾습니다.
@@ -764,24 +764,72 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 
 아직 없는 것: 출처의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
 
-### ARD registry 검색
+### ARD로 agent와 도구 찾기
 
-agent는 설정에 적은 ARD registry(Agentic Resource Discovery)에서 다른 agent와 도구를 찾을 수 있습니다.
+agent는 ARD(Agentic Resource Discovery)로 다른 agent와 도구를 찾을 수 있습니다.
+설정에 적은 registry에 묻고, 설정에 적은 도메인의 항목을 읽습니다.
 
 ```json
-"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}]
+"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}],
+"ard_domains": [
+  "acme.com",
+  {"domain": "partner.example", "catalog": "https://agents.partner.example/.well-known/ard.json"}
+]
 ```
 
-- 그러면 agent는 내장 읽기 도구 `bunsin.ard/search {text, registry?}`를 봅니다.
-  이 도구는 지정한 registry(없으면 첫 registry)에 `POST <url>/search`로 `query.text`, `federation: "none"`, `pageSize: 5`를 보냅니다.
-  권한 규칙이 필요 없고, 이벤트 하나의 읽기 5번에 포함됩니다.
-- referral은 따라가지 않습니다. referral은 소유자가 아니라 registry가 고른 registry이기 때문입니다. redirect도 따라가지 않습니다.
-- registry 주소는 LLM과 커넥터 주소와 같은 주소 규칙을 지납니다. 이름은 a-z, 0-9, `-` 1~32자입니다.
+**Registry.** registry가 있으면 agent는 내장 읽기 도구 셋을 봅니다. 각 도구는 지정한 registry(없으면 첫 registry)에 묻습니다.
+
+- `bunsin.ard/search {text, registry?, filter?, context?, page_token?}`는 `POST <url>/search`로 `federation: "none"`, `pageSize: 5`를 보냅니다.
+  `filter`는 용어 경로마다 받을 값을 적습니다. 키는 10개까지, 키마다 값은 10개까지, 값은 200자까지입니다.
+  `context`는 `okf:taxonomy` 같은 prefix 붙은 필터 키를 위해 prefix와 namespace IRI를 짝짓습니다(10개까지).
+  `page_token`은 다음 쪽을 요청합니다. 결과마다 다음 token이 들어 있습니다.
+- `bunsin.ard/explore {facets, registry?, text?, filter?, context?}`는 `POST <url>/explore`를 보내고, 용어 1~5개의 값별 개수를 받습니다.
+  예를 들어 registry에 어떤 type이 있는지 봅니다. Explore가 없는 registry는 501로 답하고, agent는 이를 읽을 수 있는 오류로 받습니다.
+- `bunsin.ard/list {registry?, type?, publisher?, display_name?, created_after?, updated_after?, order_by?, page_token?}`는 `GET <url>/agents`를 `pageSize=5`로 보냅니다.
+  필터 식은 Bunsin이 ARD Appendix A 형식으로 만듭니다. 예: `type = 'a,b' AND publisherId = 'acme.com'`.
+  값에 `'`나 `,`가 있으면 거부합니다. 식의 뜻이 바뀌기 때문입니다.
+- 검색은 referral을 따라가지 않습니다. referral은 소유자가 아니라 registry가 고른 registry이기 때문입니다. registry 요청은 redirect도 따라가지 않습니다.
+
+**도메인.** 도메인이 있으면 agent는 `bunsin.ard/resolve {domain}`을 봅니다. `domain`은 설정에 적은 도메인 중 하나여야 합니다.
+agent는 다른 도메인이나 주소를 줄 수 없습니다. 소유자가 통제하지 않는 주소를 가져오는 읽기는 읽은 글을 서버 밖으로 보내는 통로가 되기 때문입니다.
+
+- 도메인만 적으면 ARD 규칙대로 해석합니다. `https://<domain>/.well-known/ard.json`, `https://<domain>/`의 `Link` 헤더와 `<link rel="ard">` 태그,
+  `https://<domain>/robots.txt`의 `Agentmap:` 줄을 읽습니다. 그다음 알려진 주소를 최대 10개 가져옵니다.
+  JSON 답은 manifest입니다. HTML 페이지에서는 JSON-LD 블록의 항목을 읽습니다.
+- `catalog`를 함께 적으면 그 주소 하나만 가져옵니다. 다른 host가 그 도메인의 항목을 제공할 때 씁니다.
+  예를 들어 리스너가 `agents.acme.com`인 Bunsin 서버는 `acme.com`의 항목을 게시합니다.
+  이때 `{"domain": "acme.com", "catalog": "https://agents.acme.com/.well-known/ard.json"}`로 적습니다.
+- **결속 규칙.** 항목 identifier(`urn:air:<publisher>:...`)의 publisher가 그 도메인과 같을 때만 읽습니다(대소문자 무시).
+  항목을 보낸 host는 보지 않으므로 CDN에 있는 catalog도 됩니다.
+  대가: 다른 도메인의 항목은 올바른 항목이라도 거부됩니다. `agents.acme.com`을 적었는데 항목이 `acme.com`을 쓰면 모두 거부됩니다.
+  이때는 `acme.com`을 적거나, 객체 형태로 catalog를 줍니다.
+  상위 도메인도 인정하지 않습니다. 공개 suffix 목록이 없으면 `evil.github.io`가 `urn:air:github.io:...`를 주장할 수 있기 때문입니다.
+  이 규칙은 ARD §4.5.1의 신뢰 검사를 TLS로 확인한 도메인으로 대신합니다.
+- ARD의 필수 규칙을 어긴 항목, 64 KiB를 넘는 항목, 지원하지 않는 `@context`의 항목도 거부합니다.
+  지원하지 않는 것: ARD 기반 context가 아닌 원격 context, `@vocab`, `@base`, `@import`, `@protected`, core 용어의 재정의,
+  `ard:trustManifest`처럼 다른 이름으로 쓴 core 용어. 항목 규칙은 core 용어를 제 이름으로 읽으므로, 다른 이름은 규칙을 피하기 때문입니다.
+- agent는 항목을 최대 20개 봅니다. 항목마다 core 용어, `publisher`, "not verified"가 붙은 trust identity, 다른 namespace의 용어를 봅니다.
+  다른 namespace의 용어는 전개한 IRI로 보여 줍니다. 그래서 게시자의 prefix가 core 용어처럼 보이지 않습니다.
+  거부한 항목은 identifier와 이유만 보여 줍니다. 500자를 넘는 값은 자릅니다.
+- 하지 않는 것: `/.well-known/ai-catalog.json`(ARD가 선택으로 둔 옛 이름), `_entries._agents` 같은 DNS 레코드.
+  DNS 레코드는 host만 알리고 항목 출처의 주소를 알리지 않기 때문입니다. trust manifest는 검증하지 않습니다. ARD가 검증 절차를 정하지 않기 때문입니다.
+
+**주소와 한도.**
+
+- registry 주소, `https://<domain>/`, catalog 주소는 LLM과 커넥터 주소와 같은 주소 규칙을 저장할 때와 만들 때 지납니다.
+  registry 이름은 a-z, 0-9, `-` 1~32자입니다. 도메인은 소문자 도메인 이름이고, 20개까지, 각각 한 번만 적습니다.
+- 도메인이 알리는 주소는 게시자가 고릅니다. 그래서 모든 요청과 모든 redirect가 주소 규칙을 지나고, redirect는 3번까지입니다.
+  `--allow-upstream-host`가 없으면 Bunsin은 이름을 조회할 때 내부 주소를 버리고, 이 요청에는 proxy를 쓰지 않습니다.
+  요청 하나는 10초와 1 MiB, `resolve` 하나는 30초까지입니다.
+
+**네 도구 공통.**
+
+- 권한 규칙이 필요 없고, 호출마다 이벤트 하나의 읽기 5번에 포함됩니다.
 - 결과는 다른 사람이 쓴 글입니다. 개인정보 필터를 거쳐 인용 데이터로 LLM에 갑니다.
-  agent는 결과마다 identifier, 이름, type, URL, 설명, capabilities, score, source만 받습니다.
+  `search`와 `list`에서 agent는 결과마다 identifier, 이름, type, URL, 설명, capabilities를 받고, `search`에서는 score와 source도 받습니다. 그 밖의 것은 받지 않습니다.
   `score`는 LLM이 읽는 글일 뿐이고, 서버의 어떤 결정에도 쓰이지 않습니다.
 - agent는 찾은 것을 호출할 수 없습니다. 소유자가 커넥터로 더하고, 도구를 승인하고, 규칙을 주어야 합니다.
-- 창에서는 Agent 화면의 **ARD registries** 카드가 목록을 고칩니다.
+- 창에서는 Agent 화면의 **ARD registries** 카드가 registry 목록을 고칩니다. 창은 아직 `ard_domains`를 고치지 않습니다. `bunsind config-set`을 씁니다.
 
 ### 코딩 위임
 

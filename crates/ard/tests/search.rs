@@ -5,7 +5,8 @@ use axum::body::Bytes;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use bunsin_ard::{
-    DeclineReason, ErrorCode, Federation, MAX_RESPONSE_BYTES, Query, SearchClient, SearchError, SearchRequest,
+    DeclineReason, ErrorCode, ExploreRequest, FacetRequest, Federation, ListFilter, ListRequest, MAX_RESPONSE_BYTES,
+    Query, ResultType, SearchClient, SearchError, SearchRequest,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -38,7 +39,7 @@ fn status(status: u16, body: &str) -> Reply {
     }
 }
 
-/// The path and the JSON body of each request that a stub got.
+/// The path with its query, and the JSON body, of each request that a stub got.
 type Hits = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A bound stub registry that does not serve yet, so that other replies can name its URL.
@@ -71,7 +72,8 @@ impl Stub {
             async move {
                 let path = uri.path().to_owned();
                 let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                recorded.lock().unwrap().push((path.clone(), parsed));
+                let asked = uri.path_and_query().map_or(path.clone(), |p| p.to_string());
+                recorded.lock().unwrap().push((asked, parsed));
                 let Some(reply) = replies.get(&path).cloned() else {
                     return StatusCode::NOT_FOUND.into_response();
                 };
@@ -429,4 +431,95 @@ async fn a_closed_port_is_a_transport_error() {
     drop(stub);
     let error = client(&[&base], 0).search(&base, &request("x")).await.unwrap_err();
     assert!(matches!(error, SearchError::Transport(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn explore_and_list_call_their_endpoints_of_an_allowed_registry_only() {
+    let stub = Stub::bind().await;
+    let base = stub.base.join("v1/").unwrap();
+    let hits = stub.serve(vec![
+        (
+            "/v1/explore",
+            ok(json!({"resultType": "facets", "facets": {"type": {"buckets": [{"value": "text/html", "count": 2}]}}})),
+        ),
+        (
+            "/v1/agents",
+            ok(json!({"items": [{"identifier": "urn:air:acme.com:kim", "displayName": "Kim"}], "total": 1, "pageToken": "p2"})),
+        ),
+    ]);
+    let client = client(&[&base], 0);
+    let explore = ExploreRequest {
+        query: Some(Query {
+            text: "expenses".into(),
+            ..Query::default()
+        }),
+        result_type: ResultType {
+            facets: vec![FacetRequest { field: "type".into() }],
+        },
+    };
+    let facets = client.explore(&base, &explore).await.unwrap();
+    assert_eq!(facets.facets["type"].buckets[0].count, Some(2));
+
+    let filter = ListFilter {
+        publishers: vec!["acme.com".into()],
+        display_name: Some("Kim & co".into()),
+        ..ListFilter::default()
+    };
+    let list = ListRequest {
+        filter: filter.expression().unwrap(),
+        order_by: Some("displayName DESC".into()),
+        page_size: Some(5),
+        page_token: Some("p1".into()),
+    };
+    let listed = client.list(&base, &list).await.unwrap();
+    assert_eq!(listed.items[0].identifier, "urn:air:acme.com:kim");
+    assert_eq!((listed.total, listed.page_token.as_deref()), (Some(1), Some("p2")));
+
+    // The filter, order and token travel URL-encoded in the query.
+    let asked = hits.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        [
+            (
+                "/v1/explore".to_owned(),
+                json!({"query": {"text": "expenses"}, "resultType": {"facets": [{"field": "type"}]}})
+            ),
+            (
+                "/v1/agents?filter=publisherId+%3D+%27acme.com%27+AND+displayName+%3D+%27Kim+%26+co%27\
+                 &orderBy=displayName+DESC&pageSize=5&pageToken=p1"
+                    .to_owned(),
+                Value::Null
+            ),
+        ]
+    );
+
+    // Another registry is not called.
+    let other = Url::parse("https://other.example/v1/").unwrap();
+    assert!(matches!(
+        client.explore(&other, &explore).await,
+        Err(SearchError::NotAllowed(_))
+    ));
+    assert!(matches!(
+        client.list(&other, &list).await,
+        Err(SearchError::NotAllowed(_))
+    ));
+    assert_eq!(hits.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_registry_without_explore_gives_its_501() {
+    let stub = Stub::bind().await;
+    let base = stub.base.clone();
+    stub.serve(vec![(
+        "/explore",
+        status(501, r#"{"errorCode": "UNIMPLEMENTED", "message": "no explore"}"#),
+    )]);
+    let explore = ExploreRequest {
+        query: None,
+        result_type: ResultType {
+            facets: vec![FacetRequest { field: "type".into() }],
+        },
+    };
+    let error = client(&[&base], 0).explore(&base, &explore).await.unwrap_err();
+    assert!(matches!(error, SearchError::Registry { status: 501, .. }), "{error:?}");
 }

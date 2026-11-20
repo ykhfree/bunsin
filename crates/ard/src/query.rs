@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The default namespace of the ARD base context (§4.1).
-pub const ARD_NAMESPACE: &str = "https://agenticresourcediscovery.org/ns#";
+use crate::jsonld::ARD_NAMESPACE;
 /// The default page size of `/search` (§5.3.2).
 pub const SEARCH_PAGE_SIZE: usize = 10;
 /// The default page size of `/agents` (§5.3.4).

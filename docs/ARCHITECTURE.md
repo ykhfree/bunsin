@@ -850,16 +850,54 @@ agent는 이벤트만 보고 답하지 않는다. 필요한 사실을 `read` 도
   뒤의 읽기는 앞에서 읽은 글을 인자에 담을 수 있다. 그래서 통제할 수 없는 URL을 가져오는 도구는 `read`로 두면 안 된다.
 - 한계: 무엇을 읽을지는 LLM이 정한다. notes에는 관련도 순위와 검색이 있다(15절). 커넥터의 문서에는 색인이 없다.
 
-**ARD 검색 `bunsin.ard/search {text, registry?}`**(core `ard`, daemon `ard_search.rs`)
+**ARD 도구 `bunsin.ard/{search, explore, list, resolve}`**(core `ard`, ard `search.rs` `resolve.rs` `jsonld.rs` `html.rs`, daemon `ard_search.rs` `fetch.rs`)
 
-- 설정 `ard_registries: [{name, url}]`(`ProfileConfig`, `#[serde(default)]`). 설계의 `federation` 필드는 두지 않았다. referral을 따르지 않으므로 고를 값이 `none` 하나뿐이다.
+- 설정: `ard_registries: [{name, url}]`, `ard_domains: ["acme.com" | {domain, catalog}]`(`ProfileConfig`, 둘 다 `#[serde(default)]`).
+  `ard_domains`는 20개까지, 소문자 도메인 이름, 같은 domain 두 번은 거부(core `check_domains`). 창은 아직 `ard_domains`를 고치지 않는다(`config-set`).
+- 앞의 셋은 registry가 있을 때, `resolve`는 domain이 있을 때 보인다. 목록은 core `tool_specs` 하나가 정하고, 엔진의 도구 안내, 엔진의 읽기 허용, connector의 `list_tools`가 같은 목록을 쓴다.
 - 엔진에는 HTTP client가 없으므로 `RealBackends`가 runtime에 내장 connector `bunsin.ard`를 넣는다. 이름의 `.` 때문에 소유자 connector와 겹치지 않는다.
-- 요청: `POST <url>/search`, `query.text`, `federation: "none"`, `pageSize: 5`. `SearchClient`의 hop 한도는 0이라 referral 요청이 없다(테스트가 목록 안의 registry를 가리키는 referral로 확인한다). redirect도 따르지 않는다.
-- registry 주소는 `UpstreamPolicy::check`를 저장할 때와 만들 때 지난다. 이름은 `check_registries`가 검사한다(connector 이름 규칙, 중복 없음).
-- 엔진은 이 도구를 notes 읽기처럼 규칙 없이 허용한다(registry가 있을 때만, 읽기 허용 단계에서만). 실행과 결과 처리는 connector 읽기와 같아서
+- 엔진은 이 도구들을 notes 읽기처럼 규칙 없이 허용한다(보이는 도구만, 읽기 허용 단계에서만). 실행과 결과 처리는 connector 읽기와 같아서
   필터, 인용, 감사 `read`, 산출물 `read_result`를 지나고 커넥터 읽기 5회 한도에 든다. 정지 스위치는 다른 읽기처럼 막지 않는다.
-- 결과는 identifier, displayName, type, url, description, capabilities, score, source만 넘긴다. `score`는 글일 뿐이고 `Policy::decide`에는 score 입력이 없다.
 - 찾은 자원은 부를 수 없다. 소유자가 connector로 더하고 도구를 승인해야 한다.
+
+registry 도구(ard `SearchClient`, hop 한도 0, redirect를 따르지 않음)
+
+| 도구 | 인자 | 요청 |
+|---|---|---|
+| `search` | `text`, `registry?`, `filter?`(10키×10값, 값 200자), `context?`(prefix→IRI 10개), `page_token?` | `POST <url>/search`, `federation: "none"`, `pageSize: 5` |
+| `explore` | `facets`(1~5), `registry?`, `text?`, `filter?`, `context?` | `POST <url>/explore`. 501은 읽을 수 있는 오류 |
+| `list` | `registry?`, `type?[]`, `publisher?[]`, `display_name?`, `created_after?`, `updated_after?`, `order_by?`, `page_token?` | `GET <url>/agents?filter=…&pageSize=5` |
+
+- `filter`의 값 하나는 한 값 배열로 보낸다(§5.3.1). `context`는 받은 entry의 `@context`와 같은 규칙으로 검사한다(아래 JSON-LD). 결과의 `pageToken`은 agent에게 `page_token`으로 준다.
+- `list`의 식은 `ListFilter::expression`이 만든다: `type = 'a,b' AND publisherId = 'acme.com' AND displayName = 'x' AND createdAfter > '…'`.
+  Appendix A와 OpenAPI 예가 함께 허용하는 범위이다. 값의 `'`·`,`는 식을 바꾸므로 거부한다. 시각은 core `time::parse_utc`가 읽는 RFC 3339만, `order_by`는 네 필드와 `DESC`의 enum이다.
+- referral을 따르지 않는다. referral은 소유자가 아니라 registry가 고른 registry이다(5절 federation은 계속 `none`). 테스트가 목록 안의 registry를 가리키는 referral로 확인한다.
+- search·list 결과는 identifier, displayName, type, url, description, capabilities만 넘기고, search는 score와 source를 더한다. `score`는 글일 뿐이고 `Policy::decide`에는 score 입력이 없다.
+
+`resolve {domain}`(D5: 인자는 `ard_domains`의 enum이고, connector가 다시 목록과 비교한다)
+
+- domain 해석(ard `resolve`, crawl과 같은 코드): ① `https://<domain>/.well-known/ard.json` ② `https://<domain>/`의 `Link` 헤더와 `<body>` 앞 `<link rel="ard">`
+  ③ `https://<domain>/robots.txt`의 `Agentmap:` ④ ②·③이 알린 주소 최대 10개(깊이 1). 세 단계를 모두 돈다(§5.1의 MUST 둘). href는 redirect 뒤 문서 주소 기준이다.
+  `{domain, catalog}`는 해석을 건너뛰고 catalog 하나만 가져온다(설계 9절 A1).
+- 문서: `{`로 시작하면 manifest이고 항목을 하나씩 따로 읽는다(한 항목이 깨져도 나머지는 산다). 그 밖은 HTML이다.
+  HTML은 html5ever 0.27 tokenizer로 읽는다. sink가 `script`·`style`·`title`·`textarea` 등에서 raw text 상태를 알려 주므로, 주석·script 문자열 속 link와 블록은 나오지 않는다.
+  `application/ld+json` 블록은 20개, 각 64 KiB까지이다. 객체, 배열 원소, `@graph` 원소(바깥 `@context`를 물려받음) 중 `@context`에 기반 URL이 있거나 `@context` 없이 identifier·displayName·type이 있는 것이 후보이다.
+- 항목 수락(`accept_entry`, crawl과 공유): 64 KiB 이하, 지원하는 `@context`, `validate()`의 MUST 위반 없음, URN publisher가 결속 domain과 같음(대소문자 무시).
+  결속 domain은 해석한 domain이거나 소유자가 catalog와 함께 적은 domain이다. 가져온 host가 아니므로 CDN 주소도 된다. 상위 domain은 받지 않는다(공개 suffix 목록 없이 `evil.github.io`가 `urn:air:github.io:…`를 주장하는 것을 막는다).
+  대가: 다른 domain의 항목은 올바라도 거부된다. 거부 이유는 enum `RejectReason`이다(crawl이 이유별로 센다).
+- JSON-LD 최소 전개(ard `jsonld`, D6): 기반 context는 crate 안 사본(`ard.context.jsonld`)이다. 원격 context는 가져오지 않는다.
+  지원: 기반 URL, 용어·prefix 정의(절대 IRI, 알려진 prefix의 compact IRI, `{"@id"}`에 `@type`·`@container`), 그 배열. 최상위 키를 용어, compact IRI, 절대 IRI, `@vocab` 순서로 IRI로 바꾸고 값은 바꾸지 않는다.
+  거부: 다른 원격 context, `null`, `@vocab`·`@base`·`@import`·`@protected` 등 키워드, scoped context, `@reverse`, `@nest`, 기반 용어나 `ard`의 재정의, 기반 용어를 다른 이름으로 쓴 키(`ard:trustManifest` 등. `validate()`는 제 이름만 읽으므로 그 규칙을 피한다), 같은 IRI로 전개되는 두 키(한 값이 다른 값을 가린다).
+- agent가 보는 것: 항목 20개까지. core 용어는 원래 이름, `publisher`(URN에서), `trustIdentity`("(not verified)"), 다른 namespace 용어는 전개한 IRI 키로(항목당 20개). 값은 500자에서 자른다.
+  다른 namespace를 IRI로 보이는 이유: 게시자의 prefix가 core 용어처럼 보이지 않게. 거부 항목은 identifier와 이유만, 읽지 못한 출처는 주소와 Bunsin 문구의 오류만 보인다.
+- 보지 않는 것: `ai-catalog.json`(§5.1 MAY), DNS(SVCB에 항목 출처 주소가 없다). trust manifest는 검증하지 않는다(§4.5.2).
+
+주소 규칙(daemon `validate`, build, `fetch.rs`)
+
+- registry 주소, `https://<domain>/`, catalog는 `UpstreamPolicy::check`를 저장할 때와 만들 때 지난다. registry 이름은 `check_registries`가 검사한다(connector 이름 규칙, 중복 없음).
+- `fetch.rs`의 `Fetcher`: 처음 주소와 redirect hop마다 `UpstreamPolicy::check`, redirect 3번, 요청 10 s, 응답 1 MiB, 해석 30 s.
+  운영자 host 목록이 없으면 reqwest `dns_resolver`가 이름의 내부 주소를 버리고, 남는 주소가 없으면 연결을 거부한다. 이 client는 proxy를 쓰지 않는다. proxy가 이름을 직접 조회하면 resolver를 지나지 않기 때문이다.
+  이유: 이 주소는 소유자가 아니라 제3자가 고른다. ard는 HTTP 규칙을 갖지 않고 `Fetch` trait만 정한다. 그래서 해석 순서와 수락 규칙을 네트워크 없이 시험하고, crawl이 같은 코드를 쓴다.
 
 ## 14. 설정 저장의 충돌 검사
 
@@ -1025,7 +1063,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구는 실행해 보지 않았다. |
-| ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버, 창의 목록 편집). 로컬 stub registry로만 테스트 |
+| ARD 도구(search·explore·list·resolve 내장 읽기 도구, referral 없음, domain 해석과 결속 규칙, JSON-LD 최소 전개, 제3자 주소 fetcher, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, ard, 서버, 창의 registry 목록 편집). 로컬 stub registry와 stub catalog로만 테스트. 도메인만 적은 해석은 서버 테스트가 loopback으로 닿지 못해(https 443) ard의 메모리 web으로만 테스트. 창에는 `ard_domains` 편집이 없다. |
 | ARD registry phase 1(운영자 플래그, `registry.db`, 자기 catalog 수집, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. 공식 conformance 도구는 실행해 보지 않았다. 외부 seed crawl은 phase 2이고 아직 없다. |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |

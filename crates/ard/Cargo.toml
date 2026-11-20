@@ -12,6 +12,8 @@ thiserror.workspace = true
 url = "2"
 # The same reqwest as the other crates. It is named here to build the client without redirects.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The HTML tokenizer for `<link rel="ard">` and JSON-LD blocks. Already in Cargo.lock (the window uses it).
+html5ever = "=0.27.0"
 
 [dev-dependencies]
 jsonschema.workspace = true
