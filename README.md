@@ -924,7 +924,9 @@ address you do not control can carry read text out of the server.
   confirmed.
 - Bunsin also refuses an entry that breaks a MUST rule of ARD, an entry larger than 64 KiB, and an
   entry whose `@context` it does not support: a remote context other than the ARD base context,
-  `@vocab`, `@base`, `@import`, `@protected`, or a new definition of a core term.
+  `@vocab`, `@base`, `@import`, `@protected`, a new definition of a core term, or a core term
+  written another way, such as `ard:trustManifest`. The entry rules read a core term by its own
+  name, so another spelling would pass by them.
 - The agent sees at most 20 entries. Each one has its core terms, its `publisher`, its trust
   identity marked "not verified", and its terms of other namespaces under their full IRI. A
   publisher's prefix therefore cannot pass as a core term. A refused entry shows only its

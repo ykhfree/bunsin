@@ -634,6 +634,16 @@ mod tests {
             reason(with("@context", json!("https://schema.org"))),
             RejectReason::UnsupportedContext(_)
         ));
+        // A base term spelled another way would pass by the trust and url-or-data rules.
+        for (key, value) in [
+            ("ard:trustManifest", json!({"identity": "spiffe://google.com/x"})),
+            ("ard:data", json!({"a": 1})),
+        ] {
+            assert!(
+                matches!(reason(with(key, value)), RejectReason::UnsupportedContext(_)),
+                "{key}"
+            );
+        }
         let RejectReason::Invalid(broken) = reason(with("data", json!({"a": 1}))) else {
             panic!("not invalid");
         };

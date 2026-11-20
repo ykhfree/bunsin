@@ -789,7 +789,8 @@ agent는 다른 도메인이나 주소를 줄 수 없습니다. 소유자가 통
   상위 도메인도 인정하지 않습니다. 공개 suffix 목록이 없으면 `evil.github.io`가 `urn:air:github.io:...`를 주장할 수 있기 때문입니다.
   이 규칙은 ARD §4.5.1의 신뢰 검사를 TLS로 확인한 도메인으로 대신합니다.
 - ARD의 필수 규칙을 어긴 항목, 64 KiB를 넘는 항목, 지원하지 않는 `@context`의 항목도 거부합니다.
-  지원하지 않는 것: ARD 기반 context가 아닌 원격 context, `@vocab`, `@base`, `@import`, `@protected`, core 용어의 재정의.
+  지원하지 않는 것: ARD 기반 context가 아닌 원격 context, `@vocab`, `@base`, `@import`, `@protected`, core 용어의 재정의,
+  `ard:trustManifest`처럼 다른 이름으로 쓴 core 용어. 항목 규칙은 core 용어를 제 이름으로 읽으므로, 다른 이름은 규칙을 피하기 때문입니다.
 - agent는 항목을 최대 20개 봅니다. 항목마다 core 용어, `publisher`, "not verified"가 붙은 trust identity, 다른 namespace의 용어를 봅니다.
   다른 namespace의 용어는 전개한 IRI로 보여 줍니다. 그래서 게시자의 prefix가 core 용어처럼 보이지 않습니다.
   거부한 항목은 identifier와 이유만 보여 줍니다. 500자를 넘는 값은 자릅니다.

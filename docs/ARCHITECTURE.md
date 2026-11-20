@@ -856,7 +856,7 @@ registry 도구(ard `SearchClient`, hop 한도 0, redirect를 따르지 않음)
   대가: 다른 domain의 항목은 올바라도 거부된다. 거부 이유는 enum `RejectReason`이다(crawl이 이유별로 센다).
 - JSON-LD 최소 전개(ard `jsonld`, D6): 기반 context는 crate 안 사본(`ard.context.jsonld`)이다. 원격 context는 가져오지 않는다.
   지원: 기반 URL, 용어·prefix 정의(절대 IRI, 알려진 prefix의 compact IRI, `{"@id"}`에 `@type`·`@container`), 그 배열. 최상위 키를 용어, compact IRI, 절대 IRI, `@vocab` 순서로 IRI로 바꾸고 값은 바꾸지 않는다.
-  거부: 다른 원격 context, `null`, `@vocab`·`@base`·`@import`·`@protected` 등 키워드, scoped context, `@reverse`, `@nest`, 기반 용어나 `ard`의 재정의, 같은 IRI로 전개되는 두 키(한 값이 다른 값을 가린다).
+  거부: 다른 원격 context, `null`, `@vocab`·`@base`·`@import`·`@protected` 등 키워드, scoped context, `@reverse`, `@nest`, 기반 용어나 `ard`의 재정의, 기반 용어를 다른 이름으로 쓴 키(`ard:trustManifest` 등. `validate()`는 제 이름만 읽으므로 그 규칙을 피한다), 같은 IRI로 전개되는 두 키(한 값이 다른 값을 가린다).
 - agent가 보는 것: 항목 20개까지. core 용어는 원래 이름, `publisher`(URN에서), `trustIdentity`("(not verified)"), 다른 namespace 용어는 전개한 IRI 키로(항목당 20개). 값은 500자에서 자른다.
   다른 namespace를 IRI로 보이는 이유: 게시자의 prefix가 core 용어처럼 보이지 않게. 거부 항목은 identifier와 이유만, 읽지 못한 출처는 주소와 Bunsin 문구의 오류만 보인다.
 - 보지 않는 것: `ai-catalog.json`(§5.1 MAY), DNS(SVCB에 항목 출처 주소가 없다). trust manifest는 검증하지 않는다(§4.5.2).

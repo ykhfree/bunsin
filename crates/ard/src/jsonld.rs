@@ -3,10 +3,14 @@
 //! Filters and facets compare the IRIs of top-level terms only. So this module turns each
 //! top-level key into an IRI and leaves every value as it is. It is not a JSON-LD processor.
 //!
-//! The base context is a copy inside this crate (`ard.context.jsonld`). A remote context is never
-//! fetched: only the base URL is known. A context may add terms and prefixes, each an absolute IRI,
-//! a compact IRI with a known prefix, or `{"@id": IRI}`. Anything else is refused, so that a
-//! publisher cannot change what a core term means.
+//! The base context is a copy inside this crate (`ard.context.jsonld`), unchanged. Source:
+//! <https://github.com/ards-project/ard-spec>, file `spec/schemas/ard.context.jsonld`, tree
+//! f073b1ea9b01a5f068d0b0986426f2ea49fa30b2 (blob de1ea70b). Copied on 2026-11-20.
+//!
+//! A remote context is never fetched: only the base URL is known. A context may add terms and
+//! prefixes, each an absolute IRI, a compact IRI with a known prefix, or `{"@id": IRI}`. Anything
+//! else is refused, so that a publisher cannot change what a core term means. A core term must
+//! also be written with its own name, because the entry rules read it by that name.
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -177,15 +181,27 @@ fn local_compact(found: &[(&String, &String)], value: &str) -> Option<String> {
 /// Expands the top-level keys of a node with the base context and its own `@context`.
 ///
 /// Returns each term's IRI with its value unchanged. Keywords such as `@id` are left out.
-/// Fails if the context is unsupported or two keys name the same IRI, such as `identifier`
-/// and `ard:identifier`: one value would hide the other.
+///
+/// Fails if the context is unsupported, or if a key spells a base term another way, such as
+/// `ard:trustManifest`. The entry rules read a base term by its own name, so another spelling
+/// would pass by them. Fails also if two keys name the same IRI: one value would hide the other.
 pub fn expand_terms(node: &Map<String, Value>) -> Result<Map<String, Value>, UnsupportedContext> {
-    let context = Context::base().with(node.get("@context"))?;
+    let base = Context::base();
+    let context = base.with(node.get("@context"))?;
     let mut terms = Map::new();
     for (key, value) in node {
         let iri = context.expand_key(key);
         if iri.starts_with('@') {
             continue;
+        }
+        if let Some((name, _)) = base
+            .terms
+            .iter()
+            .find(|(name, base_iri)| **base_iri == iri && *name != key)
+        {
+            return Err(unsupported(format!(
+                "the key `{key}` spells the base term `{name}` another way"
+            )));
         }
         if terms.insert(iri.clone(), value.clone()).is_some() {
             return Err(unsupported(format!("two keys expand to the same IRI `{iri}`")));
@@ -294,8 +310,20 @@ mod tests {
                 "{context}: {error}"
             );
         }
-        // Two keys for the same IRI are refused, so one value cannot hide another.
+        // A base term spelled another way is refused, alone or beside its own name.
+        for key in [
+            "ard:trustManifest",
+            "https://agenticresourcediscovery.org/ns#trustManifest",
+            "ard:mediaType",
+        ] {
+            let aliased = node(json!({"identifier": "urn:air:acme.com:x", key: {"identity": "spiffe://google.com/x"}}));
+            let error = expand_terms(&aliased).unwrap_err();
+            assert!(error.0.contains("spells the base term"), "{key}: {error}");
+        }
         let twice = node(json!({"identifier": "urn:air:acme.com:x", "ard:identifier": "urn:air:google.com:x"}));
+        assert!(expand_terms(&twice).unwrap_err().0.contains("spells the base term"));
+        // Two keys for the same IRI outside the base terms are refused, so one value cannot hide another.
+        let twice = node(json!({"colour": "blue", "ard:colour": "red"}));
         assert!(expand_terms(&twice).unwrap_err().0.contains("same IRI"));
         // The base URL, with or without an array, and a version marker are accepted.
         for context in [
