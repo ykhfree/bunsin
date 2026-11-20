@@ -26,6 +26,11 @@ pub const MAX_FACETS: usize = 10;
 pub const FACET_LIMIT: usize = 20;
 /// The largest bucket count of a facet. A larger request gets this count.
 pub const MAX_FACET_LIMIT: usize = 100;
+/// The most keys of the filter of one `/search` or `/explore` request. Each key is matched
+/// against every visible row, so the count bounds the work of one request.
+pub const MAX_REQUEST_FILTER_KEYS: usize = 20;
+/// The most values of one filter key.
+pub const MAX_REQUEST_FILTER_VALUES: usize = 50;
 
 /// The terms whose members a filter key can reach by a literal dot path (§5.3.1).
 const OPAQUE_TERMS: [&str; 3] = ["trustManifest", "metadata", "data"];
@@ -204,8 +209,20 @@ impl RawQuery {
         let context = Context::base()
             .with(self.context.as_ref())
             .map_err(|e| QueryError(format!("`query.@context`: {e}")))?;
+        let raw_filter = self.filter.unwrap_or_default();
+        if raw_filter.len() > MAX_REQUEST_FILTER_KEYS {
+            return invalid(format!("`query.filter` has more than {MAX_REQUEST_FILTER_KEYS} keys"));
+        }
         let mut filter = Vec::new();
-        for (key_text, value) in self.filter.unwrap_or_default() {
+        for (key_text, value) in raw_filter {
+            if value
+                .as_array()
+                .is_some_and(|items| items.len() > MAX_REQUEST_FILTER_VALUES)
+            {
+                return invalid(format!(
+                    "`{key_text}` has more than {MAX_REQUEST_FILTER_VALUES} filter values"
+                ));
+            }
             let key = resolve_key(&key_text, &context)?;
             let values = match value {
                 Value::String(text) => vec![text],
@@ -708,6 +725,42 @@ mod tests {
                 .contains("does not bind")
         );
         assert!(explore(json!({"resultType": {"facets": [{"field": "type"}, {"field": "type"}]}})).is_err());
+    }
+
+    #[test]
+    fn a_filter_has_at_most_20_keys_and_50_values_a_key() {
+        let keys = |count: usize| -> Map<String, Value> { (0..count).map(|n| (format!("k{n}"), json!("v"))).collect() };
+        let values = |count: usize| json!((0..count).map(|n| format!("v{n}")).collect::<Vec<_>>());
+        let facets = json!({"facets": [{"field": "type"}]});
+        // Search and explore share the rule.
+        let search_filter = |filter: Value| search(json!({"query": {"text": "x", "filter": filter}}));
+        let explore_filter = |filter: Value| explore(json!({"query": {"filter": filter}, "resultType": facets}));
+        for (filter, allowed) in [
+            (json!(keys(20)), true),
+            (json!(keys(21)), false),
+            (json!({"tags": values(50), "type": values(50)}), true),
+            (json!({"tags": values(51)}), false),
+            (json!({"tags": "one", "type": values(51)}), false),
+        ] {
+            for outcome in [
+                search_filter(filter.clone()).map(|_| ()),
+                explore_filter(filter.clone()).map(|_| ()),
+            ] {
+                match (outcome, allowed) {
+                    (Ok(()), true) => {}
+                    (Err(error), false) => assert!(error.0.contains("more than"), "{error}"),
+                    (outcome, _) => panic!("{filter}: {outcome:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            search_filter(json!(keys(21))).unwrap_err().0,
+            "`query.filter` has more than 20 keys"
+        );
+        assert_eq!(
+            explore_filter(json!({"tags": values(51)})).unwrap_err().0,
+            "`tags` has more than 50 filter values"
+        );
     }
 
     #[test]

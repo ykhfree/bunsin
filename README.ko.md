@@ -225,13 +225,20 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     뒤의 것은 그 catalog 주소 하나만 읽습니다. 어느 쪽이든 URN이 그 도메인을 가리키는 항목만 넣습니다.
     서버는 시작할 때 모든 seed 주소를 접속 대상 규칙(`--allow-upstream-host`)으로 검사합니다. 하나라도 어기거나 같은 seed를 두 번 적으면 시작하지 않습니다.
   - **일정.** registry는 seed를 하나씩 읽습니다. seed의 모든 entry source를 읽어야 성공입니다.
-    JSON manifest가 아니고 항목 markup도 없는 페이지(예: 점검 안내 페이지)는 읽기 실패입니다. 성공하면 1시간 뒤에 다시 읽습니다.
+    JSON manifest가 아니고 항목 markup도 없는 페이지(예: 점검 안내 페이지)는 읽기 실패입니다. 항목을 1,000개 넘게 적은 source도 읽기 실패입니다.
+    도메인만 적은 seed에서 `/.well-known/ard.json`이 404나 410이면 source가 아닙니다. 그래서 `rel="ard"` 링크나 `Agentmap` 줄로만 게시한 도메인도 됩니다.
+    source가 하나도 없는 도메인은 읽기 실패입니다.
+    `https://<domain>/`이나 `robots.txt`가 다른 오류(응답 없음, 5xx, 403, 1 MiB를 넘는 본문)로 답하면 그것이 알리는 source를 알 수 없으므로 읽기 실패입니다.
+    성공하면 1시간 뒤에 다시 읽습니다.
     n번 연속 실패하면 1시간 × 2^(n−1)(최대 24시간) 뒤에 다시 읽고, 항목은 그대로 둡니다.
     7일 동안 성공이 없으면 그 seed의 항목을 지우고, 다음 성공이 다시 채웁니다.
   - **리스너마다 보는 것.** 공개 리스너는 공개 항목만 봅니다. 순위와 개수도 그 항목으로만 셉니다.
     그래서 공개 리스너의 답은 내부 항목에 대해 아무것도 알려 주지 않습니다.
   - **한도.** 리스너마다 1분에 600 요청까지 답하고, 넘으면 429입니다. 요청 본문은 64 KiB까지입니다.
+    `/search`와 `/explore`의 필터는 키 20개까지, 키마다 값 50개까지이고, 넘으면 400입니다.
     한 쪽은 결과 100개까지이고, page token은 1,000번째 결과까지 갑니다.
+    seed 항목은 모두 합쳐 10,000개까지, seed 하나에 500개까지입니다. 서버 자신의 catalog는 10,000개에 들지 않습니다.
+    결과에는 crawl한 항목이 스스로 적은 `score`와 `source`가 없습니다. `/search`는 registry의 값을 붙입니다.
     `federation`의 모든 값은 이 index만 찾고, 답에 `referrals`는 없습니다.
   - **자기 항목.** registry 리스너는 자기 `ard.json`에 registry를 `urn:air:<domain>:registry:bunsin`으로 싣습니다.
     `<domain>`은 `--ard-publisher-domain` 중 리스너 host와 같거나 host의 끝부분인 가장 긴 도메인입니다(예: `agents.acme.com`이면 `acme.com`).
@@ -807,6 +814,8 @@ agent는 다른 도메인이나 주소를 줄 수 없습니다. 소유자가 통
 - 도메인만 적으면 ARD 규칙대로 해석합니다. `https://<domain>/.well-known/ard.json`, `https://<domain>/`의 `Link` 헤더와 `<link rel="ard">` 태그,
   `https://<domain>/robots.txt`의 `Agentmap:` 줄을 읽습니다. 그다음 알려진 주소를 최대 10개 가져옵니다.
   JSON 답은 manifest입니다. HTML 페이지에서는 JSON-LD 블록의 항목을 읽습니다.
+  `ard.json`이 없으면(404나 410) source가 아닙니다. 항목을 1,000개 넘게 적은 source는 읽지 않습니다.
+  루트 페이지나 `robots.txt`가 다른 오류로 답하면 알린 source를 알 수 없으므로 `resolve`는 그 오류로 실패합니다.
 - `catalog`를 함께 적으면 그 주소 하나만 가져옵니다. 다른 host가 그 도메인의 항목을 제공할 때 씁니다.
   예를 들어 리스너가 `agents.acme.com`인 Bunsin 서버는 `acme.com`의 항목을 게시합니다.
   이때 `{"domain": "acme.com", "catalog": "https://agents.acme.com/.well-known/ard.json"}`로 적습니다.

@@ -344,7 +344,24 @@ async fn the_public_registry_entry_and_its_dns_record_name_the_listener() {
 async fn requests_that_break_a_rule_get_400_and_every_answer_allows_any_origin() {
     let rig = rig(Some(InboundScope::Public)).await;
     let large = json!({"query": {"text": "x".repeat(70 * 1024)}}).to_string();
+    // A filter of 21 keys, and a key of 51 values.
+    let keys: Map<String, Value> = (0..21).map(|n| (format!("k{n}"), json!("v"))).collect();
+    let values: Vec<String> = (0..51).map(|n| format!("v{n}")).collect();
+    let facets = json!({"facets": [{"field": "type"}]});
     for (path, request) in [
+        ("/search", json!({"query": {"text": "x", "filter": keys}}).to_string()),
+        (
+            "/search",
+            json!({"query": {"text": "x", "filter": {"tags": values}}}).to_string(),
+        ),
+        (
+            "/explore",
+            json!({"query": {"filter": keys}, "resultType": facets}).to_string(),
+        ),
+        (
+            "/explore",
+            json!({"query": {"filter": {"tags": values}}, "resultType": facets}).to_string(),
+        ),
         ("/search", large),
         ("/search", "not json".to_owned()),
         (
@@ -935,6 +952,36 @@ async fn a_maintenance_page_is_a_failed_read_not_an_empty_catalog() {
     assert_eq!(down.failures, 1);
     assert_eq!(down.last_ok_at, None);
     assert_eq!(down.last_error.as_deref(), Some("the page holds no ARD entries"));
+}
+
+#[tokio::test]
+async fn a_source_with_more_than_1000_candidates_is_a_failed_read() {
+    let empty = |count: usize| json!({"entries": vec![json!({}); count]}).to_string();
+    let site = web(vec![
+        ("/many.json", "application/json", empty(1_001)),
+        ("/most.json", "application/json", empty(1_000)),
+    ])
+    .await;
+    let crawler = Crawler::new(&[
+        format!("acme.test={}/many.json", site.base),
+        format!("acme.test={}/most.json", site.base),
+    ]);
+    crawler.tick().await;
+    let seeds = crawler.seeds();
+    // Past the limit nothing is read, so no refusal rows are written and earlier entries would stay.
+    let many = &seeds[0];
+    assert_eq!(
+        (many.failures, many.last_ok_at, many.refusals.clone()),
+        (1, None, vec![])
+    );
+    assert_eq!(
+        many.last_error.as_deref(),
+        Some("the source lists more than 1000 entries")
+    );
+    // At the limit each candidate is read, and each empty object is refused.
+    let most = &seeds[1];
+    assert_eq!((most.failures, most.last_ok_at), (0, Some(START)));
+    assert_eq!(most.refusals, [("invalid".to_owned(), 1_000)]);
 }
 
 #[tokio::test]

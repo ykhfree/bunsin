@@ -271,14 +271,22 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     rules (`--allow-upstream-host`) and does not start if one fails or a seed is given twice.
   - **Schedule.** The registry reads one seed at a time. A read succeeds only if every entry
     source of the seed reads. A page that is no JSON manifest and has no entry markup (for example
-    a maintenance page) is a failed read. It reads a seed again 1 hour after a success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
+    a maintenance page) is a failed read, and so is a source that lists more than 1,000 entries.
+    For a plain domain, `/.well-known/ard.json` that answers 404 or 410 is no source, so a domain
+    may publish only through `rel="ard"` links or `Agentmap` lines. A domain with no source at all
+    is a failed read. If `https://<domain>/` or its `robots.txt` answers another error (no answer,
+    a 5xx, a 403, a body over 1 MiB), the sources that it announces are unknown, so the read
+    fails too. It reads a seed again 1 hour after a success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
     keeps the entries. A seed without a success for 7 days loses its entries until it is read
     again.
   - **What each listener sees.** The public listener sees only public entries. It ranks and
     counts only those entries, so its answers say nothing about internal entries.
   - **Limits.** Each listener answers 600 requests a minute; more get 429. A request body is
-    at most 64 KiB. A page has at most 100 results, and a page token reaches at most the
-    1,000th result. Every `federation` mode searches only this index, and no answer has
+    at most 64 KiB. The filter of `/search` and `/explore` has at most 20 keys and 50 values for a
+    key; more get 400. A page has at most 100 results, and a page token reaches at most the
+    1,000th result. The seeds hold at most 10,000 entries together, and 500 for one seed. The
+    server's own catalogs do not count against the 10,000. A result shows no `score` or `source`
+    of a crawled entry's own; `/search` adds the registry's. Every `federation` mode searches only this index, and no answer has
     `referrals`.
   - **Its own entry.** A registry listener lists the registry in its `ard.json` as
     `urn:air:<domain>:registry:bunsin`. `<domain>` is the longest `--ard-publisher-domain`
@@ -950,6 +958,9 @@ address you do not control can carry read text out of the server.
   the `Link` headers and `<link rel="ard">` tags of `https://<domain>/`, and the `Agentmap:` lines
   of `https://<domain>/robots.txt`. Then it fetches at most 10 of the announced addresses. A JSON
   answer is a manifest. From a page, Bunsin takes the entries in its JSON-LD blocks.
+  A missing `ard.json` (404 or 410) is no source. A source that lists more than 1,000 entries is
+  not read. If the root page or `robots.txt` answers another error, `resolve` fails with that
+  error, because the announced sources are unknown.
 - A domain with `catalog` fetches only that address. Use it when another host serves the entries
   of the domain. For example, a Bunsin server with the listener `agents.acme.com` publishes the
   entries of `acme.com`: write `{"domain": "acme.com", "catalog": "https://agents.acme.com/.well-known/ard.json"}`.

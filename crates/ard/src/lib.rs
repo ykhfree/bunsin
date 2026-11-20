@@ -49,8 +49,8 @@ pub use search::{
 pub use html::{MAX_BLOCK_BYTES, MAX_BLOCKS, Markup, markup_entries, read_markup};
 pub use jsonld::{ARD_NAMESPACE, BASE_CONTEXT_URL, Context, UnsupportedContext, expand_terms};
 pub use resolve::{
-    Accepted, Fetch, FetchError, Fetched, Found, MAX_ANNOUNCED, MAX_ENTRY_BYTES, RejectReason, Rejected, Resolution,
-    Seed, Source, SourceError, accept_entry, resolve,
+    Accepted, DiscoveryError, Fetch, FetchError, Fetched, Found, MAX_ANNOUNCED, MAX_ENTRY_BYTES, MAX_SOURCE_CANDIDATES,
+    RejectReason, Rejected, Resolution, Seed, Source, SourceError, accept_entry, resolve,
 };
 
 /// The ARD specification version that this crate implements.

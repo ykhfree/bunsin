@@ -144,6 +144,8 @@ impl Engine {
     }
 
     /// Stores the time of a save that changed `inbound`. The catalogs write it as `updatedAt`.
+    /// The registry then indexes the own catalogs again, so a profile that left a listener leaves
+    /// its registry at once.
     pub(crate) fn stamp_inbound(
         &self,
         store: &ProfileStore,
@@ -155,7 +157,11 @@ impl Engine {
         }
         store
             .set_setting(UPDATED_AT_KEY, &utc_text(self.now()))
-            .map_err(store_error)
+            .map_err(store_error)?;
+        // The save is done, so a failed refresh does not fail it. The registry task refreshes again
+        // within a minute and reports its own failure.
+        let _ = self.refresh_own_catalogs();
+        Ok(())
     }
 
     /// The catalog of the listener of `scope`: the entries of every profile that this listener serves

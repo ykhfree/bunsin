@@ -17,14 +17,15 @@ use bunsin_ard::{
 use bunsin_core::inbound::{InboundScope, reaches};
 use bunsin_core::search::{query_terms, rank_scored};
 use bunsin_core::time::parse_utc;
-use bunsin_store::{IndexedRow, NewEntry, Refusal, RegistryStore, SourceKind};
+use bunsin_store::{IndexedRow, NewEntry, Refusal, RegistryRead, RegistryStore, SourceKind};
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 /// The most entries of one source.
 pub const MAX_SOURCE_ENTRIES: usize = 500;
-/// The most entries of the whole index.
+/// The most entries of all seeds together. The own catalogs do not count: the profiles of the
+/// server bound them.
 pub const MAX_ENTRIES: usize = 10_000;
 /// How long after a successful read the crawl reads a seed again, in seconds.
 pub const REFETCH_AFTER: i64 = 3_600;
@@ -87,13 +88,16 @@ fn search_text(entry: &Map<String, Value>) -> String {
     lines.join("\n")
 }
 
-/// An entry as an answer shows it: without `representativeQueries`, which serve the index (§5.3.2).
+/// An entry as an answer shows it: without `representativeQueries`, which serve the index (§5.3.2),
+/// and without a `score` or `source` of a crawled publisher. Only the registry gives those (§5.3.2).
 fn shown(body: Value) -> Map<String, Value> {
     let mut item = match body {
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    item.remove("representativeQueries");
+    for member in ["representativeQueries", "score", "source"] {
+        item.remove(member);
+    }
     item
 }
 
@@ -212,7 +216,8 @@ impl Engine {
                 let publisher = urn_publisher(&entry.identifier).unwrap_or_default();
                 found.push(accept_entry(&raw, publisher));
             }
-            self.index_source(registry, source, found)?;
+            // The own catalogs take no room of the seeds.
+            self.index_source(registry, source, found, None)?;
         }
         Ok(())
     }
@@ -235,7 +240,8 @@ impl Engine {
     /// Stores what a read of a seed found, in place of its earlier entries, and reads it again in [`REFETCH_AFTER`].
     pub fn crawl_succeeded(&self, source: i64, found: Vec<Result<Accepted, Rejected>>) -> ApiResult<()> {
         let registry = self.registry.get().ok_or_else(|| internal("the registry is off"))?;
-        self.index_source(registry, source, found)?;
+        let outside = registry.store.seed_entries_outside(source).map_err(store_error)?;
+        self.index_source(registry, source, found, Some(MAX_ENTRIES.saturating_sub(outside)))?;
         registry
             .store
             .set_next_fetch(source, self.now() + REFETCH_AFTER)
@@ -259,10 +265,16 @@ impl Engine {
     }
 
     /// Stores the entries of one source in place of its earlier ones. `found` holds the outcome of
-    /// `accept_entry` for each entry. A refused entry, a repeated identifier, or an entry past a
-    /// limit is stored as a refusal with a short reason.
-    fn index_source(&self, registry: &Registry, source: i64, found: Vec<Result<Accepted, Rejected>>) -> ApiResult<()> {
-        let room = MAX_ENTRIES.saturating_sub(registry.store.entries_outside(source).map_err(store_error)?);
+    /// `accept_entry` for each entry. `room` is the most entries that the index has left for it, if
+    /// the source counts against [`MAX_ENTRIES`]. A refused entry, a repeated identifier, or an
+    /// entry past a limit is stored as a refusal with a short reason.
+    fn index_source(
+        &self,
+        registry: &Registry,
+        source: i64,
+        found: Vec<Result<Accepted, Rejected>>,
+        room: Option<usize>,
+    ) -> ApiResult<()> {
         let mut stored: Vec<NewEntry> = Vec::new();
         let mut refused: Vec<Refusal> = Vec::new();
         for outcome in found {
@@ -281,7 +293,7 @@ impl Engine {
                 Some("duplicate")
             } else if stored.len() >= MAX_SOURCE_ENTRIES {
                 Some("source_full")
-            } else if stored.len() >= room {
+            } else if room.is_some_and(|room| stored.len() >= room) {
                 Some("index_full")
             } else {
                 None
@@ -320,20 +332,18 @@ impl Engine {
     /// The rows that the query matches, with their score if it has text, best first (§5.3.3).
     /// Search and Explore share it, so they share the cutoff of `search::rank_scored`.
     fn matched(
-        &self,
-        registry: &Registry,
+        read: &RegistryRead,
         listener: InboundScope,
         query: &QueryModel,
     ) -> ApiResult<Vec<(IndexedRow, Option<u8>)>> {
-        let rows = registry.store.visible(listener).map_err(store_error)?;
+        let rows = read.visible(listener).map_err(store_error)?;
         let ranked = match &query.text {
             None => rows.into_iter().map(|row| (row, None)).collect(),
             Some(text) => {
                 let terms = query_terms(text);
                 let ids: BTreeSet<i64> = rows.iter().map(|row| row.id).collect();
                 // The SQL already keeps to the listener's rows. This also drops hidden duplicates.
-                let hits: Vec<BTreeSet<i64>> = registry
-                    .store
+                let hits: Vec<BTreeSet<i64>> = read
                     .term_hits(listener, &terms)
                     .map_err(store_error)?
                     .into_iter()
@@ -354,17 +364,19 @@ impl Engine {
             .collect())
     }
 
-    /// `POST /search` on the listener of `listener` (§5.3.2).
+    /// `POST /search` on the listener of `listener` (§5.3.2). One read of the index serves the
+    /// request, so the own catalogs or a crawl cannot replace its rows halfway.
     pub fn registry_search(&self, listener: InboundScope, request: &SearchQuery) -> ApiResult<SearchAnswer> {
         let registry = self.registry_for(listener)?;
         let canonical = request.query.canonical();
         let offset = page_offset("search", &canonical, request.page_token.as_deref())?;
-        let matched = self.matched(registry, listener, &request.query)?;
+        let read = registry.store.read();
+        let matched = Self::matched(&read, listener, &request.query)?;
         let (rows, page_token) = page(matched, offset, request.page_size, |next| {
             page_token("search", &canonical, next)
         });
         let ids: Vec<i64> = rows.iter().map(|(row, _)| row.id).collect();
-        let bodies = registry.store.bodies(&ids).map_err(store_error)?;
+        let bodies = read.bodies(&ids).map_err(store_error)?;
         let source = self.registry_url(listener)?;
         let results = bodies
             .into_iter()
@@ -383,7 +395,7 @@ impl Engine {
     /// `POST /explore` on the listener of `listener` (§5.3.3). The facets cover the whole matched set.
     pub fn registry_explore(&self, listener: InboundScope, request: &ExploreQuery) -> ApiResult<ExploreResponse> {
         let registry = self.registry_for(listener)?;
-        let matched = self.matched(registry, listener, &request.query)?;
+        let matched = Self::matched(&registry.store.read(), listener, &request.query)?;
         let facets = request
             .facets
             .iter()
@@ -400,6 +412,7 @@ impl Engine {
 
     /// `GET /agents` on the listener of `listener` (§5.3.4). `createdAfter` compares with the time
     /// the registry first stored the entry, and `updatedAfter` with the time its stored entry changed.
+    /// One read of the index serves the request.
     pub fn registry_list(&self, listener: InboundScope, request: &ListQuery) -> ApiResult<ListAnswer> {
         let registry = self.registry_for(listener)?;
         let offset = page_offset("agents", &request.canonical, request.page_token.as_deref())?;
@@ -426,8 +439,8 @@ impl Engine {
                 ListClause::UpdatedAfter(_) => time.is_some_and(|after| row.changed_at > after),
             })
         };
-        let mut rows: Vec<IndexedRow> = registry
-            .store
+        let read = registry.store.read();
+        let mut rows: Vec<IndexedRow> = read
             .visible(listener)
             .map_err(store_error)?
             .into_iter()
@@ -450,13 +463,7 @@ impl Engine {
             page_token("agents", &request.canonical, next)
         });
         let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
-        let items = registry
-            .store
-            .bodies(&ids)
-            .map_err(store_error)?
-            .into_iter()
-            .map(shown)
-            .collect();
+        let items = read.bodies(&ids).map_err(store_error)?.into_iter().map(shown).collect();
         Ok(ListAnswer {
             items,
             total,

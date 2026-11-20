@@ -2,14 +2,15 @@
 //! each listener sees.
 
 use bunsin_api::http::server_card_path;
-use bunsin_api::{EngineApi, ProfileConfig};
-use bunsin_ard::{ExploreQuery, ListQuery, SearchQuery, parse_explore, parse_list, parse_search};
+use bunsin_api::{EngineApi, Expected, InboundUpdate, ProfileConfig};
+use bunsin_ard::{ExploreQuery, ListQuery, SearchQuery, accept_entry, parse_explore, parse_list, parse_search};
 use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope};
 use bunsin_core::ports::BoxFuture;
 use bunsin_engine::{Backends, Engine, OuterListener, Runtime};
+use bunsin_store::{RegistryStore, SourceKind};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 const INTERNAL_URL: &str = "https://agents.corp.acme.com";
 const PUBLIC_URL: &str = "https://agents.acme.com";
@@ -28,7 +29,7 @@ impl Backends for Publishers {
 }
 
 struct Rig {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     engine: Engine,
     clock: Arc<AtomicI64>,
 }
@@ -52,11 +53,7 @@ impl Rig {
             engine.add_outer_listener(OuterListener { scope, url: url.into() });
         }
         engine.serve_registry(registry).unwrap();
-        Rig {
-            _dir: dir,
-            engine,
-            clock,
-        }
+        Rig { dir, engine, clock }
     }
 
     /// Adds a profile whose endpoint is on for `scope` and listed under acme.com.
@@ -521,4 +518,220 @@ async fn pages_follow_their_tokens_and_a_token_of_another_query_is_refused() {
     next["pageToken"] = json!(token);
     let second = rig.search(InboundScope::Internal, next);
     assert_ne!(identifiers(&page, "results"), identifiers(&second, "results"));
+}
+
+/// A crawled entry of the publisher in `identifier`.
+fn crawled(identifier: &str) -> Value {
+    json!({"identifier": identifier, "displayName": "Crawled", "type": "text/html", "url": "https://crawled.test/"})
+}
+
+/// Reads the next due seed as a crawl does: `entries` gets the seed's domain and gives what its sources hold.
+fn crawl(rig: &Rig, entries: impl Fn(&str) -> Vec<Value>) {
+    let (source, domain) = rig.engine.due_registry_seed().unwrap().expect("a seed is due");
+    let found = entries(&domain).iter().map(|raw| accept_entry(raw, &domain)).collect();
+    rig.engine.crawl_succeeded(source, found).unwrap();
+}
+
+#[tokio::test]
+async fn a_request_reads_one_state_of_the_index_while_the_own_catalogs_refresh() {
+    let rig = Rig::new(InboundScope::Internal);
+    for name in ["kim", "lee", "park", "choi"] {
+        rig.publish(
+            name,
+            InboundScope::Internal,
+            &format!("{name} refund desk"),
+            &["refund desk", "general help"],
+        )
+        .await;
+    }
+    rig.refresh();
+    let search = parse_search(text("kim refund").to_string().as_bytes()).unwrap();
+    let list = parse_list(Vec::new()).unwrap();
+    let answers = || {
+        (
+            rig.engine
+                .registry_search(InboundScope::Internal, &search)
+                .map(|a| json!(a)),
+            rig.engine
+                .registry_list(InboundScope::Internal, &list)
+                .map(|a| json!(a)),
+        )
+    };
+    let (Ok(searched), Ok(listed)) = answers() else {
+        panic!("the first answers failed");
+    };
+    assert_eq!(identifiers(&searched, "results")[0], "urn:air:acme.com:kim");
+    assert_eq!(listed["total"], 5);
+    // Each refresh replaces the rows of the own catalog with new row IDs.
+    let done = AtomicBool::new(false);
+    let mut wrong = Vec::new();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                rig.refresh();
+            }
+        });
+        for _ in 0..500 {
+            match answers() {
+                (Ok(s), Ok(l)) if s == searched && l == listed => {}
+                other => wrong.push(format!("{other:?}")),
+            }
+        }
+        done.store(true, Ordering::SeqCst);
+    });
+    assert!(
+        wrong.is_empty(),
+        "{} of 500 answers were wrong; the first: {}",
+        wrong.len(),
+        wrong[0]
+    );
+}
+
+#[tokio::test]
+async fn the_own_catalogs_take_no_room_of_the_seeds() {
+    let rig = Rig::new(InboundScope::Internal);
+    rig.publish(
+        "kim",
+        InboundScope::Internal,
+        "Payroll",
+        &["payroll dates", "payroll errors"],
+    )
+    .await;
+    rig.refresh();
+    let seeds: Vec<(String, InboundScope)> = (0..21)
+        .map(|n| (format!("s{n}.test"), InboundScope::Internal))
+        .collect();
+    rig.engine.set_registry_seeds(&seeds).unwrap();
+    for _ in &seeds {
+        crawl(&rig, |domain| {
+            (0..500).map(|n| crawled(&format!("urn:air:{domain}:e{n}"))).collect()
+        });
+    }
+    // The seeds alone fill the 10,000 entries of the index; the own rows do not count. The 21st seed finds no room.
+    let status = RegistryStore::open(rig.dir.path()).unwrap().status().unwrap();
+    let seeded: u64 = status
+        .iter()
+        .filter(|source| source.kind == SourceKind::Seed)
+        .map(|source| source.entries)
+        .sum();
+    assert_eq!(seeded, 10_000);
+    let last = status.iter().find(|source| source.url == "s20.test").unwrap();
+    assert_eq!(
+        (last.entries, last.refusals.clone()),
+        (0, vec![("index_full".to_owned(), 500)])
+    );
+
+    // With the index full, a new profile and the registry's own entry are still listed.
+    rig.publish(
+        "lee",
+        InboundScope::Internal,
+        "Shipping",
+        &["shipping dates", "shipping errors"],
+    )
+    .await;
+    rig.refresh();
+    let own = rig.list(
+        InboundScope::Internal,
+        &[("filter", "publisherId = 'acme.com,corp.acme.com'")],
+    );
+    assert_eq!(
+        identifiers(&own, "items"),
+        [
+            "urn:air:acme.com:kim",
+            "urn:air:acme.com:lee",
+            "urn:air:corp.acme.com:registry:bunsin"
+        ]
+    );
+    assert_eq!(rig.list(InboundScope::Internal, &[])["total"], 10_003);
+    let status = RegistryStore::open(rig.dir.path()).unwrap().status().unwrap();
+    let own = status.iter().find(|source| source.url == "self:internal").unwrap();
+    assert_eq!((own.entries, own.refusals.clone()), (3, vec![]));
+}
+
+#[tokio::test]
+async fn a_save_that_changes_inbound_updates_the_registry_at_once() {
+    let rig = Rig::new(InboundScope::Public);
+    for name in ["kim", "lee", "park"] {
+        rig.publish(
+            name,
+            InboundScope::Public,
+            &format!("{name} desk"),
+            &["help desk", "general help"],
+        )
+        .await;
+    }
+    rig.refresh();
+    let listed = |listener| identifiers(&rig.list(listener, &[]), "items");
+    assert_eq!(
+        listed(InboundScope::Public),
+        [
+            "urn:air:acme.com:kim",
+            "urn:air:acme.com:lee",
+            "urn:air:acme.com:park",
+            "urn:air:acme.com:registry:bunsin"
+        ]
+    );
+    // No refresh runs between the saves and the checks below.
+    // A settings save moves kim to the internal listener.
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.inbound.scope = InboundScope::Internal;
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    assert_eq!(
+        listed(InboundScope::Public),
+        [
+            "urn:air:acme.com:lee",
+            "urn:air:acme.com:park",
+            "urn:air:acme.com:registry:bunsin"
+        ]
+    );
+    assert!(listed(InboundScope::Internal).contains(&"urn:air:acme.com:kim".to_owned()));
+    // A save of the inbound settings removes lee's listing.
+    let mut inbound = rig.engine.inbound_settings("lee").await.unwrap();
+    inbound.ard = None;
+    let update = InboundUpdate {
+        inbound,
+        expected: Expected::Unchecked,
+    };
+    rig.engine.set_inbound_settings("lee", update).await.unwrap();
+    assert_eq!(
+        listed(InboundScope::Public),
+        ["urn:air:acme.com:park", "urn:air:acme.com:registry:bunsin"]
+    );
+    // A settings save turns park's endpoint off. A listing needs the endpoint on, so it goes too.
+    let mut config = rig.engine.profile_config("park").await.unwrap();
+    config.inbound.enabled = false;
+    config.inbound.ard = None;
+    rig.engine.set_profile_config("park", config).await.unwrap();
+    assert_eq!(listed(InboundScope::Public), ["urn:air:acme.com:registry:bunsin"]);
+    assert_eq!(
+        listed(InboundScope::Internal),
+        ["urn:air:acme.com:kim", "urn:air:corp.acme.com:registry:bunsin"]
+    );
+}
+
+#[tokio::test]
+async fn a_crawled_entry_shows_no_score_or_source_of_its_own() {
+    let rig = Rig::new(InboundScope::Internal);
+    rig.engine
+        .set_registry_seeds(&[("beta.test".to_owned(), InboundScope::Internal)])
+        .unwrap();
+    crawl(&rig, |domain| {
+        let mut entry = crawled(&format!("urn:air:{domain}:refunds"));
+        entry["description"] = json!("Refund desk");
+        entry["score"] = json!(7);
+        entry["source"] = json!("https://evil.example/");
+        vec![entry]
+    });
+    let listed = rig.list(InboundScope::Internal, &[("filter", "publisherId = 'beta.test'")]);
+    let item = &listed["items"][0];
+    assert_eq!(item["identifier"], "urn:air:beta.test:refunds", "{listed}");
+    assert!(item.get("score").is_none() && item.get("source").is_none(), "{item}");
+    // A search result carries the registry's own score and source.
+    let found = rig.search(InboundScope::Internal, text("refund desk"));
+    let result = &found["results"][0];
+    assert_eq!(result["identifier"], "urn:air:beta.test:refunds", "{found}");
+    assert_eq!(
+        (result["score"].clone(), result["source"].clone()),
+        (json!(100), json!(INTERNAL_URL))
+    );
 }

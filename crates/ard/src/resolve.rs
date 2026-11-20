@@ -14,6 +14,10 @@
 //! as a page with JSON-LD blocks. Not consulted: `/.well-known/ai-catalog.json` (§5.1 MAY) and DNS,
 //! whose records have no parameters that name an entry source.
 //!
+//! A 404 or 410 means that nothing is there. So a domain may publish only through links or
+//! `Agentmap` lines (§5.1): a missing `ard.json` is no source. Any other error of the root page or
+//! `robots.txt` leaves the announced sources unknown, and [`Resolution::discovery_error`] holds it.
+//!
 //! An entry is accepted only if its URN publisher is the binding domain: the domain that was
 //! resolved, or the domain that the owner gave with a catalog address. It is not the host that
 //! served the entry, so a link to a CDN works. A parent domain is not accepted: without a public
@@ -31,6 +35,9 @@ use url::Url;
 pub const MAX_ENTRY_BYTES: usize = 64 * 1024;
 /// The most announced addresses that one resolution fetches.
 pub const MAX_ANNOUNCED: usize = 10;
+/// The most entries that one source may list, twice the 500 entries that the registry keeps of a
+/// source. More is a source error, so a source cannot make an unbounded count of refusals.
+pub const MAX_SOURCE_CANDIDATES: usize = 1_000;
 
 /// What one fetch got.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,8 +122,25 @@ pub struct Resolution {
     /// The binding domain.
     pub domain: String,
     /// Each entry source that was fetched, in fetch order. The root page and `robots.txt` only
-    /// announce sources, so they are not here.
+    /// announce sources, so they are not here. A well-known `ard.json` that answered 404 or 410 is
+    /// not here either.
     pub sources: Vec<Source>,
+    /// The first error of the root page or `robots.txt`, other than 404 or 410. With it, the
+    /// sources that the page announces are unknown, so `sources` may be incomplete.
+    pub discovery_error: Option<DiscoveryError>,
+}
+
+/// A page that announces entry sources could not be read.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[error("cannot read `{url}`, which may announce entry sources: {error}")]
+pub struct DiscoveryError {
+    pub url: Url,
+    pub error: FetchError,
+}
+
+/// True if the error says that nothing is at the address: 404 or 410.
+fn nothing_there(error: &FetchError) -> bool {
+    matches!(error, FetchError::Status(404 | 410))
 }
 
 /// One fetched entry source.
@@ -136,6 +160,8 @@ pub enum SourceError {
     /// A page that is no manifest and holds no entry markup, for example a maintenance page.
     #[error("the page holds no ARD entries")]
     NoEntries,
+    #[error("the source lists more than {MAX_SOURCE_CANDIDATES} entries")]
+    TooManyEntries,
 }
 
 /// The entries of one source.
@@ -243,30 +269,35 @@ pub fn accept_entry(raw: &Value, domain: &str) -> Result<Accepted, Rejected> {
     })
 }
 
-/// Resolves a seed. A source that fails is in the result with its error; it stops nothing.
+/// Resolves a seed. A source or a page that fails is in the result with its error; it stops nothing.
 pub async fn resolve<F: Fetch>(fetch: &F, seed: &Seed) -> Resolution {
     let domain = seed.binding();
     let mut sources = Vec::new();
+    let mut discovery_error = None;
     if let Some(catalog) = seed.catalog_url() {
         sources.push(source(fetch, catalog, domain).await);
         return Resolution {
             domain: domain.to_owned(),
             sources,
+            discovery_error,
         };
     }
     let origin = seed.origin();
     let well_known = origin.join(".well-known/ard.json").expect("a fixed path joins");
-    sources.push(source(fetch, &well_known, domain).await);
+    let first = source(fetch, &well_known, domain).await;
+    if !matches!(&first.result, Err(SourceError::Fetch(error)) if nothing_there(error)) {
+        sources.push(first);
+    }
 
     let mut announced = Vec::new();
-    if let Ok(page) = fetch.get(&origin).await {
+    if let Some(page) = announcer(fetch, &origin, &mut discovery_error).await {
         let markup = read_markup(&String::from_utf8_lossy(&page.body));
         for target in ard_link_targets(&page.links).into_iter().chain(markup.links) {
             announced.extend(page.url.join(&target).ok());
         }
     }
     let robots = origin.join("robots.txt").expect("a fixed path joins");
-    if let Ok(file) = fetch.get(&robots).await {
+    if let Some(file) = announcer(fetch, &robots, &mut discovery_error).await {
         for target in agentmap_targets(&String::from_utf8_lossy(&file.body)) {
             announced.extend(file.url.join(target).ok());
         }
@@ -283,6 +314,24 @@ pub async fn resolve<F: Fetch>(fetch: &F, seed: &Seed) -> Resolution {
     Resolution {
         domain: domain.to_owned(),
         sources,
+        discovery_error,
+    }
+}
+
+/// Gets a page that announces sources. A 404 or 410 announces nothing. Another error goes into
+/// `error`, unless an earlier page already put one there.
+async fn announcer<F: Fetch>(fetch: &F, url: &Url, error: &mut Option<DiscoveryError>) -> Option<Fetched> {
+    match fetch.get(url).await {
+        Ok(page) => Some(page),
+        Err(failed) => {
+            if !nothing_there(&failed) {
+                error.get_or_insert(DiscoveryError {
+                    url: url.clone(),
+                    error: failed,
+                });
+            }
+            None
+        }
     }
 }
 
@@ -316,6 +365,9 @@ fn read_document(body: &[u8], domain: &str) -> Result<Found, SourceError> {
         }
         entries
     };
+    if candidates.len() > MAX_SOURCE_CANDIDATES {
+        return Err(SourceError::TooManyEntries);
+    }
     let mut found = Found::default();
     for candidate in &candidates {
         match accept_entry(candidate, domain) {
@@ -385,25 +437,31 @@ fn agentmap_targets(robots: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_RESPONSE_BYTES;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    /// Pages by address. An address that is not here answers 404.
+    /// Answers by address. An address that is not here answers 404.
     #[derive(Default)]
     struct Web {
-        pages: BTreeMap<String, Fetched>,
+        pages: BTreeMap<String, Result<Fetched, FetchError>>,
         asked: Mutex<Vec<String>>,
     }
 
     impl Web {
         fn page(mut self, url: &str, body: &str) -> Self {
-            self.pages.insert(url.into(), fetched(url, body));
+            self.pages.insert(url.into(), Ok(fetched(url, body)));
             self
         }
 
         fn with(mut self, url: &str, answer: Fetched) -> Self {
-            self.pages.insert(url.into(), answer);
+            self.pages.insert(url.into(), Ok(answer));
+            self
+        }
+
+        fn failing(mut self, url: &str, error: FetchError) -> Self {
+            self.pages.insert(url.into(), Err(error));
             self
         }
 
@@ -423,7 +481,11 @@ mod tests {
     impl Fetch for Web {
         fn get(&self, url: &Url) -> impl Future<Output = Result<Fetched, FetchError>> + Send {
             self.asked.lock().unwrap().push(url.to_string());
-            let answer = self.pages.get(url.as_str()).cloned().ok_or(FetchError::Status(404));
+            let answer = self
+                .pages
+                .get(url.as_str())
+                .cloned()
+                .unwrap_or(Err(FetchError::Status(404)));
             async move { answer }
         }
     }
@@ -599,10 +661,145 @@ mod tests {
         let web = Web::default().page("https://acme.com/robots.txt", &robots);
         let resolution = run(resolve(&web, &Seed::domain("acme.com").unwrap()));
         let urls: Vec<String> = resolution.sources.iter().map(|s| s.url.to_string()).collect();
-        let expected: Vec<String> = std::iter::once("https://acme.com/.well-known/ard.json".to_owned())
-            .chain((0..10).map(|n| format!("https://acme.com/{n}.json")))
-            .collect();
+        // The well-known address answered 404, so it is no source. An Agentmap line names it again; it is not asked twice.
+        let expected: Vec<String> = (0..10).map(|n| format!("https://acme.com/{n}.json")).collect();
         assert_eq!(urls, expected);
+        let well_known = web
+            .asked()
+            .iter()
+            .filter(|u| u.ends_with("/.well-known/ard.json"))
+            .count();
+        assert_eq!(well_known, 1);
+    }
+
+    #[test]
+    fn a_domain_without_ard_json_publishes_through_links_and_agentmaps() {
+        let seed = Seed::domain("acme.com").unwrap();
+        let linked = || {
+            Web::default()
+                .with(
+                    "https://acme.com/",
+                    Fetched {
+                        links: vec!["</linked.json>; rel=ard".into()],
+                        ..fetched("https://acme.com/", "<html></html>")
+                    },
+                )
+                .page("https://acme.com/linked.json", &manifest(&["urn:air:acme.com:linked"]))
+        };
+        // 404 and 410 of the well-known address mean that nothing is there.
+        for missing in [404, 410] {
+            let web = linked().failing("https://acme.com/.well-known/ard.json", FetchError::Status(missing));
+            let resolution = run(resolve(&web, &seed));
+            let urls: Vec<&str> = resolution.sources.iter().map(|s| s.url.as_str()).collect();
+            assert_eq!(urls, ["https://acme.com/linked.json"], "{missing}");
+            assert_eq!(accepted(&resolution), ["urn:air:acme.com:linked"]);
+            assert_eq!(resolution.discovery_error, None);
+        }
+        let web = Web::default()
+            .page("https://acme.com/robots.txt", "Agentmap: /mapped.json\n")
+            .page("https://acme.com/mapped.json", &manifest(&["urn:air:acme.com:mapped"]));
+        assert_eq!(accepted(&run(resolve(&web, &seed))), ["urn:air:acme.com:mapped"]);
+        // Another error of the well-known address stays a failed source.
+        let web = linked().failing("https://acme.com/.well-known/ard.json", FetchError::Status(503));
+        let resolution = run(resolve(&web, &seed));
+        assert_eq!(resolution.sources.len(), 2);
+        assert_eq!(
+            resolution.sources[0].result,
+            Err(SourceError::Fetch(FetchError::Status(503)))
+        );
+        // A domain that publishes nothing has no source at all.
+        assert_eq!(run(resolve(&Web::default(), &seed)).sources, []);
+        // A catalog address and an announced address that answer 404 stay failed sources.
+        let catalog = Url::parse("https://cdn.example.net/acme.json").unwrap();
+        let resolution = run(resolve(&Web::default(), &Seed::catalog("acme.com", catalog).unwrap()));
+        assert_eq!(
+            resolution.sources[0].result,
+            Err(SourceError::Fetch(FetchError::Status(404)))
+        );
+        let web = Web::default().page("https://acme.com/robots.txt", "Agentmap: /gone.json\n");
+        let resolution = run(resolve(&web, &seed));
+        assert_eq!(resolution.sources[0].url.as_str(), "https://acme.com/gone.json");
+        assert_eq!(
+            resolution.sources[0].result,
+            Err(SourceError::Fetch(FetchError::Status(404)))
+        );
+    }
+
+    #[test]
+    fn a_root_page_or_robots_txt_that_cannot_be_read_leaves_the_sources_unknown() {
+        let seed = Seed::domain("acme.com").unwrap();
+        let well_known = || {
+            Web::default().page(
+                "https://acme.com/.well-known/ard.json",
+                &manifest(&["urn:air:acme.com:well-known"]),
+            )
+        };
+        let transport = FetchError::Transport("connection reset".into());
+        for (page, error) in [
+            ("https://acme.com/", transport.clone()),
+            ("https://acme.com/", FetchError::Status(503)),
+            ("https://acme.com/robots.txt", FetchError::Status(500)),
+            ("https://acme.com/robots.txt", FetchError::Status(429)),
+            ("https://acme.com/robots.txt", FetchError::Status(403)),
+            ("https://acme.com/", FetchError::TooLarge(MAX_RESPONSE_BYTES)),
+            (
+                "https://acme.com/",
+                FetchError::Refused("a redirect target is refused".into()),
+            ),
+        ] {
+            let resolution = run(resolve(&well_known().failing(page, error.clone()), &seed));
+            // The well-known source was read, but what the page announces is unknown.
+            assert_eq!(accepted(&resolution), ["urn:air:acme.com:well-known"]);
+            let expected = DiscoveryError {
+                url: Url::parse(page).unwrap(),
+                error,
+            };
+            assert_eq!(resolution.discovery_error.as_ref(), Some(&expected), "{page}");
+        }
+        // The first error is kept; the other page is still read.
+        let web = well_known()
+            .failing("https://acme.com/", FetchError::Status(502))
+            .failing("https://acme.com/robots.txt", transport);
+        let resolution = run(resolve(&web, &seed));
+        assert_eq!(
+            resolution.discovery_error.unwrap().to_string(),
+            "cannot read `https://acme.com/`, which may announce entry sources: the server answered status 502"
+        );
+        assert!(web.asked().contains(&"https://acme.com/robots.txt".to_owned()));
+        // 404 and 410 announce nothing, which is no error.
+        let web = well_known()
+            .failing("https://acme.com/", FetchError::Status(410))
+            .failing("https://acme.com/robots.txt", FetchError::Status(404));
+        assert_eq!(run(resolve(&web, &seed)).discovery_error, None);
+    }
+
+    #[test]
+    fn a_source_may_list_at_most_1000_entries() {
+        let catalog = |body: String| {
+            let web = Web::default().page("https://agents.acme.com/catalog", &body);
+            let url = Url::parse("https://agents.acme.com/catalog").unwrap();
+            run(resolve(&web, &Seed::catalog("acme.com", url).unwrap()))
+                .sources
+                .remove(0)
+                .result
+        };
+        let manifest = |count: usize| json!({"entries": vec![json!({}); count]}).to_string();
+        assert_eq!(catalog(manifest(1_001)), Err(SourceError::TooManyEntries));
+        assert_eq!(catalog(manifest(1_000)).unwrap().rejected.len(), 1_000);
+        // One JSON-LD block of a page can hold as many candidates.
+        let in_page = |count: usize| {
+            let block = vec![json!({"identifier": "x", "displayName": "x", "type": "x"}); count];
+            format!(
+                r#"<html><script type="application/ld+json">{}</script></html>"#,
+                json!(block)
+            )
+        };
+        assert_eq!(catalog(in_page(1_001)), Err(SourceError::TooManyEntries));
+        assert_eq!(catalog(in_page(1_000)).unwrap().rejected.len(), 1_000);
+        assert_eq!(
+            SourceError::TooManyEntries.to_string(),
+            "the source lists more than 1000 entries"
+        );
     }
 
     #[test]

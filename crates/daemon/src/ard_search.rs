@@ -228,7 +228,15 @@ fn shown_entry(accepted: &Accepted) -> Value {
 }
 
 /// The result of `resolve`. An identifier is shown once, from the first source that gave it.
-fn resolved(resolution: &Resolution) -> Value {
+/// If the root page or `robots.txt` could not be read, the sources are not all known, so the
+/// resolution fails as a crawl does.
+fn resolved(resolution: &Resolution) -> Result<Value, ConnectorError> {
+    if let Some(error) = &resolution.discovery_error {
+        return Err(ConnectorError::Failed(format!(
+            "the resolution of `{}` is incomplete: {error}",
+            resolution.domain
+        )));
+    }
     let mut seen = BTreeSet::new();
     let (mut entries, mut refused, mut not_read) = (Vec::new(), Vec::new(), Vec::new());
     let (mut entries_left_out, mut refused_left_out) = (0, 0);
@@ -271,7 +279,7 @@ fn resolved(resolution: &Resolution) -> Value {
     if refused_left_out > 0 {
         out["refused_left_out"] = json!(refused_left_out);
     }
-    out
+    Ok(out)
 }
 
 impl ArdTools {
@@ -424,7 +432,7 @@ impl ArdTools {
         }
         .map_err(ConnectorError::Failed)?;
         let resolution = self.fetcher.resolve(&seed).await.map_err(ConnectorError::Failed)?;
-        Ok(resolved(&resolution))
+        resolved(&resolution)
     }
 }
 
@@ -449,5 +457,46 @@ impl Connector for ArdTools {
                 other => Err(ConnectorError::UnknownTool(other.to_owned())),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bunsin_ard::{DiscoveryError, FetchError, Found, Source, accept_entry};
+
+    fn resolution(discovery_error: Option<DiscoveryError>) -> Resolution {
+        let entry = json!({"identifier": "urn:air:acme.com:kim", "displayName": "Kim", "type": "text/html",
+                           "url": "https://acme.com/kim"});
+        let found = Found {
+            accepted: vec![accept_entry(&entry, "acme.com").unwrap()],
+            rejected: Vec::new(),
+        };
+        Resolution {
+            domain: "acme.com".into(),
+            sources: vec![Source {
+                url: Url::parse("https://acme.com/.well-known/ard.json").unwrap(),
+                result: Ok(found),
+            }],
+            discovery_error,
+        }
+    }
+
+    #[test]
+    fn a_resolution_with_an_unread_page_is_a_readable_failure() {
+        let shown = resolved(&resolution(None)).unwrap();
+        assert_eq!(shown["entries"][0]["identifier"], "urn:air:acme.com:kim");
+        let unread = DiscoveryError {
+            url: Url::parse("https://acme.com/robots.txt").unwrap(),
+            error: FetchError::Status(503),
+        };
+        let Err(ConnectorError::Failed(text)) = resolved(&resolution(Some(unread))) else {
+            panic!("an unread robots.txt must fail the resolution");
+        };
+        assert_eq!(
+            text,
+            "the resolution of `acme.com` is incomplete: cannot read `https://acme.com/robots.txt`, \
+             which may announce entry sources: the server answered status 503"
+        );
     }
 }

@@ -9,7 +9,7 @@
 
 use crate::UpstreamPolicy;
 use crate::fetch::Fetcher;
-use bunsin_ard::Seed;
+use bunsin_ard::{Accepted, Rejected, Resolution, Seed};
 use bunsin_core::inbound::InboundScope;
 use bunsin_engine::Engine;
 use std::time::Duration;
@@ -86,37 +86,132 @@ pub async fn tick(engine: &Engine, fetcher: Option<&Fetcher>, stopped: &tokio::s
     }
 }
 
-/// Reads one seed and hands the outcome to the engine. A read succeeds only if every entry source
-/// could be read, so a source that is down for a while does not remove its entries.
-/// Otherwise the first error is the failure: Bunsin text and an HTTP status only.
+/// Reads one seed and hands the outcome to the engine.
 async fn crawl(engine: &Engine, fetcher: &Fetcher, source: i64, text: &str) -> bunsin_api::ApiResult<()> {
     let seed = match parse_seed(text) {
         Ok(seed) => seed,
         Err(error) => return engine.crawl_failed(source, &error),
     };
-    let resolution = match fetcher.resolve(&seed).await {
-        Ok(resolution) => resolution,
-        Err(timeout) => return engine.crawl_failed(source, &timeout),
-    };
+    match fetcher.resolve(&seed).await.and_then(read_entries) {
+        Ok(found) => engine.crawl_succeeded(source, found),
+        Err(error) => engine.crawl_failed(source, &error),
+    }
+}
+
+/// The entries of a resolution. It succeeds only if the root page and `robots.txt` could be read
+/// or were absent, and every entry source could be read. So a page or a source that is down for a
+/// while does not remove entries. Otherwise the first error is the failure: Bunsin text and an
+/// HTTP status only.
+fn read_entries(resolution: Resolution) -> Result<Vec<Result<Accepted, Rejected>>, String> {
+    if let Some(error) = resolution.discovery_error {
+        return Err(error.to_string());
+    }
     if resolution.sources.is_empty() {
-        return engine.crawl_failed(source, "the source announced no entry source");
+        return Err("the source announced no entry source".into());
     }
     let mut found = Vec::new();
     for read in resolution.sources {
-        match read.result {
-            Ok(entries) => {
-                found.extend(entries.accepted.into_iter().map(Ok));
-                found.extend(entries.rejected.into_iter().map(Err));
-            }
-            Err(error) => return engine.crawl_failed(source, &error.to_string()),
-        }
+        let entries = read.result.map_err(|error| error.to_string())?;
+        found.extend(entries.accepted.into_iter().map(Ok));
+        found.extend(entries.rejected.into_iter().map(Err));
     }
-    engine.crawl_succeeded(source, found)
+    Ok(found)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bunsin_ard::{DiscoveryError, FetchError, Found, Source, SourceError, accept_entry};
+    use serde_json::json;
+
+    fn source(url: &str, result: Result<Found, SourceError>) -> Source {
+        Source {
+            url: Url::parse(url).unwrap(),
+            result,
+        }
+    }
+
+    /// A read source with one accepted and one refused entry.
+    fn read(name: &str) -> Source {
+        let entry = |identifier: String| {
+            accept_entry(
+                &json!({"identifier": identifier, "displayName": name, "type": "text/html", "url": "https://acme.com/"}),
+                "acme.com",
+            )
+        };
+        let found = Found {
+            accepted: vec![entry(format!("urn:air:acme.com:{name}")).unwrap()],
+            rejected: vec![entry(format!("urn:air:other.com:{name}")).unwrap_err()],
+        };
+        source(&format!("https://acme.com/{name}.json"), Ok(found))
+    }
+
+    fn resolution(sources: Vec<Source>, discovery_error: Option<DiscoveryError>) -> Resolution {
+        Resolution {
+            domain: "acme.com".into(),
+            sources,
+            discovery_error,
+        }
+    }
+
+    #[test]
+    fn a_read_takes_every_source_or_fails_with_the_first_error() {
+        let found = read_entries(resolution(vec![read("a"), read("b")], None)).unwrap();
+        let identifiers: Vec<(bool, String)> = found
+            .iter()
+            .map(|outcome| match outcome {
+                Ok(accepted) => (true, accepted.entry.identifier.clone()),
+                Err(rejected) => (false, rejected.identifier.clone().unwrap()),
+            })
+            .collect();
+        assert_eq!(
+            identifiers,
+            [
+                (true, "urn:air:acme.com:a".to_owned()),
+                (false, "urn:air:other.com:a".to_owned()),
+                (true, "urn:air:acme.com:b".to_owned()),
+                (false, "urn:air:other.com:b".to_owned()),
+            ]
+        );
+        // A source that fails fails the read, wherever it is.
+        let down = source(
+            "https://acme.com/down.json",
+            Err(SourceError::Fetch(FetchError::Status(503))),
+        );
+        let error = read_entries(resolution(vec![read("a"), down, read("b")], None)).unwrap_err();
+        assert_eq!(error, "the server answered status 503");
+        let many = source("https://acme.com/many.json", Err(SourceError::TooManyEntries));
+        let error = read_entries(resolution(vec![many], None)).unwrap_err();
+        assert_eq!(error, "the source lists more than 1000 entries");
+        assert_eq!(
+            read_entries(resolution(Vec::new(), None)).unwrap_err(),
+            "the source announced no entry source"
+        );
+    }
+
+    #[test]
+    fn a_page_that_announces_sources_and_cannot_be_read_fails_the_read() {
+        // The well-known source was read, but the root page did not answer: its links are unknown.
+        let unread = DiscoveryError {
+            url: Url::parse("https://acme.com/").unwrap(),
+            error: FetchError::Transport("connection reset".into()),
+        };
+        let error = read_entries(resolution(vec![read("well-known")], Some(unread))).unwrap_err();
+        assert_eq!(
+            error,
+            "cannot read `https://acme.com/`, which may announce entry sources: cannot reach the address: connection reset"
+        );
+        // The error also stands when no source was found.
+        let unread = DiscoveryError {
+            url: Url::parse("https://acme.com/robots.txt").unwrap(),
+            error: FetchError::Status(500),
+        };
+        let error = read_entries(resolution(Vec::new(), Some(unread))).unwrap_err();
+        assert!(
+            error.starts_with("cannot read `https://acme.com/robots.txt`"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn a_seed_is_a_domain_or_a_domain_with_one_catalog_address() {

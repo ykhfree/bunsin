@@ -923,8 +923,13 @@ registry 도구(ard `SearchClient`, hop 한도 0, redirect를 따르지 않음)
 
 - domain 해석(ard `resolve`, crawl과 같은 코드): ① `https://<domain>/.well-known/ard.json` ② `https://<domain>/`의 `Link` 헤더와 `<body>` 앞 `<link rel="ard">`
   ③ `https://<domain>/robots.txt`의 `Agentmap:` ④ ②·③이 알린 주소 최대 10개(깊이 1). 세 단계를 모두 돈다(§5.1의 MUST 둘). href는 redirect 뒤 문서 주소 기준이다.
+  - 404와 410은 "거기 없음"이다(`nothing_there`). ①이 404·410이면 source가 아니다. 링크나 `Agentmap`만으로 게시한 domain도 된다(§5.1).
+    ②·③이 404·410이면 알린 것이 없다. 다른 오류면 `Resolution::discovery_error`(처음 오류 하나)가 되고, 알린 source를 모르므로 해석이 불완전하다.
+    crawl은 이것을 읽기 실패로 센다(18절). `resolve` 도구는 `the resolution of <domain> is incomplete: …`로 실패하고, 그 글은 실패한 읽기로 LLM에 간다.
+    catalog 주소와 알린 주소의 404는 그대로 읽지 못한 source이다(주소를 적은 쪽이 거기 있다고 했다).
   `{domain, catalog}`는 해석을 건너뛰고 catalog 하나만 가져온다(설계 9절 A1).
 - 문서: `{`로 시작하면 manifest이고 항목을 하나씩 따로 읽는다(한 항목이 깨져도 나머지는 산다). 그 밖은 HTML이다.
+  후보 항목이 1,000개(`MAX_SOURCE_CANDIDATES`)를 넘으면 source 오류 `TooManyEntries`이고 항목을 하나도 읽지 않는다(manifest와 HTML 모두).
   HTML은 html5ever 0.27 tokenizer로 읽는다. sink가 `script`·`style`·`title`·`textarea` 등에서 raw text 상태를 알려 주므로, 주석·script 문자열 속 link와 블록은 나오지 않는다.
   `application/ld+json` 블록은 20개, 각 64 KiB까지이다. 객체, 배열 원소, `@graph` 원소(바깥 `@context`를 물려받음) 중 `@context`에 기반 URL이 있거나 `@context` 없이 identifier·displayName·type이 있는 것이 후보이다.
 - 항목 수락(`accept_entry`, crawl과 공유): 64 KiB 이하, 지원하는 `@context`, `validate()`의 MUST 위반 없음, URN publisher가 결속 domain과 같음(대소문자 무시).
@@ -1154,13 +1159,21 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   - 읽기에 성공하면 그 source의 행과 거부를 통째로 바꾼다. 같은 identifier는 `first_seen_at`을 유지하고, 항목 JSON이 바뀔 때만 `changed_at`을 옮긴다.
     `last_error`에는 Bunsin 문구와 HTTP status만 쓴다. seed의 `url` 열은 플래그에 적은 글 그대로이다.
   - 같은 identifier가 여러 source에 있으면 응답에는 하나만 나온다. self source의 행이 이기고, 다음은 작은 source ID이다.
+  - 한 요청은 index의 잠금을 한 번 잡고 모든 읽기(`visible`, `term_hits`, `bodies`)를 한다(store `RegistryStore::read`가 주는 `RegistryRead`).
+    이유: 자기 catalog의 갱신은 행을 지우고 새 ID로 다시 넣는다. 읽기 사이에 갱신이 끼면 앞에서 얻은 ID가 사라져 빈 결과나 500이 된다.
+    기각: 바뀌지 않은 행의 ID를 유지하는 UPSERT. 빠진 identifier, 7일 만료, seed 정리는 행을 정말 지우므로 같은 문제가 남는다.
+    대가: 요청을 계산하는 동안 crawl과 갱신의 쓰기가 기다린다. 요청의 비용은 아래 필터 한도가 묶는다.
   - 항목 수락: 모든 항목이 `bunsin_ard::accept_entry`(3절)를 지난다. JSON 64 KiB 이하, 지원하는 `@context`, MUST 위반 없음(SHOULD 위반은 받는다),
-    URN publisher가 결속 domain과 같음. 그 뒤 engine `index_source`가 identifier 중복, source당 500개, 전체 10,000개를 센다.
+    URN publisher가 결속 domain과 같음. 그 뒤 engine `index_source`가 identifier 중복, source당 500개, seed 전체 10,000개를 센다.
+    자기 catalog의 행은 10,000개에 들지 않고, 자기 catalog는 `index_full`로 거부되지 않는다. 그 수는 서버의 프로필이 정한다.
+    이유: seed가 index를 채워도 서버 자신의 새 프로필과 registry 항목은 실려야 한다.
     거부 이유는 고정 낱말이다: `invalid`, `too_large`, `unsupported_context`, `other_publisher`, `duplicate`, `source_full`, `index_full`.
     자기 catalog의 항목은 자기 URN publisher에 결속한다. 운영자의 `--ard-publisher-domain`이 이미 publisher를 정하기 때문이다.
   - `terms`는 최상위 키를 IRI로 바꾼 사본이다(값은 그대로). `accept_entry`가 `bunsin_ard::expand_terms`(3절의 최소 전개)로 만든다.
     `type`은 `ard:mediaType`이다. 항목의 `@context`가 묶은 prefix의 키는 그 IRI가 된다.
   - `search_text`는 `displayName`, `description`, `representativeQueries`, `capabilities`, `tags`의 글이다.
+  - 프로필 저장이 `inbound`를 바꾸면(engine `stamp_inbound`) 자기 catalog를 바로 다시 넣는다. 그래서 리스너에서 내린 프로필이 다음 tick(최대 60초)까지 남지 않는다.
+    다시 넣기가 실패해도 저장은 성공이다. registry task가 1분 안에 다시 넣고 그 실패를 stderr에 쓴다.
 - **seed**(9절 A1): `--ard-registry-source <seed>`(내부 리스너)와 `--ard-registry-public-source <seed>`(두 리스너, `--ard-registry public`일 때만). 둘 다 반복한다.
   - `<seed>`는 `<domain>`이거나 `<domain>=<URL>`이다. 앞의 것은 3절의 domain 해석(ard.json, `Link`·`<link rel="ard">`, robots `Agentmap`, 알린 주소)이다.
     뒤의 것은 그 주소 하나만 가져온다(JSON manifest 또는 HTML 속 JSON-LD). 두 형태 모두 결속 domain은 `<domain>`이다. URL의 host로 결속하는 규칙은 없다.
@@ -1177,7 +1190,15 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   - 모든 entry source가 읽혀야 성공이다. 그 항목으로 seed의 행을 통째로 바꾸고(`crawl_succeeded`), 1시간 뒤에 다시 읽는다.
     JSON manifest가 아니고 항목 markup도 없는 페이지는 source 오류 `NoEntries`이다(`{"entries": []}`는 의도한 빈 catalog라서 성공이다).
     기각: source 하나만 읽혀도 성공. 점검 페이지(200)나 잠깐 내려간 source 하나가 seed의 항목을 바로 지워 7일 보존이 소용없다.
-  - source 하나라도 실패하거나, source가 없거나, 해석이 30초를 넘으면 실패이다(`crawl_failed`). 행은 그대로 두고, n번째 연속 실패 뒤에는 1 h × 2^(n−1)(최대 24 h) 뒤에 다시 읽는다.
+  - 후보 항목이 1,000개(`MAX_SOURCE_CANDIDATES`, source당 500개의 두 배)를 넘는 source는 source 오류 `TooManyEntries`이다. 그 source의 항목은 하나도 읽지 않는다.
+    이유: 1 MiB manifest `{"entries":[{},{},…]}`는 약 35만 개의 거부 행을 registry 잠금 아래 한 transaction으로 매시간 쓰게 한다.
+    한계: domain seed는 source가 11개까지이므로 거부 행은 seed 하나에 11,000개까지 남는다.
+  - domain seed의 해석(3절): `/.well-known/ard.json`이 404나 410이면 source가 아니다(§5.1은 링크나 `Agentmap`만으로 게시하는 것도 허용한다).
+    루트 페이지나 `robots.txt`가 404·410 말고 다른 오류(transport, 시간 초과, 5xx, 그 밖의 4xx, 1 MiB 초과, 주소 규칙 거부)로 답하면
+    `Resolution::discovery_error`가 된다. 그 페이지가 알린 source를 모르므로 읽기 실패이다(daemon `read_entries`).
+    기각: 그 오류를 "알린 것 없음"으로 읽기. 루트 페이지가 잠깐 503이면 링크로 알린 source의 항목이 바로 지워진다.
+    대가: `robots.txt`가 늘 403이거나 루트 페이지가 1 MiB를 넘는 domain은 ard.json이 멀쩡해도 색인되지 않는다. 운영자는 `registry-status`의 `last_error`로 보고 `<domain>=<URL>` 형태로 바꿀 수 있다.
+  - source 하나라도 실패하거나, 알리는 페이지를 읽지 못했거나, source가 없거나, 해석이 30초를 넘으면 실패이다(`crawl_failed`). 행은 그대로 두고, n번째 연속 실패 뒤에는 1 h × 2^(n−1)(최대 24 h) 뒤에 다시 읽는다.
     마지막 성공이 7일 전이거나 더 오래되었으면 그 seed의 항목을 지운다. 다음 성공이 다시 채운다.
   - 실패는 stderr가 아니라 `registry-status`의 `failures`와 `last_error`로 보인다.
 - **순위**: core `query_terms` → store `term_hits`(store `lib.rs`. profile 저장소와 registry가 함께 쓴다) → core `rank_scored`.
@@ -1197,11 +1218,15 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
     `trustManifest.`·`metadata.`·`data.` 아래의 글자 그대로 경로. 그 밖의 점 경로, 묶이지 않은 prefix, 키워드(`id` 등)는 400이다(§5.3.1 MAY).
     3절의 전개가 받지 않는 `query.@context`(원격 context, `@vocab`, 기반 용어의 재정의 등)도 400이다.
   - 필터 값은 문자열이나 문자열 배열이다(빈 배열은 400). 한 키 안은 OR, 키 사이는 AND이다. 항목의 값이 배열이면 원소 하나만 맞아도 된다.
+  - 필터는 키 20개(`MAX_REQUEST_FILTER_KEYS`), 키마다 값 50개(`MAX_REQUEST_FILTER_VALUES`)까지이다. 넘으면 400 `INVALID_ARGUMENT`이다.
+    이유: 인증 없는 요청 하나가 보이는 행마다 모든 키를 맞춰 본다. 한도가 요청 하나의 CPU를 묶는다. facet 한도(1~10개)는 그대로이다.
     `publisher`는 대소문자를 무시하고, 그 밖은 문자열이 정확히 같아야 한다. 숫자와 참·거짓은 JSON 글자로 비교한다.
   - `/search`: `query.text`가 필요하다. `federation`의 `auto`, `referrals`, `none`은 모두 자기 index만 찾고(§5.4, 상류가 없다), 응답에 `referrals`가 없다.
     그 밖의 값은 400이다. `pageSize`는 기본 10, 100을 넘으면 100, 1보다 작으면 400이다.
     `pageToken`은 base64url(offset, 요청 digest)이고, offset은 1,000까지이다. 다른 요청의 token은 400이다.
-    결과는 저장한 항목에서 `representativeQueries`를 빼고 정수 `score`와 `source`(리스너 base URL)를 더한 것이다.
+    결과는 저장한 항목에서 `representativeQueries`와 항목이 스스로 적은 `score`·`source`를 빼고(engine `shown`), 정수 `score`와 `source`(리스너 base URL)를 더한 것이다.
+    `/agents`의 item도 같은 세 멤버를 뺀다. 이유: crawl한 게시자가 registry의 점수나 출처인 척하지 못하게.
+    `shown`에서 빼므로 이미 저장된 행에도 듣는다. 저장한 `terms`에는 남으므로 그 이름의 facet과 필터는 게시자의 값을 본다(게시자의 용어일 뿐 registry의 값으로 보이지 않는다).
   - `/explore`: facet 1~10개, 같은 field 두 번은 400. `limit`은 기본 20(최대 100), `minCount`는 기본 1이다.
     한 항목은 값마다 한 번 센다. bucket은 count 내림, value 오름 순서이다. `otherCount`는 잘린 bucket의 count 합이고, 잘린 것이 없으면 없다.
     세 endpoint를 모두 구현하므로 501은 쓰지 않는다.
@@ -1231,5 +1256,10 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   `the_public_listener_never_sees_internal_rows`, `an_internal_row_changes_no_public_score_count_or_total`, `self_entries_name_the_card_of_their_listener`).
   daemon `tests/registry.rs`(`answers_follow_the_openapi_shapes`는 응답을 `ard.openapi.yaml` 응답 스키마의 JSON 사본으로 검사한다. 경로, 400, 429, task, CLI `registry_status_lists_sources_and_counts`,
   `a_crawl_indexes_a_manifest_and_in_page_markup`, `refused_entries_are_reported_by_reason`, `a_failing_source_keeps_its_entries_for_seven_days`,
-  `a_catalog_seed_binds_its_named_domain_not_the_host`(9절 A1: Bunsin A의 ard.json을 `acme.test=`로 읽으면 넣고 `other.test=`로 읽으면 `other_publisher`로 거부), `a_bad_registry_source_stops_the_start`).
+  `a_catalog_seed_binds_its_named_domain_not_the_host`(9절 A1: Bunsin A의 ard.json을 `acme.test=`로 읽으면 넣고 `other.test=`로 읽으면 `other_publisher`로 거부), `a_bad_registry_source_stops_the_start`,
+  `a_source_with_more_than_1000_candidates_is_a_failed_read`).
+  엔진 `tests/registry.rs`의 `a_request_reads_one_state_of_the_index_while_the_own_catalogs_refresh`(갱신과 요청을 함께 돌려 모든 답이 같은지 본다),
+  `the_own_catalogs_take_no_room_of_the_seeds`, `a_save_that_changes_inbound_updates_the_registry_at_once`, `a_crawled_entry_shows_no_score_or_source_of_its_own`.
+  ard `resolve.rs`의 `a_domain_without_ard_json_publishes_through_links_and_agentmaps`, `a_root_page_or_robots_txt_that_cannot_be_read_leaves_the_sources_unknown`,
+  `a_source_may_list_at_most_1000_entries`. daemon `crawl.rs`의 `read_entries` 테스트. domain 형태는 loopback으로 시험할 수 없으므로(443 포트) 이 두 층으로 확인한다.
 - **아직 없는 것**: `trustManifest`의 검증, crawl이 찾은 `application/ai-registry+json` 항목의 federation(항목으로만 싣는다).

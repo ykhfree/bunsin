@@ -208,13 +208,14 @@ impl RegistryStore {
         Ok(db.query_row("SELECT id FROM sources WHERE url = ?1", [url], |row| row.get(0))?)
     }
 
-    /// How many entries the sources other than `source` hold.
-    pub fn entries_outside(&self, source: i64) -> Result<usize> {
-        let count: i64 =
-            self.db()
-                .query_row("SELECT COUNT(*) FROM entries WHERE source_id != ?1", [source], |row| {
-                    row.get(0)
-                })?;
+    /// How many entries the seed sources other than `source` hold. Self catalogs are not counted.
+    pub fn seed_entries_outside(&self, source: i64) -> Result<usize> {
+        let count: i64 = self.db().query_row(
+            "SELECT COUNT(*) FROM entries e JOIN sources s ON s.id = e.source_id
+             WHERE s.kind = 'seed' AND e.source_id != ?1",
+            [source],
+            |row| row.get(0),
+        )?;
         Ok(count as usize)
     }
 
@@ -358,76 +359,10 @@ impl RegistryStore {
             .optional()?)
     }
 
-    /// The rows that the listener of `listener` sees, one per identifier, by identifier.
-    /// Of rows with the same identifier, the one of a self catalog wins, then the one of the
-    /// smallest source ID.
-    pub fn visible(&self, listener: InboundScope) -> Result<Vec<IndexedRow>> {
-        let db = self.db();
-        let mut statement = db.prepare(&format!(
-            "SELECT e.id, e.identifier, e.publisher, e.display_name, e.media_type, e.terms,
-                    e.first_seen_at, e.changed_at
-             FROM entries e JOIN sources s ON s.id = e.source_id
-             WHERE e.{} = 1
-             ORDER BY e.identifier, s.kind = 'self' DESC, e.source_id",
-            visible_column(listener)
-        ))?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-            ))
-        })?;
-        let mut out: Vec<IndexedRow> = Vec::new();
-        for row in rows {
-            let (id, identifier, publisher, display_name, media_type, terms, first_seen_at, changed_at) = row?;
-            if out.last().is_some_and(|last| last.identifier == identifier) {
-                continue;
-            }
-            out.push(IndexedRow {
-                id,
-                identifier,
-                publisher,
-                display_name,
-                media_type,
-                terms: serde_json::from_str(&terms)?,
-                first_seen_at,
-                changed_at,
-            });
-        }
-        Ok(out)
-    }
-
-    /// For each term of `search::query_terms`, the IDs of the rows that the listener of
-    /// `listener` sees and whose search text holds the term.
-    pub fn term_hits(&self, listener: InboundScope, terms: &[String]) -> Result<Vec<BTreeSet<i64>>> {
-        let column = visible_column(listener);
-        term_hits(
-            &self.db(),
-            terms,
-            &format!(
-                "SELECT e.id FROM entries_fts f JOIN entries e ON e.id = f.rowid
-                 WHERE entries_fts MATCH ?1 AND e.{column} = 1"
-            ),
-            &format!("SELECT id FROM entries WHERE search_text LIKE ?1 AND {column} = 1"),
-        )
-    }
-
-    /// The stored entries of the rows `ids`, in the same order.
-    pub fn bodies(&self, ids: &[i64]) -> Result<Vec<Value>> {
-        let db = self.db();
-        let mut statement = db.prepare_cached("SELECT entry FROM entries WHERE id = ?1")?;
-        ids.iter()
-            .map(|id| {
-                let text: String = statement.query_row([id], |row| row.get(0))?;
-                Ok(serde_json::from_str(&text)?)
-            })
-            .collect()
+    /// Starts a read that holds the lock of the index until it is dropped. The rows do not change
+    /// during the read, so the row IDs of one call are still there in the next one.
+    pub fn read(&self) -> RegistryRead<'_> {
+        RegistryRead { db: self.db() }
     }
 
     /// Every source with its counts, by ID.
@@ -478,6 +413,83 @@ impl RegistryStore {
     }
 }
 
+/// A read of the index under one hold of its lock (see [`RegistryStore::read`]).
+pub struct RegistryRead<'a> {
+    db: MutexGuard<'a, Connection>,
+}
+
+impl RegistryRead<'_> {
+    /// The rows that the listener of `listener` sees, one per identifier, by identifier.
+    /// Of rows with the same identifier, the one of a self catalog wins, then the one of the
+    /// smallest source ID.
+    pub fn visible(&self, listener: InboundScope) -> Result<Vec<IndexedRow>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT e.id, e.identifier, e.publisher, e.display_name, e.media_type, e.terms,
+                    e.first_seen_at, e.changed_at
+             FROM entries e JOIN sources s ON s.id = e.source_id
+             WHERE e.{} = 1
+             ORDER BY e.identifier, s.kind = 'self' DESC, e.source_id",
+            visible_column(listener)
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut out: Vec<IndexedRow> = Vec::new();
+        for row in rows {
+            let (id, identifier, publisher, display_name, media_type, terms, first_seen_at, changed_at) = row?;
+            if out.last().is_some_and(|last| last.identifier == identifier) {
+                continue;
+            }
+            out.push(IndexedRow {
+                id,
+                identifier,
+                publisher,
+                display_name,
+                media_type,
+                terms: serde_json::from_str(&terms)?,
+                first_seen_at,
+                changed_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// For each term of `search::query_terms`, the IDs of the rows that the listener of
+    /// `listener` sees and whose search text holds the term.
+    pub fn term_hits(&self, listener: InboundScope, terms: &[String]) -> Result<Vec<BTreeSet<i64>>> {
+        let column = visible_column(listener);
+        term_hits(
+            &self.db,
+            terms,
+            &format!(
+                "SELECT e.id FROM entries_fts f JOIN entries e ON e.id = f.rowid
+                 WHERE entries_fts MATCH ?1 AND e.{column} = 1"
+            ),
+            &format!("SELECT id FROM entries WHERE search_text LIKE ?1 AND {column} = 1"),
+        )
+    }
+
+    /// The stored entries of the rows `ids`, in the same order.
+    pub fn bodies(&self, ids: &[i64]) -> Result<Vec<Value>> {
+        let mut statement = self.db.prepare_cached("SELECT entry FROM entries WHERE id = ?1")?;
+        ids.iter()
+            .map(|id| {
+                let text: String = statement.query_row([id], |row| row.get(0))?;
+                Ok(serde_json::from_str(&text)?)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +509,7 @@ mod tests {
 
     fn identifiers(store: &RegistryStore, listener: InboundScope) -> Vec<String> {
         store
+            .read()
             .visible(listener)
             .unwrap()
             .into_iter()
@@ -533,7 +546,7 @@ mod tests {
                 200,
             )
             .unwrap();
-        let rows = store.visible(InboundScope::Internal).unwrap();
+        let rows = store.read().visible(InboundScope::Internal).unwrap();
         let times: Vec<(i64, i64)> = rows.iter().map(|row| (row.first_seen_at, row.changed_at)).collect();
         assert_eq!(times, [(100, 100), (100, 200)]);
         // An identifier that leaves the source leaves the index; one that comes back is new.
@@ -552,7 +565,7 @@ mod tests {
                 400,
             )
             .unwrap();
-        let rows = store.visible(InboundScope::Internal).unwrap();
+        let rows = store.read().visible(InboundScope::Internal).unwrap();
         assert_eq!((rows[0].first_seen_at, rows[0].changed_at), (400, 400));
         assert_eq!((rows[1].first_seen_at, rows[1].changed_at), (100, 200));
     }
@@ -608,9 +621,9 @@ mod tests {
         store.replace(second, &[same("second")], &[], 1).unwrap();
         store.replace(first, &[same("first")], &[], 1).unwrap();
         let shown = |store: &RegistryStore| {
-            let rows = store.visible(InboundScope::Public).unwrap();
+            let rows = store.read().visible(InboundScope::Public).unwrap();
             assert_eq!(rows.len(), 1);
-            store.bodies(&[rows[0].id]).unwrap()[0]["description"].clone()
+            store.read().bodies(&[rows[0].id]).unwrap()[0]["description"].clone()
         };
         assert_eq!(shown(&store), "first");
         store.replace(own, &[same("own")], &[], 1).unwrap();
@@ -635,8 +648,9 @@ mod tests {
             .unwrap();
         let terms = ["payments".to_owned(), "refund".to_owned(), "배포".to_owned()];
         let ids = |listener| -> Vec<Vec<String>> {
-            let rows = store.visible(listener).unwrap();
+            let rows = store.read().visible(listener).unwrap();
             store
+                .read()
                 .term_hits(listener, &terms)
                 .unwrap()
                 .into_iter()
@@ -689,8 +703,8 @@ mod tests {
         assert_eq!(store.record_failure(seed, "HTTP 503").unwrap(), (1, Some(50)));
         assert_eq!(store.record_failure(seed, "HTTP 504").unwrap(), (2, Some(50)));
         store.set_next_fetch(seed, 7_250).unwrap();
-        assert_eq!(store.entries_outside(own).unwrap(), 2);
-        assert_eq!(store.entries_outside(seed).unwrap(), 0);
+        assert_eq!(store.seed_entries_outside(own).unwrap(), 2);
+        assert_eq!(store.seed_entries_outside(seed).unwrap(), 0);
         let status = store.status().unwrap();
         assert_eq!(
             status,
@@ -731,6 +745,18 @@ mod tests {
         store.clear_entries(seed).unwrap();
         let after = &store.status().unwrap()[1];
         assert_eq!((after.entries, after.last_ok_at), (0, Some(70)));
+        // The rows of a self catalog do not count against the seeds.
+        store
+            .replace(own, &[entry("urn:air:acme.com:own", "x")], &[], 80)
+            .unwrap();
+        let other = store
+            .source("beta.com", SourceKind::Seed, InboundScope::Public)
+            .unwrap();
+        store
+            .replace(other, &[entry("urn:air:beta.com:a", "x")], &[], 80)
+            .unwrap();
+        assert_eq!(store.seed_entries_outside(seed).unwrap(), 1);
+        assert_eq!(store.seed_entries_outside(other).unwrap(), 0);
     }
 
     #[test]
@@ -808,7 +834,10 @@ mod tests {
                 .unwrap(),
             1
         );
-        let hits = store.term_hits(InboundScope::Public, &["refund".to_owned()]).unwrap();
+        let hits = store
+            .read()
+            .term_hits(InboundScope::Public, &["refund".to_owned()])
+            .unwrap();
         assert_eq!(hits[0].len(), 1);
     }
 }
