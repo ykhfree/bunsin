@@ -584,7 +584,10 @@
     MUST 위반 항목(url과 data 둘 다나 둘 다 없음, type이나 displayName 없음, 잘못된 URN, 상대 URL)은 스키마와 crate의 `validate`가 모두 거부한다.
   - 남은 차이: 스펙 본문은 `trustManifest`, 스키마는 `TrustManifest`라고 쓴다. crate는 본문을 따른다. 위의 따로 하는 검사가 이 차이를 메운다.
   - 공식 conformance 도구는 ard-spec 저장소의 `conformance/bin/conformance-test`(Python 3, 표준 라이브러리만)이다.
-    `manifest <파일>` 모드는 네트워크 없이 돈다. Python `jsonschema`가 있으면 같은 스키마 검사도 한다. 이 도구는 CI에서 돌리지 않는다.
+    `manifest <파일>` 모드는 네트워크 없이 돈다. `registry <base URL>` 모드는 `GET /agents`, `POST /search`, `POST /explore`의 기본 형태를 본다.
+    Python `jsonschema`가 있으면 같은 스키마 검사도 한다. 이 도구는 CI에서 돌리지 않는다.
+    - 실행 기록(2026-11-21, ard-spec `main` f073b1e, CLI v0.9.1, 커밋 0340bd0의 `bunsind`, loopback 내부 리스너, `--ard-registry internal`):
+      manifest 모드(MCP 항목과 A2A 항목)와 registry 모드 모두 PASS, 오류 0, 경고 0. `jsonschema`가 없어 도구의 스키마 검사는 건너뛰었다.
   - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 A2A, Agent Card URL(`a2a_served_on`일 때),
     항목마다(`ard: Vec<ArdStatus>`, MCP 다음 A2A) `media_type`, identifier, 싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고, 그리고 `dns_records`.
     - 새 필드는 `#[serde(default)]`이다. 이 속성은 키가 없을 때만 돕는다. `ard`는 `Option`에서 목록으로 바뀌었으므로, 옛 서버가 보낸 `null`이나 객체를 새 창이 읽지 못하고,
@@ -1113,9 +1116,9 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
 | A2A v1.0 endpoint(JSON-RPC, Agent Card, 버전 검사, SendMessage·GetTask·ListTasks·CancelTask, 취소, messageId 중복 제거, MCP와 같은 한도) | 구현, 테스트 있음(core, store, 엔진, 서버). 서버 테스트는 실제 TCP에서 직접 만든 JSON-RPC 요청을 보낸다. 스펙 예의 왕복과 v1.0.0 JSON schema 검사를 통과한다. 다른 A2A client로는 해 보지 않았다. |
-| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구는 실행해 보지 않았다. |
+| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구의 manifest 모드를 통과했다(7절). |
 | ARD 도구(search·explore·list·resolve 내장 읽기 도구, referral 없음, domain 해석과 결속 규칙, JSON-LD 최소 전개, 제3자 주소 fetcher, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, ard, 서버, 창의 registry 목록 편집). 로컬 stub registry와 stub catalog로만 테스트. 도메인만 적은 해석은 서버 테스트가 loopback으로 닿지 못해(https 443) ard의 메모리 web으로만 테스트. 창에는 `ard_domains` 편집이 없다. |
-| ARD registry(운영자 플래그, `registry.db`, 자기 catalog 수집, seed crawl과 일정, JSON-LD 전개로 맞추는 필터, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. crawl은 loopback의 catalog 주소 seed로만 테스트했다. 도메인만 적은 seed의 해석은 ard의 메모리 web으로만 테스트했다. 공식 conformance 도구는 실행해 보지 않았다. |
+| ARD registry(운영자 플래그, `registry.db`, 자기 catalog 수집, seed crawl과 일정, JSON-LD 전개로 맞추는 필터, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. crawl은 loopback의 catalog 주소 seed로만 테스트했다. 도메인만 적은 seed의 해석은 ard의 메모리 web으로만 테스트했다. 공식 conformance 도구의 registry 모드를 통과했다(7절). |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
 | 배포 패키지(Linux 서버 tarball과 systemd unit, macOS `Bunsin.app`, CI artifact) | 구현. macOS에서 두 스크립트를 실행해 확인. unit은 systemd로 시작해 보지 않았고, 앱은 서명하지 않았다. |

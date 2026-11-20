@@ -1161,16 +1161,21 @@ bunsind caller-revoke kim 1                        # the next request with it is
   listener URL with a path (or an IP address) gets a line that starts with `;` and says why.
 - **Conformance.** The tests check every catalog entry against the JSON schema of the ARD
   specification (`crates/ard/tests/schema.rs`). The specification project also has an official
-  conformance tool. It needs only Python 3 and checks a saved manifest without a network:
+  conformance tool. It needs only Python 3. It checks a saved manifest without a network, and a
+  running registry by its base URL:
 
   ```sh
   git clone https://github.com/ards-project/ard-spec
   curl -s https://agents.example.com/.well-known/ard.json > ard.json   # your --public-url or --internal-url
   python3 ard-spec/conformance/bin/conformance-test manifest ard.json
+  python3 ard-spec/conformance/bin/conformance-test registry https://agents.example.com   # with --ard-registry
   ```
 
-  It also checks the schema if the Python package `jsonschema` is installed. Bunsin has not
-  run this tool yet. The specification names the trust envelope `trustManifest`, and its schema file
+  It also checks the schema if the Python package `jsonschema` is installed. On 2026-11-21 the
+  tool (ard-spec `main` f073b1e, CLI v0.9.1) passed both modes against a local `bunsind` with an
+  MCP and an A2A entry, with no errors and no warnings. That run had no `jsonschema`, so the tool
+  skipped its schema check; Bunsin's own tests run that check. The registry mode checks only the
+  basic shapes of `GET /agents`, `POST /search` and `POST /explore`. The specification names the trust envelope `trustManifest`, and its schema file
   `TrustManifest`. Bunsin follows the specification, and its tests check each `trustManifest`
   against the `TrustManifest` definition of the schema.
 - `bunsind inbound kim` shows the addresses of the endpoint and the catalog on each listener

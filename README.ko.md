@@ -971,15 +971,20 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
   port가 443이 아니면 ` port=<port>`가 붙습니다. SVCB는 host와 port만 담고 경로는 담지 않습니다.
   그래서 리스너 URL에 경로가 있거나 host가 IP 주소이면, `;`로 시작하는 줄이 레코드 대신 이유를 말합니다.
 - **적합성 검사.** 테스트가 catalog의 모든 항목을 ARD 스펙의 JSON 스키마로 검사합니다(`crates/ard/tests/schema.rs`).
-  스펙 프로젝트에는 공식 conformance 도구도 있습니다. 이 도구는 Python 3만 있으면 되고, 저장한 매니페스트를 네트워크 없이 검사합니다.
+  스펙 프로젝트에는 공식 conformance 도구도 있습니다. 이 도구는 Python 3만 있으면 됩니다.
+  저장한 매니페스트를 네트워크 없이 검사하고, 실행 중인 registry를 base URL로 검사합니다.
 
   ```sh
   git clone https://github.com/ards-project/ard-spec
   curl -s https://agents.example.com/.well-known/ard.json > ard.json   # --public-url 또는 --internal-url
   python3 ard-spec/conformance/bin/conformance-test manifest ard.json
+  python3 ard-spec/conformance/bin/conformance-test registry https://agents.example.com   # --ard-registry를 켰을 때
   ```
 
-  Python 패키지 `jsonschema`가 설치되어 있으면 스키마도 검사합니다. Bunsin은 이 도구를 아직 실행해 보지 않았습니다.
+  Python 패키지 `jsonschema`가 설치되어 있으면 스키마도 검사합니다.
+  2026-11-21에 이 도구(ard-spec `main` f073b1e, CLI v0.9.1)를 MCP 항목과 A2A 항목을 가진 로컬 `bunsind`에 돌렸고, 두 모드 모두 오류와 경고 없이 통과했습니다.
+  그때는 `jsonschema`가 없어서 도구가 스키마 검사를 건너뛰었습니다. 같은 검사는 Bunsin의 테스트가 합니다.
+  registry 모드는 `GET /agents`, `POST /search`, `POST /explore`의 기본 형태만 검사합니다.
   스펙 본문은 trust envelope를 `trustManifest`라고 쓰고, 스키마 파일은 `TrustManifest`라고 씁니다.
   Bunsin은 스펙 본문을 따르고, 테스트가 각 `trustManifest`를 스키마의 `TrustManifest` 정의로 검사합니다.
 - `bunsind inbound kim`은 리스너마다 endpoint와 catalog의 주소(A2A가 켜졌으면 A2A 주소도)를 보여 줍니다.
