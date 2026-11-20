@@ -74,6 +74,7 @@
   - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
     인바운드 MCP와 server card, ARD catalog(7절), webhook(11절)이 여기에 있다.
     운영자가 `--ard-registry`로 켜면 ARD registry(18절)도 리스너 루트에 있다. 켜지 않은 리스너에서는 그 경로가 404이다.
+    registry의 task는 운영자가 seed로 적은 도메인을 서버의 네트워크로 가져온다(`--ard-registry-source`, `--ard-registry-public-source`).
   - 리스너 L은 `InboundConfig::served_on(L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
     MCP 경로, card, ARD catalog가 이 함수 하나를 쓴다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다). daemon의 `served_on(config, Reach)`는 이 함수를 부른다.
   - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
@@ -1109,7 +1110,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | A2A v1.0 endpoint(JSON-RPC, Agent Card, 버전 검사, SendMessage·GetTask·ListTasks·CancelTask, 취소, messageId 중복 제거, MCP와 같은 한도) | 구현, 테스트 있음(core, store, 엔진, 서버). 서버 테스트는 실제 TCP에서 직접 만든 JSON-RPC 요청을 보낸다. 스펙 예의 왕복과 v1.0.0 JSON schema 검사를 통과한다. 다른 A2A client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구는 실행해 보지 않았다. |
 | ARD 도구(search·explore·list·resolve 내장 읽기 도구, referral 없음, domain 해석과 결속 규칙, JSON-LD 최소 전개, 제3자 주소 fetcher, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, ard, 서버, 창의 registry 목록 편집). 로컬 stub registry와 stub catalog로만 테스트. 도메인만 적은 해석은 서버 테스트가 loopback으로 닿지 못해(https 443) ard의 메모리 web으로만 테스트. 창에는 `ard_domains` 편집이 없다. |
-| ARD registry phase 1(운영자 플래그, `registry.db`, 자기 catalog 수집, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. 공식 conformance 도구는 실행해 보지 않았다. 외부 seed crawl은 phase 2이고 아직 없다. |
+| ARD registry(운영자 플래그, `registry.db`, 자기 catalog 수집, seed crawl과 일정, JSON-LD 전개로 맞추는 필터, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. crawl은 loopback의 catalog 주소 seed로만 테스트했다. 도메인만 적은 seed의 해석은 ard의 메모리 web으로만 테스트했다. 공식 conformance 도구는 실행해 보지 않았다. |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
 | 배포 패키지(Linux 서버 tarball과 systemd unit, macOS `Bunsin.app`, CI artifact) | 구현. macOS에서 두 스크립트를 실행해 확인. unit은 systemd로 시작해 보지 않았고, 앱은 서명하지 않았다. |
@@ -1123,12 +1124,10 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 - 임베딩 검색의 제공 여부.
 - macOS 앱의 bundle ID와 Developer ID 서명의 주체. 지금은 서명하지 않고, bundle ID는 로컬용 기본값이다. 앱 아이콘도 없다.
 - 인바운드 호출자의 OAuth. 지금은 호출자 token만 있다.
-- ARD registry의 외부 seed crawl(phase 2). 지금은 서버 자신의 catalog만 index에 넣는다.
 
 ## 18. ARD registry
 
-운영자가 켜면 서버는 ARD Registry(§5.3)가 된다. phase 1은 서버 자신의 catalog만 index에 넣는다.
-외부 seed의 crawl(`--ard-registry-source`, `--ard-registry-public-source`, domain 해석, in-page markup)은 phase 2이고, 아직 없다.
+운영자가 켜면 서버는 ARD Registry(§5.3)가 된다. index에는 서버 자신의 catalog와 운영자가 적은 seed의 항목이 들어간다.
 
 - **켜기**: `bunsind serve --ard-registry internal|public`. 플래그가 없으면 registry 경로가 없다(404).
   `internal`은 내부 리스너, `public`은 두 리스너에 둔다. 판단은 `reaches(scope, listener)` 하나이다(engine `registry_serves`).
@@ -1142,7 +1141,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   - 오류 본문은 Appendix B의 `{errorCode, message}`이다. status는 400, 404, 429, 500이다. 내부 오류의 문구는 서버 내용을 담지 않는다.
 - **index**: `<data>/registry.db`(store `RegistryStore`). app.db는 요청마다 token 표를 읽으므로 crawl 쓰기와 겹친다. agent.db는 프로필의 것이다.
   ```
-  sources(id, url UNIQUE, kind seed|discovered|self, scope, parent_id,
+  sources(id, url UNIQUE, kind seed|self, scope,
           next_fetch_at, last_ok_at, failures, last_error)
   entries(id, source_id, identifier, on_internal, on_public, publisher, display_name,
           media_type, entry, terms, search_text, first_seen_at, changed_at, UNIQUE(source_id, identifier))
@@ -1153,17 +1152,32 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
     `self:internal`은 (on_internal 1, on_public 0), `self:public`은 (0, 1), 내부 seed는 (1, 0), 공개 seed는 (1, 1)이다.
     내부 catalog가 공개 프로필도 내부 주소로 싣기 때문에, `self:public`은 내부 리스너에 보이지 않는다.
   - 읽기에 성공하면 그 source의 행과 거부를 통째로 바꾼다. 같은 identifier는 `first_seen_at`을 유지하고, 항목 JSON이 바뀔 때만 `changed_at`을 옮긴다.
-    `last_error`에는 Bunsin 문구와 HTTP status만 쓴다.
+    `last_error`에는 Bunsin 문구와 HTTP status만 쓴다. seed의 `url` 열은 플래그에 적은 글 그대로이다.
   - 같은 identifier가 여러 source에 있으면 응답에는 하나만 나온다. self source의 행이 이기고, 다음은 작은 source ID이다.
-  - 항목 수락(engine `index_source`): MUST 위반이 없다(SHOULD 위반은 받는다), JSON 64 KiB 이하, source당 500개, 전체 10,000개.
-    거부 이유는 고정 낱말이다: `invalid`, `too_large`, `duplicate`, `source_full`, `index_full`.
-    자기 catalog에는 결속 검사가 없다. 운영자의 `--ard-publisher-domain`이 이미 publisher를 정하기 때문이다.
-  - `terms`는 최상위 키를 IRI로 바꾼 사본이다(값은 그대로). phase 1은 기반 context의 core 용어, `ard:` 이름, 절대 IRI만 바꾼다(`bunsin_ard::base_term_iri`).
-    `type`은 `ard:mediaType`이다. JSON-LD 전개가 들어오면 이 함수가 바뀐다.
+  - 항목 수락: 모든 항목이 `bunsin_ard::accept_entry`(3절)를 지난다. JSON 64 KiB 이하, 지원하는 `@context`, MUST 위반 없음(SHOULD 위반은 받는다),
+    URN publisher가 결속 domain과 같음. 그 뒤 engine `index_source`가 identifier 중복, source당 500개, 전체 10,000개를 센다.
+    거부 이유는 고정 낱말이다: `invalid`, `too_large`, `unsupported_context`, `other_publisher`, `duplicate`, `source_full`, `index_full`.
+    자기 catalog의 항목은 자기 URN publisher에 결속한다. 운영자의 `--ard-publisher-domain`이 이미 publisher를 정하기 때문이다.
+  - `terms`는 최상위 키를 IRI로 바꾼 사본이다(값은 그대로). `accept_entry`가 `bunsin_ard::expand_terms`(3절의 최소 전개)로 만든다.
+    `type`은 `ard:mediaType`이다. 항목의 `@context`가 묶은 prefix의 키는 그 IRI가 된다.
   - `search_text`는 `displayName`, `description`, `representativeQueries`, `capabilities`, `tags`의 글이다.
+- **seed**(9절 A1): `--ard-registry-source <seed>`(내부 리스너)와 `--ard-registry-public-source <seed>`(두 리스너, `--ard-registry public`일 때만). 둘 다 반복한다.
+  - `<seed>`는 `<domain>`이거나 `<domain>=<URL>`이다. 앞의 것은 3절의 domain 해석(ard.json, `Link`·`<link rel="ard">`, robots `Agentmap`, 알린 주소)이다.
+    뒤의 것은 그 주소 하나만 가져온다(JSON manifest 또는 HTML 속 JSON-LD). 두 형태 모두 결속 domain은 `<domain>`이다. URL의 host로 결속하는 규칙은 없다.
+  - 시작할 때 모든 seed를 검사한다: 형태, 개수(200 이하, 자기 catalog는 세지 않는다), 두 번 적은 seed(한 플래그든 두 플래그든), 처음 가져올 주소(`https://<domain>/` 또는 URL)의 `UpstreamPolicy::check`.
+    하나라도 어기면 키를 읽기 전에 시작하지 않는다. 운영자 host 목록이 있으면 그 host만, 없으면 https와 공개 주소만 받는다.
+  - 시작할 때 seed 표를 플래그와 맞춘다(`set_registry_seeds`). 빠진 seed나 범위가 바뀐 seed는 행, 항목, 거부를 잃는다. 새 seed는 바로 때가 된다.
 - **수집**(daemon `crawl.rs`): registry task 하나가 시작할 때 한 번, 그 뒤 60초마다 돈다. 서버가 멈추면 다른 task와 함께 멈춘다(`Poller::stop`).
-  phase 1의 tick은 registry가 닿는 리스너마다 `ard_catalog(scope)`로 `self:<scope>`의 행을 바꾼다. 실패는 stderr에 쓴다.
-  phase 2는 seed source(`kind seed`, `url`은 `<domain>` 또는 `<domain>=<https URL>`)를 더하고, 때가 된 source를 하나씩 가져와 같은 `index_source`로 넣는다.
+  1. registry가 닿는 리스너마다 `ard_catalog(scope)`로 `self:<scope>`의 행을 바꾼다.
+  2. 때가 된 seed를 하나씩 `Fetcher::resolve`(daemon `fetch.rs`, 해석 30 s, 요청 10 s, 응답 1 MiB, redirect 3번, hop마다 주소 규칙)로 읽는다.
+     stop 신호가 오면 다음 seed 앞에서 멈춘다. 한 tick에 한 seed는 한 번만 읽는다.
+     tick이 60초를 넘으면 새 seed를 시작하지 않는다. 남은 seed는 다음 tick에 읽으므로, 1단계는 seed가 많아도 늦지 않는다.
+  - 한 해석이 가져온 entry source는 seed 아래에 둔다(자기 행이 없다). 이유: 해석 한 번이 그 source를 모두 한 시간 한도로 가져오고, 결속 domain도 seed의 것이다.
+    따로 행을 두면 일정과 실패를 두 번 세야 한다.
+  - entry source 하나라도 읽히면 성공이다. 읽힌 source의 항목으로 그 seed의 행을 통째로 바꾸고(`crawl_succeeded`), 1시간 뒤에 다시 읽는다.
+  - 모두 실패하거나 해석이 30초를 넘으면 실패이다(`crawl_failed`). 행은 그대로 두고, n번째 연속 실패 뒤에는 1 h × 2^(n−1)(최대 24 h) 뒤에 다시 읽는다.
+    마지막 성공이 7일 전이거나 더 오래되었으면 그 seed의 항목을 지운다. 다음 성공이 다시 채운다.
+  - 실패는 stderr가 아니라 `registry-status`의 `failures`와 `last_error`로 보인다.
 - **순위**: core `query_terms` → store `term_hits`(store `lib.rs`. profile 저장소와 registry가 함께 쓴다) → core `rank_scored`.
   - s는 행이 맞은 term의 `ln(1+N/df)` 합이다. s_max는 보이는 행 중 어느 행엔가 있는 query term의 가중치 합이다.
     score는 정수 `round(100·s/s_max)`이고 1~100이다. 모든 term을 가진 행은 100이다.
@@ -1175,9 +1189,11 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   이유: 전체 index로 세면 공개 호출자가 `<공개 term> <탐침 term>`의 score 변화로 내부 항목에 그 낱말이 있는지 1비트씩 알아낸다.
 - **요청**(ard `query.rs`): OpenAPI의 `additionalProperties: false` 객체(`SearchRequest`, `ExploreRequest`, `QueryModel`, `ExploreFacetRequest`)에
   모르는 멤버가 있으면 400이다. `resultType`은 열려 있다.
-  - 필터 키와 facet field: core 용어, `ard:` 이름, `publisher`(URN에서), 절대 IRI(`scheme://` 형태),
-    `trustManifest.`·`metadata.`·`data.` 아래의 글자 그대로 경로. 그 밖의 점 경로, 묶이지 않은 prefix, 기반 context에 없는 이름은 400이다(§5.3.1 MAY).
-    `query.@context`가 묶은 이름과 prefix는 phase 1에서 400("not supported yet")이다. JSON-LD 전개가 들어오면 받는다.
+  - 필터 키와 facet field는 기반 context와 `query.@context`로 IRI가 된다(`Context::with(..).expand_key`, 3절).
+    그래서 query의 `okf:taxonomy`는 같은 IRI를 `openknowledge:`로 묶은 항목에 맞는다(§5.3.1).
+    받는 것: core 용어, `ard:` 이름, 묶인 prefix의 이름, `@vocab`으로 가는 이름, `publisher`(URN에서), 절대 IRI(`scheme://` 형태),
+    `trustManifest.`·`metadata.`·`data.` 아래의 글자 그대로 경로. 그 밖의 점 경로, 묶이지 않은 prefix, 키워드(`id` 등)는 400이다(§5.3.1 MAY).
+    3절의 전개가 받지 않는 `query.@context`(원격 context, `@vocab`, 기반 용어의 재정의 등)도 400이다.
   - 필터 값은 문자열이나 문자열 배열이다(빈 배열은 400). 한 키 안은 OR, 키 사이는 AND이다. 항목의 값이 배열이면 원소 하나만 맞아도 된다.
     `publisher`는 대소문자를 무시하고, 그 밖은 문자열이 정확히 같아야 한다. 숫자와 참·거짓은 JSON 글자로 비교한다.
   - `/search`: `query.text`가 필요하다. `federation`의 `auto`, `referrals`, `none`은 모두 자기 index만 찾고(§5.4, 상류가 없다), 응답에 `referrals`가 없다.
@@ -1205,11 +1221,13 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   `_search._agents.<domain>. 3600 IN SVCB 1 <host>. ; the registry of the <리스너> listener`이다. port가 443이 아니면 `<host>.` 뒤에 ` port=<port>`를 붙인다.
   리스너 주소에 경로가 있으면 레코드 대신 경고를 낸다.
 - **운영자 명령** `bunsind registry-status --data-dir <dir>`: `registry.db`를 직접 연다(엔진 잠금이 필요 없다).
-  source마다 `source<TAB>url<TAB>kind<TAB>scope<TAB>N entries<TAB>last ok <RFC 3339|never><TAB>N failures<TAB><last_error|->` 한 줄을 쓰고,
+  source마다 `source<TAB>url<TAB>kind<TAB>scope<TAB>N entries<TAB>last ok <RFC 3339|never><TAB>next <RFC 3339|-><TAB>N failures<TAB><last_error|->` 한 줄을 쓰고,
   그 뒤 거부 이유마다 `refused<TAB>url<TAB>reason<TAB>count`를 쓴다.
 - crawl한 글은 LLM에 가지 않는다. `trustManifest`는 검증하지 않은 주장으로 결과와 필터에 그대로 둔다.
-- **테스트**: core `rank_scored`. store `registry.rs`(시각 유지, 보는 리스너, 중복, term hits, 상태). ard `query.rs`(`unknown_members_and_unbound_prefixes_get_400`,
-  `the_list_filter_accepts_only_the_appendix_a_subset`). 엔진 `tests/registry.rs`(`scores_are_integers_and_a_full_match_scores_100`, `explore_and_search_share_the_cutoff`,
+- **테스트**: core `rank_scored`. store `registry.rs`(시각 유지, 보는 리스너, 중복, term hits, 상태, seed 표와 일정). ard `query.rs`(`unknown_members_and_unbound_prefixes_get_400`,
+  `a_query_prefix_matches_an_entry_that_bound_the_same_iri_under_another_prefix`, `the_list_filter_accepts_only_the_appendix_a_subset`). daemon `crawl.rs`(seed 형태와 시작 검사). 엔진 `tests/registry.rs`(`scores_are_integers_and_a_full_match_scores_100`, `explore_and_search_share_the_cutoff`,
   `the_public_listener_never_sees_internal_rows`, `an_internal_row_changes_no_public_score_count_or_total`, `self_entries_name_the_card_of_their_listener`).
-  daemon `tests/registry.rs`(`answers_follow_the_openapi_shapes`는 응답을 `ard.openapi.yaml` 응답 스키마의 JSON 사본으로 검사한다. 경로, 400, 429, task, CLI `registry_status_lists_sources_and_counts`).
-- **아직 없는 것**: 외부 seed crawl(phase 2), `query.@context`로 묶은 필터 키, `trustManifest`의 검증.
+  daemon `tests/registry.rs`(`answers_follow_the_openapi_shapes`는 응답을 `ard.openapi.yaml` 응답 스키마의 JSON 사본으로 검사한다. 경로, 400, 429, task, CLI `registry_status_lists_sources_and_counts`,
+  `a_crawl_indexes_a_manifest_and_in_page_markup`, `refused_entries_are_reported_by_reason`, `a_failing_source_keeps_its_entries_for_seven_days`,
+  `a_catalog_seed_binds_its_named_domain_not_the_host`(9절 A1: Bunsin A의 ard.json을 `acme.test=`로 읽으면 넣고 `other.test=`로 읽으면 `other_publisher`로 거부), `a_bad_registry_source_stops_the_start`).
+- **아직 없는 것**: `trustManifest`의 검증, crawl이 찾은 `application/ai-registry+json` 항목의 federation(항목으로만 싣는다).

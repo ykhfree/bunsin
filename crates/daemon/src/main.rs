@@ -13,11 +13,11 @@ use bunsin_core::inbound::InboundScope;
 use bunsin_core::records::InboxBody;
 use bunsin_core::settings::{ApiConfig, ConnectorKind, McpConfig, Wire};
 use bunsin_daemon::keystore::KeyStore;
-use bunsin_daemon::server::{OuterConfig, Reach, ServeConfig, check_listeners, start};
+use bunsin_daemon::server::{OuterConfig, Reach, ServeConfig, check_listeners, start_with_fetcher};
 use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
 use bunsin_engine::Engine;
 use bunsin_engine::{KeyFile, KeySource};
-use bunsin_store::{AppStore, RegistryStore};
+use bunsin_store::{AppStore, RegistryStore, SourceKind};
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -162,9 +162,16 @@ enum Command {
         ard_publisher_domains: Vec<String>,
         /// Serve an ARD registry at the root of the listeners for callers: POST /search, POST /explore
         /// and GET /agents. `internal`: on the internal listener. `public`: on both listeners. It indexes
-        /// the ARD catalogs of this server in registry.db in the data directory.
+        /// the ARD catalogs of this server, and the seeds of --ard-registry-source, in registry.db in the data directory.
         #[arg(long = "ard-registry", value_parser = ["internal", "public"])]
         ard_registry: Option<String>,
+        /// A domain whose ARD entries the registry indexes for the internal listener: `<domain>`, or
+        /// `<domain>=<https URL>` for one catalog address that speaks for the domain. Repeat it for more.
+        #[arg(long = "ard-registry-source", requires = "ard_registry")]
+        ard_registry_sources: Vec<String>,
+        /// Like --ard-registry-source, for both listeners. Needs --ard-registry public.
+        #[arg(long = "ard-registry-public-source", requires = "ard_registry")]
+        ard_registry_public_sources: Vec<String>,
         /// Let profiles start coding jobs: a coding agent CLI changes a repository on a new branch,
         /// after the profile owner approves each job. The CLI runs as the user of this server, with its
         /// own permission settings. Needs --coding-repo-root.
@@ -964,6 +971,15 @@ fn outer_config(
     }))
 }
 
+/// The ARD registry that `serve` turns on.
+struct RegistryArgs {
+    scope: InboundScope,
+    /// Each seed text with the scope of its flag. They passed `crawl::check_seeds`.
+    seeds: Vec<(String, InboundScope)>,
+    /// The rules for the addresses that the crawl fetches.
+    upstream: UpstreamPolicy,
+}
+
 async fn run_server(
     local: Local,
     config: ServeConfig,
@@ -971,7 +987,7 @@ async fn run_server(
     backends: RealBackends,
     store: KeyStore,
     accept_new_key: bool,
-    registry: Option<InboundScope>,
+    registry: Option<RegistryArgs>,
 ) -> Result<(), String> {
     // A start that is refused for its addresses must not read or move the key.
     check_listeners(&config, &outer).map_err(|e| e.to_string())?;
@@ -985,12 +1001,17 @@ async fn run_server(
     };
     let engine =
         Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
-    if let Some(scope) = registry {
-        engine.serve_registry(scope).map_err(|e| e.to_string())?;
+    let mut fetcher = None;
+    if let Some(registry) = registry {
+        engine.serve_registry(registry.scope).map_err(|e| e.to_string())?;
+        engine.set_registry_seeds(&registry.seeds).map_err(|e| e.to_string())?;
+        fetcher = Some(bunsin_daemon::fetch::Fetcher::new(&registry.upstream)?);
     }
     let engine = Arc::new(engine);
     let reaches: Vec<Reach> = outer.iter().map(|listener| listener.reach).collect();
-    let started = start(engine, config, outer).await.map_err(|e| e.to_string())?;
+    let started = start_with_fetcher(engine, config, outer, fetcher)
+        .await
+        .map_err(|e| e.to_string())?;
     // The handler is installed before the address is announced, so a stop request
     // that follows the announcement is never lost.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1023,6 +1044,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_upstream_hosts,
             ard_publisher_domains,
             ard_registry,
+            ard_registry_sources,
+            ard_registry_public_sources,
             allow_coding,
             coding_repo_root,
             coding_programs,
@@ -1035,7 +1058,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
-            let mut backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts })
+            let upstream = UpstreamPolicy { allowed_hosts };
+            let mut backends = RealBackends::from_env(allow_stdio_connectors, upstream.clone())
                 .with_ard_publishers(&ard_publisher_domains)?;
             if let (true, Some(repo_root)) = (allow_coding, coding_repo_root) {
                 let programs = coding_programs
@@ -1061,10 +1085,31 @@ async fn run(cli: Cli) -> Result<(), String> {
                 tls: tls_cert.zip(tls_key),
             };
             let outer = outer.configs()?;
-            let registry = ard_registry.map(|scope| match scope.as_str() {
-                "public" => InboundScope::Public,
-                _ => InboundScope::Internal,
-            });
+            let registry = match ard_registry.as_deref() {
+                None => None,
+                Some(scope) => {
+                    let scope = if scope == "public" {
+                        InboundScope::Public
+                    } else {
+                        InboundScope::Internal
+                    };
+                    if scope == InboundScope::Internal && !ard_registry_public_sources.is_empty() {
+                        return Err("--ard-registry-public-source needs --ard-registry public".into());
+                    }
+                    let seeds: Vec<(String, InboundScope)> = ard_registry_sources
+                        .into_iter()
+                        .map(|seed| (seed, InboundScope::Internal))
+                        .chain(
+                            ard_registry_public_sources
+                                .into_iter()
+                                .map(|seed| (seed, InboundScope::Public)),
+                        )
+                        .collect();
+                    // A bad seed stops the start before the key is read.
+                    bunsin_daemon::crawl::check_seeds(&seeds, &upstream)?;
+                    Some(RegistryArgs { scope, seeds, upstream })
+                }
+            };
             run_server(local, config, outer, backends, store, accept_new_key, registry).await?;
         }
         Command::RegistryStatus { local } => {
@@ -1080,8 +1125,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                 let last_ok = source
                     .last_ok_at
                     .map_or("never".to_owned(), bunsin_core::time::utc_text);
+                // A self catalog is read on every tick, so it has no time of its own.
+                let next = match source.kind {
+                    SourceKind::Seed => bunsin_core::time::utc_text(source.next_fetch_at),
+                    SourceKind::SelfCatalog => "-".to_owned(),
+                };
                 println!(
-                    "source\t{}\t{}\t{scope}\t{} entries\tlast ok {last_ok}\t{} failures\t{}",
+                    "source\t{}\t{}\t{scope}\t{} entries\tlast ok {last_ok}\tnext {next}\t{} failures\t{}",
                     source.url,
                     source.kind.as_str(),
                     source.entries,
