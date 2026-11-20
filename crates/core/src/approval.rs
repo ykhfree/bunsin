@@ -12,6 +12,10 @@ pub enum ApprovalState {
     Executing,
     Executed,
     Failed,
+    /// The server stopped while the call ran, or the call got no answer in its time limit.
+    /// The call may or may not have reached its tool.
+    /// Only the owner resolves it: done, drop, or retry as a new item.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +25,14 @@ pub enum ApprovalEvent {
     StartExecution,
     ExecutionSucceeded,
     ExecutionFailed,
+    /// A start found the call cut by a stop, or the call got no answer.
+    Interrupt,
+    /// The owner says that the cut call reached its tool.
+    MarkDone,
+    /// The owner gives up the cut call.
+    Drop,
+    /// An approved call that never started may not run now. A pending copy replaces it.
+    Abandon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -40,12 +52,13 @@ impl ApprovalState {
             ApprovalState::Executing => "executing",
             ApprovalState::Executed => "executed",
             ApprovalState::Failed => "failed",
+            ApprovalState::Unknown => "unknown",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
         use ApprovalState::*;
-        [Draft, Pending, Approved, Rejected, Executing, Executed, Failed]
+        [Draft, Pending, Approved, Rejected, Executing, Executed, Failed, Unknown]
             .into_iter()
             .find(|s| s.as_str() == text)
     }
@@ -60,6 +73,10 @@ impl ApprovalState {
             (S::Approved, E::StartExecution) => Ok(S::Executing),
             (S::Executing, E::ExecutionSucceeded) => Ok(S::Executed),
             (S::Executing, E::ExecutionFailed) => Ok(S::Failed),
+            (S::Executing, E::Interrupt) => Ok(S::Unknown),
+            (S::Unknown, E::MarkDone) => Ok(S::Executed),
+            (S::Unknown, E::Drop) => Ok(S::Failed),
+            (S::Approved, E::Abandon) => Ok(S::Failed),
             (state, event) => Err(InvalidTransition { state, event }),
         }
     }
@@ -70,7 +87,7 @@ mod tests {
     use super::ApprovalEvent as E;
     use super::ApprovalState as S;
 
-    const STATES: [S; 7] = [
+    const STATES: [S; 8] = [
         S::Draft,
         S::Pending,
         S::Approved,
@@ -78,13 +95,18 @@ mod tests {
         S::Executing,
         S::Executed,
         S::Failed,
+        S::Unknown,
     ];
-    const EVENTS: [E; 5] = [
+    const EVENTS: [E; 9] = [
         E::Approve,
         E::Reject,
         E::StartExecution,
         E::ExecutionSucceeded,
         E::ExecutionFailed,
+        E::Interrupt,
+        E::MarkDone,
+        E::Drop,
+        E::Abandon,
     ];
 
     #[test]
@@ -96,6 +118,10 @@ mod tests {
             (S::Approved, E::StartExecution, S::Executing),
             (S::Executing, E::ExecutionSucceeded, S::Executed),
             (S::Executing, E::ExecutionFailed, S::Failed),
+            (S::Executing, E::Interrupt, S::Unknown),
+            (S::Unknown, E::MarkDone, S::Executed),
+            (S::Unknown, E::Drop, S::Failed),
+            (S::Approved, E::Abandon, S::Failed),
         ];
         for state in STATES {
             for event in EVENTS {
@@ -114,6 +140,20 @@ mod tests {
         for state in [S::Approved, S::Executing, S::Executed, S::Failed, S::Rejected] {
             assert!(state.on(E::Approve).is_err(), "{state:?}");
         }
+    }
+
+    #[test]
+    fn a_cut_call_never_runs_again() {
+        // From `unknown` no event leads to `approved` or `executing`. A retry is a new item.
+        for event in EVENTS {
+            let next = S::Unknown.on(event);
+            assert!(!matches!(next, Ok(S::Approved | S::Executing)), "{event:?}: {next:?}");
+        }
+        assert!(S::Unknown.on(E::StartExecution).is_err());
+        assert!(S::Unknown.on(E::Approve).is_err());
+        // Only a running call can be cut, and only a waiting approval can be abandoned.
+        assert!(S::Approved.on(E::Interrupt).is_err());
+        assert!(S::Executing.on(E::Abandon).is_err());
     }
 
     #[test]

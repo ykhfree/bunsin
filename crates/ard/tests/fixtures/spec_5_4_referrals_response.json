@@ -1,0 +1,26 @@
+{
+  "results": [
+    {
+      "identifier": "urn:air:acme.com:agent:expense",
+      "displayName": "Corporate Expenses",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://internal.corp/agents/expense.json",
+      "score": 97,
+      "source": "https://finder.internal.corp"
+    }
+  ],
+  "referrals": [
+    {
+      "identifier": "urn:air:nlweb.ai:registry:public",
+      "displayName": "Public Agent Finder",
+      "type": "application/ai-registry+json",
+      "url": "https://finder.nlweb.ai/search"
+    },
+    {
+      "identifier": "urn:air:example.com:registry:travel",
+      "displayName": "Travel Agent Finder",
+      "type": "application/ai-registry+json",
+      "url": "https://travel.finder.example/search"
+    }
+  ]
+}

@@ -1,19 +1,32 @@
-//! Connectors to external services. `McpConnector` is an MCP client.
+//! Connectors to external services. `McpConnector` is an MCP client, with a token or with OAuth.
+//! `ApiConnector` calls a REST API with fixed tools. `webhook` checks and reads inbound events.
 //!
 //! This crate does no permission checks. The engine checks the policy before it calls a tool.
+
+pub mod api;
+pub mod webhook;
+
+pub use api::{ApiAuth, ApiConnector, ApiService};
 
 use bunsin_core::ports::{BoxFuture, Connector, ConnectorError};
 use bunsin_core::tool::ToolSpec;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
+use rmcp::transport::auth::{AuthClient, AuthorizationManager};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 pub use bunsin_core::settings::McpConfig;
+
+/// How long a tool call of an MCP connector may take, with the tool list that comes first.
+/// A tool list alone, as the engine asks for it before each call, has the same limit.
+/// Tools can be slow, so the limit is generous. A request that runs out is cancelled on the server.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The token of an HTTP connector and the header that carries it.
 #[derive(Clone, Copy)]
@@ -35,6 +48,8 @@ pub struct McpConnector {
     name: String,
     config: McpConfig,
     client: RunningService<RoleClient, ()>,
+    /// The time limit of one tool call or tool list. `CALL_TIMEOUT` unless changed.
+    call_timeout: Duration,
 }
 
 impl McpConnector {
@@ -80,13 +95,7 @@ impl McpConnector {
                         headers.insert(name, value);
                     }
                 }
-                // A redirect could carry the token to another host, and could reach a host
-                // that the server's address rules refused. The client therefore follows none.
-                let http = reqwest::Client::builder()
-                    .default_headers(headers)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))?;
+                let http = http_client(headers)?;
                 ().serve(StreamableHttpClientTransport::with_client(http, transport))
                     .await
             }
@@ -110,16 +119,44 @@ impl McpConnector {
             }
         }
         .map_err(|e| ConnectorError::Transport(e.to_string()))?;
+        Ok(Self::started(name.into(), config, client).await)
+    }
+
+    /// Connects to the MCP server at `url` with the OAuth credentials of `auth`.
+    /// `auth` sends the access token and refreshes it when it expires.
+    pub async fn connect_oauth(
+        name: impl Into<String>,
+        url: &str,
+        auth: AuthorizationManager,
+    ) -> Result<Self, ConnectorError> {
+        let transport = StreamableHttpClientTransportConfig::with_uri(url);
+        let http = AuthClient::new(http_client(reqwest::header::HeaderMap::new())?, auth);
+        let client =
+            ().serve(StreamableHttpClientTransport::with_client(http, transport))
+                .await
+                .map_err(|e| ConnectorError::Transport(e.to_string()))?;
+        let config = McpConfig::Http { url: url.to_owned() };
+        Ok(Self::started(name.into(), config, client).await)
+    }
+
+    async fn started(name: String, config: McpConfig, client: RunningService<RoleClient, ()>) -> Self {
         // The engine compares the live tool list with the approved one before each call.
         // A cached list would hide a change on the server, so the cache is off.
         client
             .set_response_cache_config(rmcp::ClientCacheConfig::disabled())
             .await;
-        Ok(Self {
-            name: name.into(),
+        Self {
+            name,
             config,
             client,
-        })
+            call_timeout: CALL_TIMEOUT,
+        }
+    }
+
+    /// The same connector with another time limit for each tool call and tool list.
+    pub fn with_call_timeout(mut self, limit: Duration) -> Self {
+        self.call_timeout = limit;
+        self
     }
 
     async fn list_all(&self) -> Result<Vec<ToolSpec>, ConnectorError> {
@@ -134,13 +171,29 @@ impl McpConnector {
             .collect())
     }
 
+    /// The list and the call share one time limit. The end of the limit has two meanings.
+    /// During the list, the call was not sent. During the call, the server may have done it.
     async fn call(&self, tool: &str, args: Map<String, Value>) -> Result<Value, ConnectorError> {
+        let deadline = tokio::time::Instant::now() + self.call_timeout;
+        let limit = self.call_timeout.as_secs_f64();
         // List first, so that a tool the server does not list never reaches the server.
-        if !self.list_all().await?.iter().any(|t| t.name == tool) {
+        let tools = tokio::time::timeout_at(deadline, self.list_all()).await.map_err(|_| {
+            ConnectorError::Transport(format!(
+                "the tool list before the call of `{tool}` did not end in {limit} s; the call was not sent"
+            ))
+        })??;
+        if !tools.iter().any(|t| t.name == tool) {
             return Err(ConnectorError::UnknownTool(tool.to_owned()));
         }
         let params = CallToolRequestParams::new(tool.to_owned()).with_arguments(args);
-        let result = self.client.call_tool(params).await.map_err(service_error)?;
+        let result = tokio::time::timeout_at(deadline, self.client.call_tool(params))
+            .await
+            .map_err(|_| {
+                ConnectorError::Unanswered(format!(
+                    "the call of `{tool}` did not end in {limit} s and was cancelled; the server may have done it anyway"
+                ))
+            })?
+            .map_err(service_error)?;
         tool_result(result)
     }
 }
@@ -150,10 +203,21 @@ impl Connector for McpConnector {
         &self.name
     }
 
+    /// The engine lists the tools before each call, so a list that never ends would hold the event too.
     fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolSpec>, ConnectorError>> {
-        Box::pin(self.list_all())
+        Box::pin(async move {
+            match tokio::time::timeout(self.call_timeout, self.list_all()).await {
+                Ok(result) => result,
+                Err(_) => Err(ConnectorError::Transport(format!(
+                    "the tool list did not end in {} s and was cancelled",
+                    self.call_timeout.as_secs_f64()
+                ))),
+            }
+        })
     }
 
+    /// A server that never answers must not hold the event that called the tool. At the time
+    /// limit the request is dropped, and rmcp tells the server that it is cancelled.
     fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>> {
         let tool = tool.to_owned();
         Box::pin(async move { self.call(&tool, args).await })
@@ -167,6 +231,17 @@ impl fmt::Debug for McpConnector {
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
+}
+
+/// The HTTP client of an MCP server at an address, with `headers` on every request.
+fn http_client(headers: reqwest::header::HeaderMap) -> Result<reqwest::Client, ConnectorError> {
+    // A redirect could carry the token to another host, and could reach a host
+    // that the server's address rules refused. The client therefore follows none.
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| ConnectorError::Transport(format!("the HTTP client cannot start: {e}")))
 }
 
 /// A JSON-RPC error from the server is a failed call. Every other error is a transport problem.

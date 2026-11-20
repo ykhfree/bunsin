@@ -7,14 +7,18 @@ license.workspace = true
 
 [dependencies]
 bunsin-api.workspace = true
+bunsin-ard.workspace = true
 bunsin-core.workspace = true
 bunsin-store.workspace = true
 serde_json.workspace = true
+# Already in Cargo.lock. The registry writes its page tokens in base64url.
+base64 = "0.22"
 chacha20poly1305 = "0.10"
 getrandom = "0.3"
 thiserror.workspace = true
 
 [dev-dependencies]
 bunsin-testkit.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

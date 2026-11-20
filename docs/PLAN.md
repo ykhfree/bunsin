@@ -108,7 +108,16 @@ Bunsin(분신)은 사용자의 원칙과 업무지식을 가진 페르소나 AI 
 ### 4.6 ARD 어댑터
 
 출처는 `https://agenticresourcediscovery.org/spec/`이다. ARD는 발견만 다룬다. 실행과 인증은 각 자원의 프로토콜이 맡는다.
-app은 Publisher와 Consumer 역할을 한다. Registry 역할은 하지 않는다.
+app은 Publisher와 Consumer 역할을 한다. 운영자가 켜면 서버는 Registry 역할도 한다.
+
+**Registry** (ARCHITECTURE 18절)
+
+- 운영자가 `bunsind serve --ard-registry internal|public`으로 켠다. 끄면 registry 경로가 없다.
+- 서버는 외부 리스너의 루트에서 `POST /search`, `POST /explore`, `GET /agents`에 답한다. base URL은 리스너 주소이다.
+- index는 data 폴더의 `registry.db`이다. 서버 자신의 catalog와, 운영자가 `--ard-registry-source`·`--ard-registry-public-source`로 적은 seed의 항목을 넣는다.
+- seed는 `<domain>` 또는 `<domain>=<URL>`이다. 항목의 URN publisher는 그 domain이어야 한다. seed는 1시간마다 다시 읽고, 7일 동안 성공이 없으면 항목을 지운다.
+- 공개 리스너는 공개 행만 보고, 순위와 개수도 그 행으로만 센다.
+- `federation`의 세 값은 모두 자기 index만 찾는다. 응답에 `referrals`는 없다.
 
 **Publisher**
 

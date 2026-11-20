@@ -3,9 +3,11 @@
 
 use crate::bridge::{NoteResult, SaveError, UiCommand, UiState};
 use crate::shell::{Shell, labelled, labelled_as};
-use crate::theme::{card, code_block, field, icon, notice, palette, quiet};
-use bunsin_api::WikiPageUpdate;
+use crate::theme::{card, code_block, field, icon, notice, palette, quiet, utc_minute};
+use bunsin_api::{PreloadNotes, WikiPageUpdate};
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::lint::{FindingKind, LintFinding};
+use bunsin_core::policy::ToolClass;
 use bunsin_core::records::InboxBody;
 use bunsin_core::wiki::{WikiAuthor, WikiPage, WikiText};
 use gpui_kit::base::TestSupportExt;
@@ -26,6 +28,22 @@ const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 const AGENT_PAGE: &str = "If you save a change, the page counts as written by you. Its sources stay.";
 const EMPTY: &str = "Select a page, or make a new one.";
 const CONFIRM_DELETE: &str = "Delete this page? Its history stays on the server.";
+const OLD_LOADED: &str = "The old text is in the fields now. Save stores it as a new revision.";
+const OLD_BLOCKED: &str = "This page has changes that are not saved. Save or discard them first.";
+const PRELOAD_HELP: &str = "Bunsin calls one tool that reads, with the arguments you give. The agent proposes \
+    pages from the result. They wait in the inbox like other page changes; nothing else is run.";
+const CHECKS_HELP: &str = "A check reports old pages, pages that nothing names, and, if the settings turn it on, \
+    pages that may say different things. It changes no page. The settings `notes` say what to check.";
+
+/// A finding as one line: what, which pages, and why.
+pub fn finding_text(finding: &LintFinding) -> String {
+    let what = match finding.kind {
+        FindingKind::Stale => "Old",
+        FindingKind::Orphan => "Not named",
+        FindingKind::Conflict => "May conflict",
+    };
+    format!("{what}: {} · {}", finding.slugs.join(" and "), finding.detail)
+}
 
 /// What the fields hold.
 enum Draft {
@@ -65,6 +83,16 @@ pub struct NotesForm {
     confirm_delete: bool,
     /// Where the user wanted to go while the fields held unsaved text.
     blocked: Option<Nav>,
+    /// The position in the history of the revision that the owner reads, if any.
+    revision_shown: Option<usize>,
+    /// The tool ID of a pre-load.
+    preload_tool: Entity<InputState>,
+    /// The arguments of a pre-load, as a JSON object.
+    preload_args: Entity<InputState>,
+    /// Why the window did not send a pre-load.
+    preload_message: Option<String>,
+    /// The words of a search of the notes.
+    search: Entity<InputState>,
 }
 
 impl NotesForm {
@@ -81,6 +109,11 @@ impl NotesForm {
             conflict: false,
             confirm_delete: false,
             blocked: None,
+            revision_shown: None,
+            preload_tool: cx.new(|cx| InputState::new(window, cx).placeholder("connector/tool")),
+            preload_args: cx.new(|cx| InputState::new(window, cx).placeholder("{\"query\": \"...\"}")),
+            preload_message: None,
+            search: cx.new(|cx| InputState::new(window, cx).placeholder("Search the notes")),
         }
     }
 
@@ -135,6 +168,7 @@ impl NotesForm {
     fn close(&mut self, window: &mut Window, cx: &mut App) {
         self.set_fields("", &WikiText::default(), window, cx);
         self.draft = None;
+        self.revision_shown = None;
     }
 
     /// Takes a new state from the server. Typed text stays. The form loads the server's page
@@ -144,6 +178,9 @@ impl NotesForm {
         if self.profile != state.selected {
             self.profile = state.selected.clone();
             self.close(window, cx);
+            // The bridge ends the search of the other profile.
+            self.search
+                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         }
         // Without an answer from the server, the state says nothing about the pages.
         // The result of a command waits for the next state that has an answer.
@@ -276,6 +313,129 @@ impl Shell {
         }
     }
 
+    /// Shows or hides the revisions of the open page.
+    fn toggle_history(&mut self) {
+        let Some(open) = &self.state.open_note else {
+            return;
+        };
+        let command = UiCommand::NoteHistory {
+            profile: open.profile.clone(),
+            show: open.history.is_none(),
+        };
+        self.notes.revision_shown = None;
+        self.send(command);
+    }
+
+    /// Puts the text of an old revision into the fields. The base stays the loaded page,
+    /// so Save checks the revision as for any edit. Typed text is not replaced.
+    fn load_revision(&mut self, text: WikiText, window: &mut Window, cx: &mut Context<Self>) {
+        let form = &mut self.notes;
+        if form.changed(cx) {
+            form.message = Some(OLD_BLOCKED.to_owned());
+            return;
+        }
+        for (input, value) in [(&form.title, &text.title), (&form.summary, &text.summary)] {
+            input.update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+        }
+        form.body.update(cx, |body, cx| body.set_value(text.body, window, cx));
+        form.message = Some(OLD_LOADED.to_owned());
+    }
+
+    /// The revisions of the open page, newest first, and the text of the one the owner chose.
+    /// Nothing here can be edited.
+    fn note_history(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let history = self.state.open_note.as_ref()?.history.as_ref()?;
+        let shown = self.notes.revision_shown.filter(|at| *at < history.len());
+        let theme = cx.theme();
+        let (selected_bg, radius) = (theme.muted, theme.radius);
+        let rows = history.iter().enumerate().rev().map(|(at, revision)| {
+            let text = match revision {
+                Some(page) => {
+                    let author = match page.author {
+                        WikiAuthor::Agent => "the agent",
+                        WikiAuthor::Owner => "you",
+                    };
+                    format!(
+                        "Revision {} · by {author} · {} UTC",
+                        page.revision,
+                        utc_minute(page.updated_at)
+                    )
+                }
+                None => "Deleted".to_owned(),
+            };
+            let chosen = shown == Some(at);
+            div()
+                .id(SharedString::from(format!("note-rev-{at}")))
+                .test_support()
+                .aria_label(text.clone())
+                .px_2()
+                .py_1()
+                .rounded(radius)
+                .text_sm()
+                .cursor_pointer()
+                .when(chosen, |row| row.bg(selected_bg))
+                .when(!chosen, |row| row.hover(|row| row.bg(selected_bg)))
+                .child(SharedString::from(text))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.notes.revision_shown = Some(at);
+                    cx.notify();
+                }))
+        });
+        let old = shown.and_then(|at| history[at].clone()).map(|page| {
+            let label = format!("{}\n{}\n\n{}", page.text.title, page.text.summary, page.text.body);
+            let text = page.text.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .id("note-rev-box")
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .child(labelled_as(
+                            "note-rev-text",
+                            label,
+                            code_block(cx)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(page.text.title))
+                                .child(quiet(page.text.summary, cx))
+                                .child(div().child(page.text.body)),
+                        )),
+                )
+                .child(
+                    Button::new("note-rev-load")
+                        .small()
+                        .outline()
+                        .self_start()
+                        .label("Put this text into the fields")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.load_revision(text.clone(), window, cx);
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(quiet("Revisions, newest first. Choose one to read it.", cx))
+                .child(
+                    div()
+                        .id("note-revisions")
+                        .max_h(px(160.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .children(rows),
+                )
+                .children(old),
+        )
+    }
+
     /// The first click asks. The second click deletes the page.
     fn delete_note(&mut self) {
         let form = &mut self.notes;
@@ -291,9 +451,101 @@ impl Shell {
         self.send(UiCommand::DeleteNote { profile, slug });
     }
 
-    /// The list of pages. A click opens the page.
+    /// Searches the notes for the typed words. Without words it lists every page again.
+    fn search_notes(&mut self, cx: &App) {
+        let Some(profile) = self.notes.profile.clone() else {
+            return;
+        };
+        let query = self.notes.search.read(cx).value().trim().to_owned();
+        self.send(match query.is_empty() {
+            true => UiCommand::ClearNoteSearch,
+            false => UiCommand::SearchNotes { profile, query },
+        });
+    }
+
+    /// Empties the search field and lists every page again.
+    fn clear_note_search(&mut self, window: &mut Window, cx: &mut App) {
+        self.notes
+            .search
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.send(UiCommand::ClearNoteSearch);
+    }
+
+    /// The search field, and the result of the active search with a button that ends it.
+    fn notes_search(&self, cx: &Context<Self>) -> impl IntoElement {
+        let search = self.state.note_search.as_ref();
+        let result = search.map(|search| match &search.found {
+            None => "Searching…".to_owned(),
+            Some(Ok(pages)) if pages.is_empty() => format!("No page matches “{}”.", search.query),
+            Some(Ok(pages)) if pages.len() == 1 => format!("1 page matches “{}”, best first.", search.query),
+            Some(Ok(pages)) => format!("{} pages match “{}”, best first.", pages.len(), search.query),
+            Some(Err(reason)) => reason.clone(),
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div().flex_1().min_w(px(0.)).child(
+                            Input::new(&self.notes.search)
+                                .id("notes-search")
+                                .aria_label("Search the notes")
+                                .small(),
+                        ),
+                    )
+                    .child(
+                        Button::new("notes-search-go")
+                            .small()
+                            .outline()
+                            .icon(icon("search"))
+                            .label("Search")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.search_notes(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .children(result.map(|result| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .child(labelled("notes-search-result", result)),
+                    )
+                    .child(
+                        Button::new("notes-search-clear")
+                            .small()
+                            .ghost()
+                            .label("Show all")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clear_note_search(window, cx);
+                                cx.notify();
+                            })),
+                    )
+            }))
+    }
+
+    /// The list of pages, or the pages that the active search found, best first. A click opens the page.
     fn notes_list(&self, cx: &Context<Self>) -> impl IntoElement {
-        let pages = self.state.notes.as_deref().unwrap_or_default();
+        let all = self.state.notes.as_deref().unwrap_or_default();
+        let pages = match &self.state.note_search {
+            None => all,
+            Some(search) => match &search.found {
+                Some(Ok(found)) => found.as_slice(),
+                _ => &[],
+            },
+        };
         let open = match &self.notes.draft {
             Some(Draft::Page { base, .. }) => Some(base.slug.as_str()),
             _ => None,
@@ -349,9 +601,9 @@ impl Shell {
                     .justify_between()
                     .child(labelled_as(
                         "notes-count",
-                        format!("Pages: {}", pages.len()),
+                        format!("Pages: {}", all.len()),
                         quiet(
-                            match pages.len() {
+                            match all.len() {
                                 0 => "No page yet".to_owned(),
                                 1 => "1 page".to_owned(),
                                 count => format!("{count} pages"),
@@ -370,6 +622,7 @@ impl Shell {
                             })),
                     ),
             )
+            .child(self.notes_search(cx))
             .child(
                 div()
                     .id("notes-list")
@@ -404,11 +657,13 @@ impl Shell {
             .text_color(cx.theme().muted_foreground)
             .child(labelled("note-message", form.message.clone().unwrap_or_default()));
         let Some(draft) = &form.draft else {
-            return view.child(
-                editor
-                    .child(labelled_as("note-heading", EMPTY, quiet(EMPTY, cx)))
-                    .child(message),
-            );
+            return view
+                .child(
+                    editor
+                        .child(labelled_as("note-heading", EMPTY, quiet(EMPTY, cx)))
+                        .child(message),
+                )
+                .child(self.notes_side(cx));
         };
 
         let page = match draft {
@@ -494,6 +749,16 @@ impl Shell {
                         })),
                 );
         if page.is_some() {
+            let shown = self.state.open_note.as_ref().is_some_and(|open| open.history.is_some());
+            buttons = buttons.child(
+                Button::new("note-history")
+                    .ghost()
+                    .label(if shown { "Hide the history" } else { "History" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_history();
+                        cx.notify();
+                    })),
+            );
             let delete = Button::new("note-delete")
                 .label(if form.confirm_delete {
                     "Yes, delete the page"
@@ -543,7 +808,7 @@ impl Shell {
             .gap_2()
             .children(form.blocked.clone().map(|nav| {
                 notice(colors.waiting, cx)
-                    .child(labelled("note-blocked", UNSAVED))
+                    .child(div().flex_1().min_w(px(0.)).child(labelled("note-blocked", UNSAVED)))
                     .child(
                         Button::new("note-discard")
                             .small()
@@ -555,19 +820,20 @@ impl Shell {
                     )
             }))
             .children(form.conflict.then(|| {
-                notice(colors.stopped, cx).child(Self::conflict_warning(
+                notice(colors.stopped, cx).child(div().flex_1().min_w(px(0.)).child(Self::conflict_warning(
                     "note",
                     PAGE_CONFLICT,
                     Self::load_note,
                     |this, cx| this.save_note(true, cx),
                     cx,
-                ))
+                )))
             }))
-            .children(
-                page.is_some_and(|(_, gone)| gone)
-                    .then(|| notice(colors.stopped, cx).child(labelled("note-gone", GONE))),
-            )
-            .children(pending.then(|| notice(colors.waiting, cx).child(labelled("note-pending", PENDING))))
+            .children(page.is_some_and(|(_, gone)| gone).then(|| {
+                notice(colors.stopped, cx).child(div().flex_1().min_w(px(0.)).child(labelled("note-gone", GONE)))
+            }))
+            .children(pending.then(|| {
+                notice(colors.waiting, cx).child(div().flex_1().min_w(px(0.)).child(labelled("note-pending", PENDING)))
+            }))
             .children(
                 page.is_some_and(|(base, _)| base.author == WikiAuthor::Agent)
                     .then(|| labelled_as("note-agent-page", AGENT_PAGE, quiet(AGENT_PAGE, cx))),
@@ -579,8 +845,9 @@ impl Shell {
                 heading,
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_3()
+                    .gap_x_3()
                     .child(
                         div()
                             .text_lg()
@@ -620,7 +887,169 @@ impl Shell {
             ))
             .child(buttons)
             .child(message)
+            .children(self.note_history(cx))
             .children(sources);
-        view.child(editor)
+        view.child(editor).child(self.notes_side(cx))
+    }
+
+    /// The column beside the page: the pre-load and the checks of the notes.
+    fn notes_side(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .id("notes-side")
+            .w(px(300.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .overflow_y_scroll()
+            .child(self.preload_card(cx))
+            .child(self.checks_card(cx))
+    }
+
+    /// Sends a pre-load of the typed tool and arguments. Arguments that are not a JSON object are not sent.
+    fn preload_notes(&mut self, cx: &App) {
+        let form = &mut self.notes;
+        let Some(profile) = form.profile.clone() else {
+            return;
+        };
+        let tool = form.preload_tool.read(cx).value().trim().to_owned();
+        let args = form.preload_args.read(cx).value().trim().to_owned();
+        let args = match args.as_str() {
+            "" => Ok(serde_json::Map::new()),
+            text => serde_json::from_str(text).map_err(|e| format!("The arguments are not a JSON object: {e}")),
+        };
+        match args {
+            Ok(args) => {
+                form.preload_message = None;
+                let request = PreloadNotes { tool, args };
+                self.send(UiCommand::PreloadNotes { profile, request });
+            }
+            Err(error) => form.preload_message = Some(error),
+        }
+    }
+
+    /// One read that the agent turns into page changes, which go to the inbox.
+    pub(crate) fn preload_card(&self, cx: &Context<Self>) -> impl IntoElement {
+        let form = &self.notes;
+        let readers: Vec<&str> = self
+            .state
+            .permissions
+            .iter()
+            .flat_map(|permissions| &permissions.rules)
+            .filter(|(_, rule)| rule.class == ToolClass::Read)
+            .map(|(tool, _)| tool.as_str())
+            .collect();
+        let tools = match readers.is_empty() {
+            true => "No tool has a read rule yet.".to_owned(),
+            false => format!("Tools that read: {}", readers.join(", ")),
+        };
+        let result = match (&form.preload_message, &self.state.preload_result) {
+            (Some(message), _) => message.clone(),
+            (None, None) => String::new(),
+            (None, Some(Ok(0))) => "The agent kept no page.".to_owned(),
+            (None, Some(Ok(1))) => "1 page change waits in the inbox.".to_owned(),
+            (None, Some(Ok(count))) => format!("{count} page changes wait in the inbox."),
+            (None, Some(Err(error))) => error.clone(),
+        };
+        card(cx)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Read into the notes"))
+            .child(quiet(PRELOAD_HELP, cx))
+            .child(labelled_as("preload-tools", tools.clone(), quiet(tools, cx)))
+            .child(field(
+                "Tool",
+                Input::new(&form.preload_tool).id("preload-tool").aria_label("Tool"),
+                cx,
+            ))
+            .child(field(
+                "Arguments, a JSON object",
+                Input::new(&form.preload_args)
+                    .id("preload-args")
+                    .aria_label("Arguments"),
+                cx,
+            ))
+            .child(
+                div().flex().child(
+                    Button::new("preload-notes")
+                        .small()
+                        .outline()
+                        .label("Read")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.preload_notes(cx);
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().text_sm().child(labelled("preload-result", result)))
+    }
+
+    /// The findings of the last check, with a button to check now and one to dismiss each finding.
+    fn checks_card(&self, cx: &Context<Self>) -> impl IntoElement {
+        let result = match &self.state.lint_result {
+            None => String::new(),
+            Some(Ok(0)) => "No finding.".to_owned(),
+            Some(Ok(1)) => "1 finding.".to_owned(),
+            Some(Ok(found)) => format!("{found} findings."),
+            Some(Err(error)) => error.clone(),
+        };
+        let findings = self.state.lint_findings.as_deref().unwrap_or_default();
+        let count = match findings.len() {
+            0 => "Nothing to look at.".to_owned(),
+            1 => "1 finding to look at.".to_owned(),
+            count => format!("{count} findings to look at."),
+        };
+        let rows = findings.iter().map(|finding| {
+            let id = finding.id;
+            let text = finding_text(finding);
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .py_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(labelled_as(
+                    format!("finding-{id}"),
+                    text.clone(),
+                    div().text_sm().child(SharedString::from(text)),
+                ))
+                .child(
+                    div().flex().child(
+                        Button::new(SharedString::from(format!("dismiss-finding-{id}")))
+                            .small()
+                            .outline()
+                            .label("Dismiss")
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if let Some(profile) = this.notes.profile.clone() {
+                                    this.send(UiCommand::DismissFinding { profile, id });
+                                }
+                            })),
+                    ),
+                )
+        });
+        card(cx)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Checks"))
+            .child(quiet(CHECKS_HELP, cx))
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        Button::new("lint-notes")
+                            .small()
+                            .outline()
+                            .label("Check now")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                if let Some(profile) = this.notes.profile.clone() {
+                                    this.send(UiCommand::LintNotes { profile });
+                                }
+                            })),
+                    ),
+            )
+            .child(div().text_sm().child(labelled("lint-result", result)))
+            .child(labelled_as(
+                "findings-count",
+                format!("Findings: {}", findings.len()),
+                quiet(count, cx),
+            ))
+            .child(div().flex().flex_col().children(rows))
     }
 }

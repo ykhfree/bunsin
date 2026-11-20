@@ -2,31 +2,70 @@
 //!
 //! The LLM only proposes. Every permission decision is made here from stored facts.
 
+mod ard;
+mod autonomy;
+mod callers;
+mod candidates;
+mod coding;
 mod connections;
+mod corrections;
+mod eval;
+mod intake;
+mod lint;
+mod llm_log;
 mod notes;
+mod oauth;
+mod poll_settings;
 mod polling;
+mod preload;
+mod principles;
+mod registry;
+mod resume;
 mod secrets;
+mod settings_parts;
+mod webhooks;
 
+pub use ard::OuterListener;
+pub use oauth::{OAuthSignIn, SecretWriter};
+pub use preload::PRELOAD_SOURCE;
+pub use resume::Interrupted;
 pub use secrets::{KeyFile, KeySource, MasterKey, ProfileSecrets, StoredSecret};
+pub use webhooks::WebhookTarget;
 
 use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, Expected, LlmTest,
-    LlmUpdate, Outcome, Permissions, PermissionsUpdate, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot,
-    ReplayCase, ReplayResult, ToolsReport, WikiPageUpdate,
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, EvalSettingsUpdate, Expected,
+    InboundStatus, InboundUpdate, LlmTest, LlmUpdate, NewCallerToken, NotesSettingsUpdate, OAuthStarted, Outcome,
+    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WebhooksUpdate, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
-use bunsin_core::context::{ContextInput, Correction, ToolHint, assemble};
+use bunsin_core::ard::{ARD_CONNECTOR, ArdRegistry};
+use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::coding::is_coding_tool;
+use bunsin_core::context::{ContextInput, ToolHint, assemble};
+use bunsin_core::eval::{EvalConfig, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundConfig;
+use bunsin_core::lint::LintFinding;
 use bunsin_core::llm::{CompletionRequest, Message, Role, StopReason};
 use bunsin_core::marker::mark_args;
 use bunsin_core::policy::{Decision, ToolClass};
-use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::poll::PollConfig;
+use bunsin_core::ports::{BoxFuture, Coder, Connector, ConnectorError, LlmClient};
 use bunsin_core::privacy::{PLACEHOLDER_PREFIX, PrivacyConfig, RedactionCounts, Redactor};
 use bunsin_core::proposal::{Proposal, parse_reply, proposal_schema, split_tool_id};
-use bunsin_core::records::{InboxBody, InboxItem, ProfileInfo, ReadNote};
+use bunsin_core::records::{
+    CallerToken, CorrectionRecord, DecisionKind, InboxBody, InboxItem, LlmUsage, ProfileInfo, ReadNote,
+};
 use bunsin_core::tool::{PinSet, diff_pins, pin, pin_holds};
-use bunsin_core::wiki::{WIKI_READ_TOOL, WikiPage, WikiSummary, WikiUpdate, index_text, page_text};
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::{
+    NotesConfig, WIKI_READ_TOOL, WIKI_SEARCH_TOOL, WikiPage, WikiSummary, WikiUpdate, is_notes_tool,
+};
 use bunsin_store::{AppStore, EventStart, ProfileStore, StoreError};
+use llm_log::Purpose;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -35,7 +74,6 @@ use std::sync::{Arc, Mutex};
 
 const CONFIG_KEY: &str = "config";
 const LIST_LIMIT: u32 = 200;
-const CORRECTIONS_IN_PROMPT: u32 = 5;
 /// How many times the handling of one event is tried before the owner is asked.
 const MAX_EVENT_ATTEMPTS: u32 = 3;
 /// How many tools that read the agent may call for one event.
@@ -92,6 +130,39 @@ pub trait Backends: Send + Sync {
         self.build(profile, config)
     }
 
+    /// Like `build_with_secrets`. A connector stores new OAuth credentials through `writer`.
+    fn build_with_writer<'a>(
+        &'a self,
+        profile: &'a str,
+        config: &'a ProfileConfig,
+        secrets: &'a ProfileSecrets,
+        _writer: Arc<dyn SecretWriter>,
+    ) -> BoxFuture<'a, Result<Runtime, String>> {
+        self.build_with_secrets(profile, config, secrets)
+    }
+
+    /// Starts the OAuth sign-in of connector `name`, whose settings are `section`.
+    /// Returns the address of the page where the owner signs in.
+    fn oauth_start<'a>(
+        &'a self,
+        _profile: &'a str,
+        _name: &'a str,
+        _section: &'a Value,
+        _redirect_uri: &'a str,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Err("this server cannot sign in to connectors with OAuth".to_owned()) })
+    }
+
+    /// Ends a sign-in that `oauth_start` began, with the address the browser went to after it.
+    fn oauth_finish<'a>(
+        &'a self,
+        _profile: &'a str,
+        _name: &'a str,
+        _callback_url: &'a str,
+    ) -> BoxFuture<'a, Result<OAuthSignIn, String>> {
+        Box::pin(async { Err("this server cannot sign in to connectors with OAuth".to_owned()) })
+    }
+
     /// Checks new settings before they are stored. The error says what to change.
     fn validate(&self, _profile: &str, _config: &ProfileConfig) -> Result<(), String> {
         Ok(())
@@ -100,6 +171,16 @@ pub trait Backends: Send + Sync {
     /// True if the server operator supplies this secret outside the store.
     fn has_server_secret(&self, _profile: &str, _key: &str) -> bool {
         false
+    }
+
+    /// The publisher domains that the server operator allows in ARD entries, in lower case.
+    fn ard_publishers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The runner of coding jobs. Only a server whose operator allows coding has one.
+    fn coder(&self) -> Result<Arc<dyn Coder>, String> {
+        Err("this server does not run coding jobs: its operator did not start it with --allow-coding".into())
     }
 }
 
@@ -120,6 +201,7 @@ pub enum OpenError {
 
 /// What the handling of one request needs from a profile.
 struct Ctx {
+    profile: String,
     store: Arc<ProfileStore>,
     config: ProfileConfig,
     runtime: Arc<Runtime>,
@@ -138,6 +220,12 @@ pub struct Engine {
     last_polls: Mutex<HashMap<(String, String), i64>>,
     /// Encrypts and decrypts the tokens that owners store.
     secret_box: secrets::SecretBox,
+    /// The listeners for callers of the running server. The ARD catalogs and the inbound status name them.
+    outer: Mutex<Vec<OuterListener>>,
+    /// Taken by every write of OAuth credentials. See `oauth::ProfileWriter`.
+    oauth_writes: Arc<Mutex<()>>,
+    /// The ARD registry, if the server operator turned it on. See `registry`.
+    registry: std::sync::OnceLock<registry::Registry>,
     /// Held for the life of the engine. A second engine on the same directory fails to open.
     _lock: File,
 }
@@ -151,14 +239,6 @@ fn store_error(error: StoreError) -> ApiError {
         StoreError::NoSuchProfile(_) | StoreError::NotFound(..) => ApiError::NotFound(error.to_string()),
         StoreError::BadProfileId(_) | StoreError::ProfileExists(_) => ApiError::Invalid(error.to_string()),
         other => internal(other),
-    }
-}
-
-/// The text the user sees and edits: the outgoing-text argument, or all arguments.
-fn draft_text(args: &Map<String, Value>, text_arg: Option<&str>) -> String {
-    match text_arg.and_then(|name| args.get(name)).and_then(Value::as_str) {
-        Some(text) => text.to_owned(),
-        None => Value::Object(args.clone()).to_string(),
     }
 }
 
@@ -235,6 +315,9 @@ impl Engine {
             polling: Mutex::new(HashSet::new()),
             last_polls: Mutex::new(HashMap::new()),
             secret_box,
+            outer: Mutex::new(Vec::new()),
+            oauth_writes: Arc::new(Mutex::new(())),
+            registry: std::sync::OnceLock::new(),
             _lock: lock,
         })
     }
@@ -273,7 +356,8 @@ impl Engine {
                 secrets.insert(key.clone(), self.secret_box.open(profile, &key, &sealed));
             }
         }
-        let built = self.backends.build_with_secrets(profile, config, &secrets).await;
+        let writer = self.writer(profile, store);
+        let built = self.backends.build_with_writer(profile, config, &secrets, writer).await;
         let runtime = Arc::new(built.map_err(ApiError::Internal)?);
         self.runtimes
             .lock()
@@ -291,6 +375,24 @@ impl Engine {
     /// Checks the parts of new settings that the engine itself relies on.
     fn check_config(config: &ProfileConfig) -> ApiResult<()> {
         Self::redactor(config)?;
+        for (tool_id, rule) in &config.policy.rules {
+            rule.outgoing_text
+                .check()
+                .map_err(|e| ApiError::Invalid(format!("the rule of `{tool_id}`: {e}")))?;
+        }
+        if let Some(thresholds) = &config.autonomy {
+            thresholds.check().map_err(ApiError::Invalid)?;
+        }
+        if let Some(pass) = &config.eval.pass {
+            pass.check().map_err(ApiError::Invalid)?;
+        }
+        config.notes.check().map_err(ApiError::Invalid)?;
+        Self::check_coding_rules(config)?;
+        Self::check_inbound(config)?;
+        Self::check_ard(config)?;
+        bunsin_core::ard::check_registries(&config.ard_registries).map_err(ApiError::Invalid)?;
+        bunsin_core::ard::check_domains(&config.ard_domains).map_err(ApiError::Invalid)?;
+        Self::check_webhooks(config)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
             let tool_id = poll.tool_id();
@@ -345,6 +447,7 @@ impl Engine {
         let redactor = Self::redactor(&config)?;
         let runtime = self.runtime(profile, &config).await?;
         Ok(Ctx {
+            profile: profile.to_owned(),
             store,
             config,
             runtime,
@@ -377,6 +480,19 @@ impl Engine {
                     input_schema: spec.input_schema.clone(),
                 })
             })
+            .chain(Self::coding_hint(config))
+            .collect()
+    }
+
+    /// The ARD tools that the settings offer: the registry tools and `resolve`.
+    fn ard_hints(config: &ProfileConfig) -> Vec<ToolHint> {
+        bunsin_core::ard::tool_specs(&config.ard_registries, &config.ard_domains)
+            .into_iter()
+            .map(|spec| ToolHint {
+                tool_id: format!("{ARD_CONNECTOR}/{}", spec.name),
+                description: spec.description,
+                input_schema: spec.input_schema,
+            })
             .collect()
     }
 
@@ -396,33 +512,39 @@ impl Engine {
     ///
     /// If the LLM asks for a tool that reads, and `allow_reads` is set, the tool runs and the
     /// LLM gets its result and is asked again. This repeats until the LLM proposes something
-    /// else. An invalid reply gets one repair request. Returns the outcome and every raw reply.
+    /// else. An invalid reply gets one repair request. `first_read` is a read made before the request, with
+    /// its filtered result: the result goes in as quoted data, like the result of a later read.
+    /// Returns the outcome and every raw reply.
     async fn propose(
         &self,
         ctx: &Ctx,
         event: &InboundEvent,
         key: &str,
         allow_reads: bool,
+        first_read: Option<(ReadNote, String)>,
+        purpose: Purpose,
     ) -> ApiResult<(Proposed, Vec<String>)> {
         let Ctx {
             store,
             config,
             runtime,
             redactor,
+            ..
         } = ctx;
-        let corrections = store.recent_corrections(CORRECTIONS_IN_PROMPT).map_err(store_error)?;
         let mut tools = Self::tool_hints(config);
-        // Replay gets no notes: they hold facts from after the replayed event.
-        let notes_index = match allow_reads {
-            true => Some(index_text(&store.wiki_index().map_err(store_error)?, self.now())),
-            false => None,
+        tools.extend(Self::reply_hint(config, event));
+        // Replay gets no notes and no corrections: they hold facts from after the replayed event,
+        // and a correction can hold the real reply.
+        let (corrections, notes_index) = match allow_reads {
+            true => (
+                Self::similar_corrections(store, event)?,
+                Some(self.notes_index(store, event)?),
+            ),
+            false => (Vec::new(), None),
         };
         if allow_reads {
-            tools.push(ToolHint {
-                tool_id: WIKI_READ_TOOL.to_owned(),
-                description: "Read one page of your notes.".to_owned(),
-                input_schema: json!({"type": "object", "required": ["slug"], "properties": {"slug": {"type": "string"}}}),
-            });
+            tools.extend(notes::notes_tools());
+            tools.extend(Self::ard_hints(config));
         }
         let mut counts = RedactionCounts::new();
         let mut request: CompletionRequest = assemble(
@@ -439,9 +561,17 @@ impl Engine {
             },
             &mut counts,
         );
+        let mut reads = Vec::new();
+        if let Some((note, text)) = first_read {
+            let quoted = bunsin_core::context::quote_untrusted("tool-result", &text);
+            request.messages[0].content.push_str(&format!(
+                "\nResult of `{}`, read before this request:\n{quoted}",
+                note.tool
+            ));
+            reads.push(note);
+        }
 
         let mut replies = Vec::new();
-        let mut reads: Vec<ReadNote> = Vec::new();
         let mut pages_read: BTreeSet<String> = BTreeSet::new();
         let mut used_tokens = 0;
         let mut repaired = false;
@@ -455,7 +585,10 @@ impl Engine {
                 Ok(llm) => llm,
                 Err(error) => return Ok((Proposed::Retry(format!("the LLM cannot be used: {error}")), replies)),
             };
-            let response = match llm.complete(request.clone()).await {
+            let response = match self
+                .complete(store, llm.as_ref(), Some(key), purpose, request.clone())
+                .await?
+            {
                 Ok(response) => response,
                 Err(error) => return Ok((Proposed::Retry(format!("LLM call failed: {error}")), replies)),
             };
@@ -485,6 +618,10 @@ impl Engine {
                             .to_owned(),
                     )
                 }
+                Ok(reply) => match Self::reply_misuse(event, &reply.proposal) {
+                    Some(error) => Err(error),
+                    None => Ok(reply),
+                },
                 other => other,
             };
             let (proposal, wiki_updates) = match parsed {
@@ -519,22 +656,24 @@ impl Engine {
             let Proposal::ToolCall { tool, args, .. } = &proposal else {
                 return Ok((ready(proposal, reads, pages_read), replies));
             };
-            // The built-in notes tool is handled here. It is not in the permission table.
-            let reads_notes = tool == WIKI_READ_TOOL;
+            // The built-in notes tools and the ARD tools are handled here. They are not in the permission table.
+            let reads_notes = tool == WIKI_READ_TOOL || tool == WIKI_SEARCH_TOOL;
+            let reads_ard = Self::ard_hints(config).iter().any(|hint| hint.tool_id == *tool);
             let is_read = config
                 .policy
                 .rules
                 .get(tool)
                 .is_some_and(|rule| rule.class == ToolClass::Read);
-            let allowed =
-                allow_reads && (reads_notes || (is_read && self.decide(ctx, tool).await? == Decision::Execute));
+            let allowed = allow_reads
+                && (reads_notes || reads_ard || (is_read && self.decide(ctx, tool).await? == Decision::Execute));
             if !allowed {
                 return Ok((ready(proposal, reads, pages_read), replies));
             }
-            // The limit counts the reads of the notes and of connectors separately.
+            // The limit counts the reads of the notes and of connectors separately. An ARD tool is a
+            // read of a connector: it leaves the server.
             let same_kind = reads
                 .iter()
-                .filter(|read| (read.tool == WIKI_READ_TOOL) == reads_notes)
+                .filter(|read| is_notes_tool(&read.tool) == reads_notes)
                 .count();
             if same_kind >= MAX_READS_PER_EVENT {
                 let reason = format!("the agent asked for more than {MAX_READS_PER_EVENT} reads");
@@ -552,17 +691,7 @@ impl Engine {
             }
 
             let (text, ok) = if reads_notes {
-                let slug = args.get("slug").and_then(Value::as_str).unwrap_or_default();
-                match store.wiki_page(slug).map_err(store_error)? {
-                    Some(page) => {
-                        pages_read.insert(slug.to_owned());
-                        (
-                            redactor.redact(&page_text(&page, self.now()), &mut RedactionCounts::new()),
-                            true,
-                        )
-                    }
-                    None => (format!("Your notes have no page `{slug}`."), false),
-                }
+                self.run_notes_tool(ctx, tool, args, &mut pages_read)?
             } else {
                 let result = match split_tool_id(tool) {
                     Some((connector, name)) => match runtime.connector(connector) {
@@ -610,8 +739,11 @@ impl Engine {
             store, config, runtime, ..
         } = ctx;
         let kill_switch = store.kill_switch().map_err(store_error)?;
+        let held = store.is_held(tool_id).map_err(store_error)?;
         // The connector is asked only about tools that are in the permission table.
         let pin_ok = match split_tool_id(tool_id) {
+            // The specification of a built-in tool is in the code, so it cannot change.
+            Some(_) if is_coding_tool(tool_id) || tool_id == bunsin_core::inbound::REPLY_TOOL => true,
             Some((connector, tool)) if config.policy.rules.contains_key(tool_id) => {
                 match (config.approved_tools.get(connector), runtime.connector(connector)) {
                     (Some(approved), Ok(live)) => match live.list_tools().await {
@@ -623,10 +755,11 @@ impl Engine {
             }
             _ => false,
         };
-        Ok(config.policy.decide(tool_id, pin_ok, kill_switch))
+        Ok(config.policy.decide(tool_id, pin_ok, kill_switch, held))
     }
 
     /// Runs an approved item. Only the caller that moves it to `Executing` runs it.
+    /// The inbox ID identifies the run. If a stop cuts the call, the next start marks it `unknown`.
     async fn execute(&self, ctx: &Ctx, item: &InboxItem) -> ApiResult<Outcome> {
         let Ctx { store, runtime, .. } = ctx;
         let InboxBody::ToolCall { tool: tool_id, args } = &item.body else {
@@ -639,12 +772,29 @@ impl Engine {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
         let key = Some(item.event_key.as_str());
+        self.audit(
+            store,
+            "execution_started",
+            key,
+            json!({"inbox_id": item.id, "tool": tool_id}),
+        )?;
+        // A coding job runs on the server in the background. Its end is recorded later.
+        if is_coding_tool(tool_id) {
+            return match self.start_coding(ctx, item, args) {
+                Ok(()) => Ok(Outcome::Started { inbox_id: item.id }),
+                Err(error) => self.execution_failed(ctx, item, tool_id, error),
+            };
+        }
+        // An answer to an inbound caller goes back through `get_request`, not through a connector.
+        if tool_id == bunsin_core::inbound::REPLY_TOOL {
+            return self.answer_request(ctx, item);
+        }
         let result = match split_tool_id(tool_id) {
             Some((connector, tool)) => match runtime.connector(connector) {
-                Ok(connector) => connector.call_tool(tool, args.clone()).await.map_err(|e| e.to_string()),
-                Err(error) => Err(error),
+                Ok(connector) => connector.call_tool(tool, args.clone()).await,
+                Err(error) => return self.execution_failed(ctx, item, tool_id, error),
             },
-            None => Err(format!("`{tool_id}` is not a tool ID")),
+            None => return self.execution_failed(ctx, item, tool_id, format!("`{tool_id}` is not a tool ID")),
         };
         match result {
             Ok(value) => {
@@ -658,22 +808,38 @@ impl Engine {
                 self.audit(store, "executed", key, json!({"inbox_id": item.id, "tool": tool_id}))?;
                 Ok(Outcome::Executed { inbox_id: item.id })
             }
-            Err(error) => {
+            // The call may have reached its tool, so it is not run again. Only the owner resolves it.
+            Err(error @ ConnectorError::Unanswered(_)) => {
+                let error = error.to_string();
                 store
-                    .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
+                    .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Unknown, self.now())
                     .map_err(store_error)?;
-                self.audit(
-                    store,
-                    "execution_failed",
-                    key,
-                    json!({"inbox_id": item.id, "tool": tool_id, "error": error}),
-                )?;
-                Ok(Outcome::ExecutionFailed {
+                let detail = json!({"inbox_id": item.id, "tool": tool_id, "error": error});
+                self.audit(store, "outcome_unknown", key, detail)?;
+                Ok(Outcome::ExecutionUnknown {
                     inbox_id: item.id,
                     error,
                 })
             }
+            Err(error) => self.execution_failed(ctx, item, tool_id, error.to_string()),
         }
+    }
+
+    /// Ends an item whose call failed.
+    fn execution_failed(&self, ctx: &Ctx, item: &InboxItem, tool_id: &str, error: String) -> ApiResult<Outcome> {
+        ctx.store
+            .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
+            .map_err(store_error)?;
+        self.audit(
+            &ctx.store,
+            "execution_failed",
+            Some(&item.event_key),
+            json!({"inbox_id": item.id, "tool": tool_id, "error": error}),
+        )?;
+        Ok(Outcome::ExecutionFailed {
+            inbox_id: item.id,
+            error,
+        })
     }
 
     async fn handle_tool_call(
@@ -686,7 +852,23 @@ impl Engine {
         mut args: Map<String, Value>,
     ) -> ApiResult<Outcome> {
         let Ctx { store, config, .. } = ctx;
-        let decision = self.decide(ctx, &tool_id).await?;
+        let mut decision = self.decide(ctx, &tool_id).await?;
+        // An inbound caller's question never makes a change without the owner (ARCHITECTURE 7).
+        // A rule at `autonomous` holds for the owner's own events only. The intake row, not the
+        // event text, tells that the event came from a caller.
+        let changes = config
+            .policy
+            .rules
+            .get(&tool_id)
+            .is_some_and(|rule| rule.class != ToolClass::Read);
+        if changes
+            && decision == Decision::Execute
+            && store
+                .has_intake(bunsin_core::inbound::INBOUND_SOURCE, key)
+                .map_err(store_error)?
+        {
+            decision = Decision::NeedsApproval;
+        }
         self.audit(
             store,
             "policy_decision",
@@ -701,9 +883,9 @@ impl Engine {
             Decision::Execute => ApprovalState::Approved,
         };
         // The marker is added before the user sees the draft, so the inbox shows what will be sent.
-        let text_arg = config.policy.rules.get(&tool_id).and_then(|rule| rule.text_arg());
-        if let Some(text_arg) = text_arg
-            && let Err(error) = mark_args(&mut args, text_arg, &config.ai_marker)
+        let rule = config.policy.rules.get(&tool_id);
+        if let Some(rule) = rule
+            && let Err(error) = mark_args(&mut args, &rule.outgoing_text, &config.ai_marker)
         {
             self.audit(
                 store,
@@ -723,6 +905,9 @@ impl Engine {
             ApprovalState::Draft => Ok(Outcome::Drafted { inbox_id: item.id }),
             ApprovalState::Pending => Ok(Outcome::PendingApproval { inbox_id: item.id }),
             _ => {
+                if let InboxBody::ToolCall { tool, .. } = &item.body {
+                    self.record_decision(store, &item, tool, DecisionKind::Autonomous)?;
+                }
                 // The event is closed before the call starts. If a step after the call fails,
                 // a later delivery of the event must not make the same write again.
                 store.finish_event(key).map_err(store_error)?;
@@ -791,7 +976,7 @@ impl Engine {
         event: &InboundEvent,
     ) -> ApiResult<Outcome> {
         let ctx = self.ctx(profile).await?;
-        let (proposed, replies) = self.propose(&ctx, event, key, true).await?;
+        let (proposed, replies) = self.propose(&ctx, event, key, true, None, Purpose::Event).await?;
         for reply in &replies {
             // The LLM can write personal data that it made up or was told in the owner's
             // principles. The stored copy of its reply passes the filter like other text.
@@ -860,7 +1045,7 @@ impl Engine {
         let mut item = store.inbox_item(inbox_id).map_err(store_error)?;
         let (tool_id, args) = match item.body.clone() {
             InboxBody::ToolCall { tool, args } => (tool, args),
-            InboxBody::WikiChange { .. } => return self.approve_wiki_change(&store, &item, edit.is_some()),
+            InboxBody::WikiChange { .. } => return self.approve_wiki_change(&store, &item, edit.is_some(), false),
             InboxBody::Escalation { .. } => {
                 return Err(ApiError::NotAllowed("an escalation cannot be approved".into()));
             }
@@ -874,7 +1059,11 @@ impl Engine {
         let ctx = self.ctx(profile).await?;
         let config = &ctx.config;
         let key = item.event_key.clone();
-        let text_arg = config.policy.rules.get(&tool_id).and_then(|rule| rule.text_arg());
+        let rule = config.policy.rules.get(&tool_id);
+        let kind = match edit {
+            Some(_) => DecisionKind::Edited,
+            None => DecisionKind::Approved,
+        };
 
         if let Some(Edit {
             args: mut edited,
@@ -882,14 +1071,11 @@ impl Engine {
         }) = edit
         {
             // The user may have removed the marker while editing. It is added again.
-            if let Some(text_arg) = text_arg {
-                mark_args(&mut edited, text_arg, &config.ai_marker).map_err(|e| ApiError::Invalid(e.to_string()))?;
+            if let Some(rule) = rule {
+                mark_args(&mut edited, &rule.outgoing_text, &config.ai_marker)
+                    .map_err(|e| ApiError::Invalid(e.to_string()))?;
             }
-            let correction = Correction {
-                original: draft_text(&args, text_arg),
-                edited: draft_text(&edited, text_arg),
-                reason,
-            };
+            let correction = Self::correction(&ctx, &item, &tool_id, &args, &edited, &reason)?;
             let body = InboxBody::ToolCall {
                 tool: tool_id.clone(),
                 args: edited,
@@ -921,11 +1107,12 @@ impl Engine {
             item.body = body;
         }
 
-        // The rule may name another text argument than when the item was made. The AI marker
+        // The rule may name other places of text than when the item was made. The AI marker
         // follows the rule that is in force now, so a corrected rule also covers a waiting item.
-        if let (Some(text_arg), InboxBody::ToolCall { tool, args }) = (text_arg, &item.body) {
+        if let (Some(rule), InboxBody::ToolCall { tool, args }) = (rule, &item.body) {
             let mut marked = args.clone();
-            mark_args(&mut marked, text_arg, &config.ai_marker).map_err(|e| ApiError::Invalid(e.to_string()))?;
+            mark_args(&mut marked, &rule.outgoing_text, &config.ai_marker)
+                .map_err(|e| ApiError::Invalid(e.to_string()))?;
             if marked != *args {
                 let body = InboxBody::ToolCall {
                     tool: tool.clone(),
@@ -961,51 +1148,32 @@ impl Engine {
             return Err(ApiError::NotAllowed("the item was already handled".into()));
         }
         self.audit(&store, "approved", Some(&key), json!({"inbox_id": inbox_id}))?;
+        self.record_decision(&store, &item, &tool_id, kind)?;
         self.execute(&ctx, &item).await
     }
 
     fn reject_item(&self, profile: &str, inbox_id: i64, reason: &str) -> ApiResult<()> {
         let store = self.store(profile)?;
         let item = store.inbox_item(inbox_id).map_err(store_error)?;
-        let moved = [ApprovalState::Pending, ApprovalState::Draft].into_iter().any(|from| {
+        let moved_from = [ApprovalState::Pending, ApprovalState::Draft].into_iter().find(|from| {
             store
-                .move_inbox_state(inbox_id, from, ApprovalState::Rejected, self.now())
+                .move_inbox_state(inbox_id, *from, ApprovalState::Rejected, self.now())
                 .unwrap_or(false)
         });
-        if !moved {
+        let Some(from) = moved_from else {
             return Err(ApiError::NotAllowed(format!("the item is {}", item.state.as_str())));
-        }
+        };
         self.audit(
             &store,
             "rejected",
             Some(&item.event_key),
             json!({"inbox_id": inbox_id, "reason": reason}),
-        )
-    }
-
-    async fn replay_case(&self, profile: &str, case: ReplayCase) -> ApiResult<ReplayResult> {
-        let ctx = self.ctx(profile).await?;
-        let store = &ctx.store;
-        // Only the event goes to the LLM. The real reply is kept for the comparison.
-        let event = Self::redact_event(&ctx.redactor, case.event, &mut RedactionCounts::new());
-        let key = event.dedupe_key();
-        // Replay runs no tool. A search made today would find the real reply and spoil the comparison.
-        let (proposed, replies) = self.propose(&ctx, &event, &key, false).await?;
-        for reply in &replies {
-            let stored = ctx.redactor.redact(reply, &mut RedactionCounts::new());
-            store
-                .put_artifact("replay_reply", stored.as_bytes(), self.now(), Some(&key), None)
-                .map_err(store_error)?;
+        )?;
+        // Only a waiting call is a review. A draft never runs, and a note or an escalation is no call.
+        match (&item.body, from) {
+            (InboxBody::ToolCall { tool, .. }, ApprovalState::Pending) => self.record_rejection(&store, &item, tool),
+            _ => Ok(()),
         }
-        let (proposal, error) = match proposed {
-            Proposed::Ready { proposal, .. } => (Some(proposal), None),
-            Proposed::Retry(error) | Proposed::Stop(error) => (None, Some(error)),
-        };
-        Ok(ReplayResult {
-            proposal,
-            error,
-            actual_reply: case.actual_reply,
-        })
     }
 
     /// Sends one request to the saved LLM endpoint. The request has the reply schema and the output
@@ -1026,7 +1194,10 @@ impl Engine {
         let outcome = match &ctx.runtime.llm {
             Err(error) => Err(format!("the LLM cannot be used: {error}")),
             // The client of the endpoint ends the request at the timeout of the profile's settings.
-            Ok(llm) => match llm.complete(request).await {
+            Ok(llm) => match self
+                .complete(&ctx.store, llm.as_ref(), None, Purpose::LlmTest, request)
+                .await?
+            {
                 Err(error) => Err(format!("the request failed: {error}")),
                 Ok(response) => match (response.stop, parse_reply(&response.content)) {
                     (StopReason::End, Ok(_)) => Ok(format!(
@@ -1153,7 +1324,7 @@ impl Engine {
         Self::check_config(&config)?;
         Self::save_config_from(&store, &loaded, &config)?;
         // Counts only. The patterns can describe what the owner wants hidden.
-        let detail = json!({"custom_patterns": config.privacy.custom.len()});
+        let detail = json!({"custom_patterns": config.privacy.custom.len(), "terms": config.privacy.terms.len()});
         self.audit(&store, "privacy_changed", None, detail)
     }
 }
@@ -1170,11 +1341,14 @@ impl EngineApi for Engine {
     fn set_profile_config<'a>(&'a self, profile: &'a str, config: ProfileConfig) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let store = self.store(profile)?;
+            let before = Self::config(&store)?;
+            let config = Self::with_reply_rule(&before, config);
             self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
             Self::check_config(&config)?;
             Self::save_config(&store, &config)?;
-            // A settings file can drop a secret variable or its connector. Its value goes too.
-            self.prune_env_secrets(&store, &config)?;
+            self.stamp_inbound(&store, &before, &config)?;
+            // A settings file can drop a secret variable, its connector or a webhook. Its value goes too.
+            self.prune_secrets(&store, &config)?;
             // The next use builds the clients again from the new settings.
             self.runtimes.lock().expect("engine lock").remove(profile);
             self.audit(&store, "config_changed", None, json!({}))
@@ -1245,12 +1419,21 @@ impl EngineApi for Engine {
             Ok(Permissions {
                 tools: config.approved_tools,
                 rules: config.policy.rules,
+                ai_marker: config.ai_marker,
             })
         })
     }
 
     fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.replace_permissions(profile, update) })
+    }
+
+    fn principles<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<String>>> {
+        Box::pin(async move { self.read_principles(profile) })
+    }
+
+    fn set_principles<'a>(&'a self, profile: &'a str, update: PrinciplesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_principles(profile, update) })
     }
 
     fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>> {
@@ -1261,12 +1444,113 @@ impl EngineApi for Engine {
         Box::pin(async move { self.replace_privacy(profile, update) })
     }
 
+    fn polls<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PollConfig>>> {
+        Box::pin(async move { self.read_polls(profile) })
+    }
+
+    fn set_polls<'a>(&'a self, profile: &'a str, update: PollsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.replace_polls(profile, update) })
+    }
+
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>> {
         Box::pin(self.preview_poll(profile, index))
     }
 
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>> {
         Box::pin(self.test_llm_endpoint(profile))
+    }
+
+    fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>> {
+        Box::pin(async move { self.read_llm_usage(profile) })
+    }
+
+    fn resolve_unknown<'a>(
+        &'a self,
+        profile: &'a str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> BoxFuture<'a, ApiResult<Option<Outcome>>> {
+        Box::pin(self.resolve_unknown_item(profile, inbox_id, resolution))
+    }
+
+    fn autonomy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Autonomy>> {
+        Box::pin(async move { self.read_autonomy(profile) })
+    }
+
+    fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.report(profile, inbox_id) })
+    }
+
+    fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.clear_hold(profile, tool) })
+    }
+
+    fn autonomy_thresholds<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Option<AutonomyThresholds>>> {
+        Box::pin(async move { self.read_thresholds(profile) })
+    }
+
+    fn set_autonomy_thresholds<'a>(
+        &'a self,
+        profile: &'a str,
+        update: AutonomyThresholdsUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_thresholds(profile, update) })
+    }
+
+    fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(async move { self.add_cases(profile, cases) })
+    }
+
+    fn replay_cases<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ReplayCaseRecord>>> {
+        Box::pin(async move { self.read_cases(profile) })
+    }
+
+    fn delete_replay_case<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.delete_case(profile, id) })
+    }
+
+    fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>> {
+        Box::pin(async move { self.start_run(profile) })
+    }
+
+    fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>> {
+        Box::pin(async move { self.read_eval_report(profile) })
+    }
+
+    fn extract_principles<'a>(
+        &'a self,
+        profile: &'a str,
+        source: PrincipleSource,
+    ) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(self.extract(profile, source))
+    }
+
+    fn principle_candidates<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(async move { self.read_candidates(profile) })
+    }
+
+    fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.adopt(profile, adoption) })
+    }
+
+    fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.dismiss(profile, id) })
+    }
+
+    fn lint_notes<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(self.check_notes(profile))
+    }
+
+    fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(async move { self.new_findings(profile) })
+    }
+
+    fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.dismiss_lint_finding(profile, id) })
+    }
+
+    fn preload_notes<'a>(&'a self, profile: &'a str, request: PreloadNotes) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(self.preload(profile, request))
     }
 
     fn connections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Connections>> {
@@ -1295,8 +1579,43 @@ impl EngineApi for Engine {
         Box::pin(async move { self.save_command_connector(profile, name, update) })
     }
 
+    fn set_api_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ApiConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_api_connector(profile, name, update) })
+    }
+
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move { self.delete_connector(profile, name) })
+    }
+
+    fn start_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, ApiResult<OAuthStarted>> {
+        Box::pin(async move { self.start_oauth(profile, connector, redirect_uri).await })
+    }
+
+    fn finish_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        callback_url: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.finish_oauth(profile, connector, &callback_url).await })
+    }
+
+    fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>> {
+        Box::pin(async move { self.read_corrections(profile) })
+    }
+
+    fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.retire(profile, id) })
     }
 
     fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
@@ -1305,6 +1624,10 @@ impl EngineApi for Engine {
 
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>> {
         Box::pin(async move { self.read_wiki_page(profile, slug) })
+    }
+
+    fn wiki_search<'a>(&'a self, profile: &'a str, query: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
+        Box::pin(async move { self.search_owner_notes(profile, query) })
     }
 
     fn set_wiki_page<'a>(
@@ -1322,5 +1645,70 @@ impl EngineApi for Engine {
 
     fn wiki_history<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<Vec<Option<WikiPage>>>> {
         Box::pin(async move { self.store(profile)?.wiki_history(slug).map_err(store_error) })
+    }
+
+    fn caller_tokens<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CallerToken>>> {
+        Box::pin(async move { self.read_caller_tokens(profile) })
+    }
+
+    fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>> {
+        Box::pin(async move { self.new_caller_token(profile, label) })
+    }
+
+    fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.revoke_caller(profile, id) })
+    }
+
+    fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>> {
+        Box::pin(async move { self.read_inbound_status(profile) })
+    }
+
+    fn set_webhook_secret<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        secret: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_webhook_secret(profile, name, &secret) })
+    }
+
+    fn inbound_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundConfig>> {
+        Box::pin(async move { self.read_inbound_settings(profile) })
+    }
+
+    fn set_inbound_settings<'a>(&'a self, profile: &'a str, update: InboundUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_inbound_settings(profile, update) })
+    }
+
+    fn ard_registries<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ArdRegistry>>> {
+        Box::pin(async move { self.read_ard_registries(profile) })
+    }
+
+    fn set_ard_registries<'a>(&'a self, profile: &'a str, update: ArdRegistriesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_ard_registries(profile, update) })
+    }
+
+    fn webhooks<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<BTreeMap<String, WebhookConfig>>> {
+        Box::pin(async move { self.read_webhooks(profile) })
+    }
+
+    fn set_webhooks<'a>(&'a self, profile: &'a str, update: WebhooksUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_webhooks(profile, update) })
+    }
+
+    fn notes_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<NotesConfig>> {
+        Box::pin(async move { self.read_notes_settings(profile) })
+    }
+
+    fn set_notes_settings<'a>(&'a self, profile: &'a str, update: NotesSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_notes_settings(profile, update) })
+    }
+
+    fn eval_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalConfig>> {
+        Box::pin(async move { self.read_eval_settings(profile) })
+    }
+
+    fn set_eval_settings<'a>(&'a self, profile: &'a str, update: EvalSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { self.save_eval_settings(profile, update) })
     }
 }

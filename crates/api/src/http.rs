@@ -20,28 +20,138 @@
 //! | PUT | `/v1/profiles/{p}/privacy` | `PrivacyUpdate` | |
 //! | GET | `/v1/profiles/{p}/permissions` | | `Permissions` |
 //! | PUT | `/v1/profiles/{p}/permissions` | `PermissionsUpdate` | |
+//! | GET | `/v1/profiles/{p}/principles` | | `[String]` |
+//! | PUT | `/v1/profiles/{p}/principles` | `PrinciplesUpdate` | |
+//! | GET | `/v1/profiles/{p}/polls` | | `[PollConfig]` |
+//! | PUT | `/v1/profiles/{p}/polls` | `PollsUpdate` | |
 //! | POST | `/v1/profiles/{p}/polls/{index}/test` | | `PollPreview` |
 //! | POST | `/v1/profiles/{p}/llm/test` | | `LlmTest` |
+//! | POST | `/v1/profiles/{p}/llm-usage` | | `[LlmUsage]` |
+//! | POST | `/v1/profiles/{p}/resolve-unknown` | `ResolveUnknownBody` | `Outcome or null` |
+//! | POST | `/v1/profiles/{p}/corrections` | | `[CorrectionRecord]` |
+//! | POST | `/v1/profiles/{p}/retire-correction` | `RetireCorrectionBody` | |
+//! | POST | `/v1/profiles/{p}/autonomy` | | `Autonomy` |
+//! | POST | `/v1/profiles/{p}/report-autonomous` | `ReportAutonomousBody` | |
+//! | POST | `/v1/profiles/{p}/clear-autonomy-hold` | `ClearAutonomyHoldBody` | |
+//! | POST | `/v1/profiles/{p}/autonomy-thresholds` | | `AutonomyThresholds or null` |
+//! | POST | `/v1/profiles/{p}/set-autonomy-thresholds` | `AutonomyThresholdsUpdate` | |
+//! | POST | `/v1/profiles/{p}/add-replay-cases` | `AddReplayCasesBody` | `[i64]` |
+//! | POST | `/v1/profiles/{p}/replay-cases` | | `[ReplayCaseRecord]` |
+//! | POST | `/v1/profiles/{p}/delete-replay-case` | `DeleteReplayCaseBody` | |
+//! | POST | `/v1/profiles/{p}/start-eval` | | `i64` |
+//! | POST | `/v1/profiles/{p}/eval-report` | | `EvalReport` |
+//! | POST | `/v1/profiles/{p}/extract-principles` | `ExtractPrinciplesBody` | `[PrincipleCandidate]` |
+//! | POST | `/v1/profiles/{p}/principle-candidates` | | `[PrincipleCandidate]` |
+//! | POST | `/v1/profiles/{p}/adopt-principle` | `AdoptPrinciple` | |
+//! | POST | `/v1/profiles/{p}/dismiss-principle` | `DismissPrincipleBody` | |
+//! | POST | `/v1/profiles/{p}/lint-notes` | | `[LintFinding]` |
+//! | POST | `/v1/profiles/{p}/lint-findings` | | `[LintFinding]` |
+//! | POST | `/v1/profiles/{p}/dismiss-finding` | `DismissFindingBody` | |
+//! | POST | `/v1/profiles/{p}/preload-notes` | `PreloadNotes` | `[i64]` |
 //! | GET | `/v1/profiles/{p}/connections` | | `Connections` |
 //! | PUT | `/v1/profiles/{p}/connections/llm` | `LlmUpdate` | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}` | `ConnectorUpdate` | |
 //! | DELETE | `/v1/profiles/{p}/connections/connectors/{c}` | | |
 //! | PUT | `/v1/profiles/{p}/connections/connectors/{c}/command` | `CommandConnectorUpdate` | |
+//! | PUT | `/v1/profiles/{p}/connections/connectors/{c}/api` | `ApiConnectorUpdate` | |
+//! | POST | `/v1/profiles/{p}/connectors/{c}/oauth/start` | `OAuthStartBody` | `OAuthStarted` |
+//! | POST | `/v1/profiles/{p}/connectors/{c}/oauth/finish` | `OAuthFinishBody` | |
 //! | GET | `/v1/profiles/{p}/wiki` | | `[WikiSummary]` |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}` | | `WikiPage` |
+//! | POST | `/v1/profiles/{p}/wiki-search` | `WikiSearchBody` | `[WikiSummary]` |
 //! | PUT | `/v1/profiles/{p}/wiki/{slug}` | `WikiPageUpdate` | `WikiPage` |
 //! | DELETE | `/v1/profiles/{p}/wiki/{slug}` | | |
 //! | GET | `/v1/profiles/{p}/wiki/{slug}/history` | | `[WikiPage or null]` |
+//! | GET | `/v1/profiles/{p}/callers` | | `[CallerToken]` |
+//! | POST | `/v1/profiles/{p}/callers` | `AddCallerBody` | `NewCallerToken` |
+//! | DELETE | `/v1/profiles/{p}/callers/{id}` | | |
+//! | GET | `/v1/profiles/{p}/inbound` | | `InboundStatus` |
+//! | PUT | `/v1/profiles/{p}/webhooks/{name}/secret` | `WebhookSecretBody` | |
+//! | POST | `/v1/profiles/{p}/inbound-settings` | | `InboundConfig` |
+//! | POST | `/v1/profiles/{p}/set-inbound-settings` | `InboundUpdate` | |
+//! | POST | `/v1/profiles/{p}/ard-registries` | | `[ArdRegistry]` |
+//! | POST | `/v1/profiles/{p}/set-ard-registries` | `ArdRegistriesUpdate` | |
+//! | POST | `/v1/profiles/{p}/webhooks` | | `{name: WebhookConfig}` |
+//! | POST | `/v1/profiles/{p}/set-webhooks` | `WebhooksUpdate` | |
+//! | POST | `/v1/profiles/{p}/notes-settings` | | `NotesConfig` |
+//! | POST | `/v1/profiles/{p}/set-notes-settings` | `NotesSettingsUpdate` | |
+//! | POST | `/v1/profiles/{p}/eval-settings` | | `EvalConfig` |
+//! | POST | `/v1/profiles/{p}/set-eval-settings` | `EvalSettingsUpdate` | |
+//!
+//! The newer calls use `POST /v1/profiles/{p}/<method name in kebab case>`, with the arguments
+//! as a JSON body.
 //!
 //! A failure replies with a non-2xx status and an `ErrorBody`.
 
-use crate::{ApiError, Edit};
+use crate::{ApiError, Edit, ReplayCase, Resolution};
 use serde::{Deserialize, Serialize};
 
 pub const PROFILES: &str = "/v1/profiles";
 
 pub fn profile_path(profile: &str, rest: &str) -> String {
     format!("{PROFILES}/{profile}/{rest}")
+}
+
+/// The ARD catalog of a listener for callers (§5.1 of the ARD specification).
+pub const ARD_CATALOG: &str = "/.well-known/ard.json";
+
+/// The inbound MCP endpoint of a profile on a listener for callers.
+pub fn inbound_mcp_path(profile: &str) -> String {
+    format!("/agents/{profile}/mcp")
+}
+
+/// The server card of the inbound endpoint: the endpoint address and `/server-card`.
+pub fn server_card_path(profile: &str) -> String {
+    format!("{}/server-card", inbound_mcp_path(profile))
+}
+
+/// The inbound A2A endpoint (JSON-RPC binding) of a profile on a listener for callers.
+pub fn inbound_a2a_path(profile: &str) -> String {
+    format!("/agents/{profile}/a2a")
+}
+
+/// The A2A Agent Card of a profile: the A2A endpoint address and `/agent-card.json`.
+pub fn agent_card_path(profile: &str) -> String {
+    format!("{}/agent-card.json", inbound_a2a_path(profile))
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookSecretBody {
+    pub secret: String,
+}
+
+impl std::fmt::Debug for WebhookSecretBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The secret is left out on purpose.
+        f.write_str("WebhookSecretBody([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStartBody {
+    pub redirect_uri: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthFinishBody {
+    pub callback_url: String,
+}
+
+impl std::fmt::Debug for OAuthFinishBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The address holds the authorization code. It is left out on purpose.
+        f.write_str("OAuthFinishBody([REDACTED])")
+    }
+}
+
+/// The webhook of a profile on a listener for callers.
+pub fn hook_path(profile: &str, name: &str) -> String {
+    format!("/hooks/{profile}/{name}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddCallerBody {
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +168,58 @@ pub struct ApproveToolsBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectBody {
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveUnknownBody {
+    pub inbox_id: i64,
+    pub resolution: Resolution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetireCorrectionBody {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportAutonomousBody {
+    pub inbox_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearAutonomyHoldBody {
+    /// `<connector>/<tool>`.
+    pub tool: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddReplayCasesBody {
+    pub cases: Vec<ReplayCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteReplayCaseBody {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtractPrinciplesBody {
+    pub source: bunsin_core::candidates::PrincipleSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DismissPrincipleBody {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DismissFindingBody {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiSearchBody {
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

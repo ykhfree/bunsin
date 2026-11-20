@@ -7,13 +7,15 @@
 use crate::secrets::StoredSecret;
 use crate::{Engine, internal, store_error};
 use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorConnection, ConnectorUpdate, Expected,
-    LlmConnection, LlmUpdate, ProfileConfig, SecretChange, TokenChange, TokenSource,
+    ApiConnectorUpdate, ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorConnection, ConnectorUpdate,
+    Expected, LlmConnection, LlmUpdate, ProfileConfig, SecretChange, TokenChange, TokenSource,
 };
 use bunsin_core::settings::{
-    ConnectorSection, ENV_SECRET_PREFIX, LLM_SECRET_KEY, LlmSection, McpConfig, check_token_header,
-    connector_secret_key, env_secret_key, env_secret_origin, origin_of, valid_connector_name,
+    ConnectorKind, ConnectorSection, ENV_SECRET_PREFIX, LLM_SECRET_KEY, LlmSection, McpConfig, OAUTH_SECRET_PREFIX,
+    check_token_header, connector_secret_key, env_secret_key, env_secret_origin, oauth_secret_key, origin_of,
+    valid_connector_name,
 };
+use bunsin_core::webhook::{HOOK_SECRET_PREFIX, hook_secret_key};
 use bunsin_store::ProfileStore;
 use serde_json::{Value, json};
 
@@ -27,7 +29,7 @@ fn llm_section(config: &ProfileConfig) -> ApiResult<Option<LlmSection>> {
         .map_err(|e| ApiError::Invalid(format!("the stored `llm` settings are invalid: {e}")))
 }
 
-fn connector_section(name: &str, value: &Value) -> ApiResult<ConnectorSection> {
+pub(crate) fn connector_section(name: &str, value: &Value) -> ApiResult<ConnectorSection> {
     serde_json::from_value(value.clone())
         .map_err(|e| ApiError::Invalid(format!("the stored settings of connector `{name}` are invalid: {e}")))
 }
@@ -61,6 +63,7 @@ impl Engine {
         for (name, value) in &config.connectors {
             let section = connector_section(name, value)?;
             let token = self.token_source(profile, &store, section.token_secret.as_deref())?;
+            let oauth = self.oauth_connection(profile, &store, name, &section)?;
             let mut secret_env_missing = Vec::new();
             for variable in &section.secret_env {
                 if store
@@ -74,9 +77,10 @@ impl Engine {
             connectors.insert(
                 name.clone(),
                 ConnectorConnection {
-                    mcp: section.mcp,
+                    kind: section.kind,
                     token,
                     token_header: section.token_header,
+                    oauth,
                     secret_env: section.secret_env.into_iter().collect(),
                     secret_env_missing,
                 },
@@ -184,47 +188,6 @@ impl Engine {
     }
 
     pub(crate) fn save_connector(&self, profile: &str, name: &str, update: ConnectorUpdate) -> ApiResult<()> {
-        if !valid_connector_name(name) {
-            return Err(ApiError::Invalid(format!(
-                "the connector name `{name}` is invalid: use 1 to 32 of a-z, 0-9 and `-`"
-            )));
-        }
-        let store = self.store(profile)?;
-        if let Expected::Value(expected) = &update.expected
-            && *expected != self.read_connections(profile)?.connectors.get(name).cloned()
-        {
-            return Err(ApiError::Conflict(format!(
-                "connector `{name}` is not the one this form loaded"
-            )));
-        }
-        let (loaded, mut config) = Self::config_with_text(&store)?;
-        let url = update.url.trim().to_owned();
-        // An earlier entry may name its secret itself (set with `config-set`). A kept token keeps that name.
-        let earlier = match config.connectors.get(name) {
-            // A name keeps its kind. The owner removes the connector to make another kind of it,
-            // so a save of an address never turns a command into something else by accident.
-            Some(value) => match connector_section(name, value)? {
-                ConnectorSection {
-                    mcp: McpConfig::Stdio { .. },
-                    ..
-                } => {
-                    return Err(ApiError::Invalid(format!(
-                        "connector `{name}` runs a command on the server. Remove it first to give the name an address"
-                    )));
-                }
-                section => section.token_secret,
-            },
-            None => None,
-        };
-        let key = match (&update.token, &earlier) {
-            (TokenChange::Keep, Some(earlier)) => earlier.clone(),
-            _ => connector_secret_key(name),
-        };
-        let will_have_token = match update.token {
-            TokenChange::Keep => earlier.is_some(),
-            TokenChange::Set(_) => true,
-            TokenChange::Clear => false,
-        };
         let token_header = update
             .token_header
             .as_deref()
@@ -234,37 +197,139 @@ impl Engine {
         if let Some(name) = &token_header {
             check_token_header(name).map_err(ApiError::Invalid)?;
         }
+        let kind = ConnectorKind::Mcp(McpConfig::Http {
+            url: update.url.trim().to_owned(),
+        });
+        self.save_token_connector(profile, name, kind, token_header, &update.token, &update.expected)
+    }
+
+    pub(crate) fn save_api_connector(&self, profile: &str, name: &str, update: ApiConnectorUpdate) -> ApiResult<()> {
+        let mut api = update.api;
+        api.base_url = api.base_url.trim().to_owned();
+        api.email = api
+            .email
+            .map(|email| email.trim().to_owned())
+            .filter(|email| !email.is_empty());
+        self.save_token_connector(
+            profile,
+            name,
+            ConnectorKind::Api(api),
+            None,
+            &update.token,
+            &update.expected,
+        )
+    }
+
+    /// Saves a connector with an address and its token in one step. The token is bound to the
+    /// origin of the address.
+    fn save_token_connector(
+        &self,
+        profile: &str,
+        name: &str,
+        kind: ConnectorKind,
+        token_header: Option<String>,
+        token: &TokenChange,
+        expected: &Expected<Option<ConnectorConnection>>,
+    ) -> ApiResult<()> {
+        let store = self.checked_connector_store(profile, name, expected)?;
+        let (loaded, mut config) = Self::config_with_text(&store)?;
+        let earlier = Self::same_kind(name, &config, &kind)?;
+        // The OAuth settings come from the settings file. A save from the form or `connector-set` keeps them.
+        let oauth = earlier.as_ref().and_then(|section| section.oauth.clone());
+        // An earlier entry may name its secret itself (set with `config-set`). A kept token keeps that name.
+        let earlier = earlier.and_then(|section| section.token_secret);
+        let key = match (token, &earlier) {
+            (TokenChange::Keep, Some(earlier)) => earlier.clone(),
+            _ => connector_secret_key(name),
+        };
+        let will_have_token = match token {
+            TokenChange::Keep => earlier.is_some(),
+            TokenChange::Set(_) => true,
+            TokenChange::Clear => false,
+        };
+        let address = kind
+            .address()
+            .expect("a connector with a token has an address")
+            .to_owned();
         let section = ConnectorSection {
-            mcp: McpConfig::Http { url: url.clone() },
+            kind,
             token_secret: will_have_token.then(|| key.clone()),
             token_header,
             secret_env: Default::default(),
+            oauth,
         };
         config
             .connectors
             .insert(name.to_owned(), serde_json::to_value(&section).map_err(internal)?);
         self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
         Self::check_config(&config)?;
-        self.change_token(profile, &store, &key, &url, &update.token, earlier.is_some())?;
+        self.change_token(profile, &store, &key, &address, token, earlier.is_some())?;
         self.commit_connections(profile, &store, &loaded, &config)?;
-        let detail = json!({"target": name, "token": Self::token_note(&update.token)});
+        let detail = json!({"target": name, "token": Self::token_note(token)});
         self.audit(&store, "connection_changed", None, detail)
     }
 
-    /// Deletes every stored value of a secret environment variable that `config` no longer names.
-    /// Every path that stores settings calls this, so a removed variable or connector leaves
-    /// no value behind, whichever way it was removed.
-    pub(crate) fn prune_env_secrets(&self, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
+    /// Checks the connector name and the conflict check of a connector save, and opens the store.
+    fn checked_connector_store(
+        &self,
+        profile: &str,
+        name: &str,
+        expected: &Expected<Option<ConnectorConnection>>,
+    ) -> ApiResult<std::sync::Arc<ProfileStore>> {
+        if !valid_connector_name(name) {
+            return Err(ApiError::Invalid(format!(
+                "the connector name `{name}` is invalid: use 1 to 32 of a-z, 0-9 and `-`"
+            )));
+        }
+        let store = self.store(profile)?;
+        if let Expected::Value(expected) = expected
+            && *expected != self.read_connections(profile)?.connectors.get(name).cloned()
+        {
+            return Err(ApiError::Conflict(format!(
+                "connector `{name}` is not the one this form loaded"
+            )));
+        }
+        Ok(store)
+    }
+
+    /// The stored connector `name`, if there is one. A name keeps its kind: the owner removes the
+    /// connector to make another kind of it, so a save never turns one kind into another by accident.
+    fn same_kind(name: &str, config: &ProfileConfig, kind: &ConnectorKind) -> ApiResult<Option<ConnectorSection>> {
+        let Some(value) = config.connectors.get(name) else {
+            return Ok(None);
+        };
+        let earlier = connector_section(name, value)?;
+        if earlier.kind.describe() != kind.describe() {
+            return Err(ApiError::Invalid(format!(
+                "connector `{name}` {}. Remove it first to give the name another kind",
+                earlier.kind.describe()
+            )));
+        }
+        Ok(Some(earlier))
+    }
+
+    /// Deletes every stored value of a secret environment variable, every webhook secret and every
+    /// set of OAuth credentials that `config` no longer names. Every path that stores settings calls
+    /// this, so a removed variable, connector, webhook or OAuth setting leaves no value behind,
+    /// whichever way it was removed.
+    pub(crate) fn prune_secrets(&self, store: &ProfileStore, config: &ProfileConfig) -> ApiResult<()> {
         let mut named = std::collections::BTreeSet::new();
         for (name, value) in &config.connectors {
             // Settings that cannot be read name no variable. Validation refused them before.
             if let Ok(section) = connector_section(name, value) {
                 named.extend(section.secret_env.iter().map(|variable| env_secret_key(name, variable)));
+                if section.oauth.is_some() {
+                    named.insert(oauth_secret_key(name));
+                }
             }
         }
+        named.extend(config.webhooks.keys().map(|name| hook_secret_key(name)));
         let mut removed = 0;
         for key in store.secret_keys().map_err(store_error)? {
-            if key.starts_with(ENV_SECRET_PREFIX) && !named.contains(&key) {
+            let pruned = [ENV_SECRET_PREFIX, HOOK_SECRET_PREFIX, OAUTH_SECRET_PREFIX]
+                .iter()
+                .any(|prefix| key.starts_with(prefix));
+            if pruned && !named.contains(&key) {
                 store.delete_secret(&key).map_err(store_error)?;
                 removed += 1;
             }
@@ -284,31 +349,14 @@ impl Engine {
         name: &str,
         update: CommandConnectorUpdate,
     ) -> ApiResult<()> {
-        if !valid_connector_name(name) {
-            return Err(ApiError::Invalid(format!(
-                "the connector name `{name}` is invalid: use 1 to 32 of a-z, 0-9 and `-`"
-            )));
-        }
-        let store = self.store(profile)?;
-        if let Expected::Value(expected) = &update.expected
-            && *expected != self.read_connections(profile)?.connectors.get(name).cloned()
-        {
-            return Err(ApiError::Conflict(format!(
-                "connector `{name}` is not the one this form loaded"
-            )));
-        }
+        let store = self.checked_connector_store(profile, name, &update.expected)?;
         let (loaded, mut config) = Self::config_with_text(&store)?;
-        // A name keeps its kind, as in `save_connector`.
-        let earlier = config
-            .connectors
-            .get(name)
-            .map(|value| connector_section(name, value))
-            .transpose()?;
-        if matches!(&earlier, Some(section) if matches!(section.mcp, McpConfig::Http { .. })) {
-            return Err(ApiError::Invalid(format!(
-                "connector `{name}` has an address. Remove it first to give the name a command"
-            )));
-        }
+        let kind = ConnectorKind::Mcp(McpConfig::Stdio {
+            command: update.command,
+            args: update.args,
+            env: update.env,
+        });
+        let earlier = Self::same_kind(name, &config, &kind)?;
         // Every value is checked before anything is stored, so a refused save changes nothing.
         let stored = earlier.map(|section| section.secret_env).unwrap_or_default();
         for (variable, change) in &update.secret_env {
@@ -334,14 +382,11 @@ impl Engine {
             }
         }
         let section = ConnectorSection {
-            mcp: McpConfig::Stdio {
-                command: update.command,
-                args: update.args,
-                env: update.env,
-            },
+            kind,
             token_secret: None,
             token_header: None,
             secret_env: update.secret_env.keys().cloned().collect(),
+            oauth: None,
         };
         config
             .connectors
@@ -361,7 +406,7 @@ impl Engine {
         }
         self.commit_connections(profile, &store, &loaded, &config)?;
         // The values of removed variables go only after the settings are stored.
-        self.prune_env_secrets(&store, &config)?;
+        self.prune_secrets(&store, &config)?;
         // The arguments and the variables can hold secrets. The log names only the connector.
         self.audit(
             &store,
@@ -380,7 +425,7 @@ impl Engine {
         // The token goes with the connector. The server stores a connector's token only under this key.
         store.delete_secret(&connector_secret_key(name)).map_err(store_error)?;
         self.commit_connections(profile, &store, &loaded, &config)?;
-        self.prune_env_secrets(&store, &config)?;
+        self.prune_secrets(&store, &config)?;
         self.audit(&store, "connection_removed", None, json!({"target": name}))
     }
 }

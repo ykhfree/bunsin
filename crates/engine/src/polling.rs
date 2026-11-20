@@ -6,6 +6,7 @@ use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{Decision, ToolClass};
 use bunsin_core::poll::{PollConfig, extract};
 use bunsin_core::privacy::RedactionCounts;
+use bunsin_core::webhook::own_post;
 use bunsin_store::ProfileStore;
 use serde_json::json;
 
@@ -75,7 +76,7 @@ impl Engine {
             .events
             .into_iter()
             // The agent's own posts and the owner's own messages are not events for the agent.
-            .filter(|event| !poll.skip_authors.contains(&event.author) && !event.text.contains(&ctx.config.ai_marker))
+            .filter(|event| !own_post(event, &poll.skip_authors, &ctx.config.ai_marker))
             .collect();
         Ok((extracted.items, events))
     }

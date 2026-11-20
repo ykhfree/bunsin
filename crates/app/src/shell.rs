@@ -1,12 +1,24 @@
-//! The main window: profiles, kill switch, approval inbox, audit log, notes, privacy settings and connections.
+//! The main window: profiles, kill switch, approval inbox, audit log, notes, permissions, principles,
+//! polls, learning, privacy settings, connections, caller tokens, the inbound endpoint with its ARD
+//! listing, webhooks, ARD registries, the settings of the notes and the evaluation, and the setup of an agent.
 
 use crate::bridge::{UiCommand, UiState};
+use crate::callers_form::CallersForm;
+use crate::checks_form::ChecksForm;
 use crate::connections_form::ConnectionsForm;
+use crate::draft_editor::DraftEditor;
+use crate::learning_form::LearningForm;
 use crate::notes_form::NotesForm;
 use crate::permissions_form::PermissionsForm;
+use crate::polls_form::PollsForm;
+use crate::principles_form::PrinciplesForm;
 use crate::privacy::PrivacyForm;
-use crate::theme::{card, code_block, icon, palette, quiet, state_mark, utc_minute};
+use crate::publishing_form::PublishingForm;
+use crate::setup_form::SetupForm;
+use crate::theme::{card, code_block, icon, notice, palette, quiet, state_mark, utc_minute};
+use bunsin_api::{Autonomy, Resolution};
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::coding::is_coding_tool;
 use bunsin_core::records::{InboxBody, InboxItem};
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::ActiveTheme;
@@ -23,13 +35,24 @@ pub struct Shell {
     pub state: UiState,
     commands: mpsc::UnboundedSender<UiCommand>,
     pub(crate) privacy: PrivacyForm,
+    pub(crate) callers: CallersForm,
     pub(crate) connections: ConnectionsForm,
     pub(crate) notes: NotesForm,
     pub(crate) permissions: PermissionsForm,
+    pub(crate) principles: PrinciplesForm,
+    pub(crate) polls: PollsForm,
+    pub(crate) learning: LearningForm,
+    pub(crate) setup: SetupForm,
+    pub(crate) publishing: PublishingForm,
+    pub(crate) checks: ChecksForm,
+    /// The edit of a waiting call in the inbox, if one is open.
+    pub draft_editor: DraftEditor,
     /// Reads an existing Keychain item for the connections form. Inert unless the app sets one.
     pub(crate) keychain: std::sync::Arc<dyn crate::connection::KeychainLookup>,
     /// The views never share the window, so no form can squeeze the inbox.
     pub view: View,
+    /// The `unknown` item whose Run again button was clicked once. A second click on it runs the call.
+    retry_armed: Option<i64>,
 }
 
 /// What the main part of the window shows.
@@ -41,8 +64,17 @@ pub enum View {
     Notes,
     /// What the agent may do with each approved tool.
     Permissions,
-    /// The connections and the privacy filter.
+    /// How the agent works: the owner's principles, the searches that find events, the caller
+    /// tokens and the settings of its inbound endpoint, its webhooks and its ARD registries.
+    Agent,
+    /// What the agent learns and how the owner checks it: corrections, principle candidates,
+    /// evaluation and the thresholds of the autonomy suggestions.
+    Learning,
+    /// The connections, the privacy filter, and the settings of the notes and the evaluation.
     Settings,
+    /// The setup of an agent, step by step. It opens by itself for a profile that nobody has set up,
+    /// and from the Agent view.
+    Setup,
 }
 
 impl Shell {
@@ -60,6 +92,19 @@ impl Shell {
                     shell.connections.receive(&state, window, cx);
                     shell.notes.receive(&state, window, cx);
                     shell.permissions.receive(&state);
+                    shell.principles.receive(&state, window, cx);
+                    shell.polls.receive(&state, window, cx);
+                    shell.learning.receive(&state, window, cx);
+                    shell.publishing.receive(&state, window, cx);
+                    shell.checks.receive(&state, window, cx);
+                    if shell.setup.receive(&state, window, cx) {
+                        shell.view = View::Setup;
+                    }
+                    // The setup shows the selected profile, also after a change of profile.
+                    if shell.view == View::Setup {
+                        shell.setup.open(&state);
+                    }
+                    shell.draft_editor.receive(&state);
                     shell.state = state;
                     cx.notify();
                 });
@@ -74,11 +119,20 @@ impl Shell {
             state: UiState::default(),
             commands,
             privacy: PrivacyForm::new(window, cx),
+            callers: CallersForm::new(window, cx),
             connections: ConnectionsForm::new(window, cx),
             notes: NotesForm::new(window, cx),
             permissions: PermissionsForm::new(),
+            principles: PrinciplesForm::new(window, cx),
+            polls: PollsForm::new(window, cx),
+            learning: LearningForm::new(window, cx),
+            setup: SetupForm::new(window, cx),
+            publishing: PublishingForm::new(window, cx),
+            checks: ChecksForm::new(window, cx),
+            draft_editor: DraftEditor::default(),
             keychain: std::sync::Arc::new(crate::connection::NoKeychain),
             view: View::Inbox,
+            retry_armed: None,
         }
     }
 
@@ -109,8 +163,33 @@ pub fn inbox_title(item: &InboxItem) -> String {
     format!("{} · {what}", item.state.as_str())
 }
 
+/// True if the owner can report a problem with the item: a tool call that ran without asking and
+/// whose tool is not held. A report of a held tool would change nothing.
+pub fn reportable(item: &InboxItem, autonomy: Option<&Autonomy>) -> bool {
+    let InboxBody::ToolCall { tool, .. } = &item.body else {
+        return false;
+    };
+    let held = autonomy.is_some_and(|autonomy| autonomy.tools.iter().any(|entry| entry.tool == *tool && entry.held));
+    item.autonomous && matches!(item.state, ApprovalState::Executed | ApprovalState::Failed) && !held
+}
+
 /// What the user must read before deciding. A tool call shows every argument,
 /// so the user approves exactly what will run, not only its message text.
+/// What the owner must know about a coding call: what an approval starts, or that its job runs.
+pub fn coding_note(item: &InboxItem) -> Option<&'static str> {
+    match &item.body {
+        InboxBody::ToolCall { tool, .. } if is_coding_tool(tool) => match item.state {
+            ApprovalState::Pending => Some(
+                "Approving starts a coding job on the server. It works on a new branch of the repository. \
+                 You review the branch and merge it yourself; Bunsin never merges.",
+            ),
+            ApprovalState::Executing => Some("The coding job runs on the server. Its result comes as a new item."),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn inbox_detail(item: &InboxItem) -> String {
     match &item.body {
         InboxBody::ToolCall { args, .. } => {
@@ -236,6 +315,7 @@ fn state_view(state: ApprovalState, cx: &App) -> (&'static str, Hsla) {
         ApprovalState::Executed => ("Done", palette.done),
         ApprovalState::Rejected => ("Dismissed", quiet),
         ApprovalState::Failed => ("Failed", palette.stopped),
+        ApprovalState::Unknown => ("Outcome unknown", palette.stopped),
     }
 }
 
@@ -411,19 +491,51 @@ impl Shell {
                                 .children(lines),
                         ),
                 )
+            }))
+            .children(coding_note(item).map(|note| {
+                let text = div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(labelled(format!("coding-note-{id}"), note));
+                notice(palette(cx).waiting, cx).child(text)
             }));
+        // While the owner edits the text, the editor has its own buttons.
+        if let Some(editor) = self.draft_editor_section(id, cx) {
+            return row.child(editor);
+        }
         let mut buttons = div().flex().gap_2().pt_1();
         if item.state == ApprovalState::Pending {
-            buttons = buttons.child(
-                Button::new(SharedString::from(format!("approve-{id}")))
-                    .primary()
-                    // A note is stored. Nothing runs on another system.
-                    .label(match item.body {
-                        InboxBody::WikiChange { .. } => "Approve and keep",
-                        _ => "Approve and run",
-                    })
-                    .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
-            );
+            buttons = buttons
+                .child(
+                    Button::new(SharedString::from(format!("approve-{id}")))
+                        .primary()
+                        // A note is stored. Nothing runs on another system.
+                        .label(match &item.body {
+                            InboxBody::WikiChange { .. } => "Approve and keep",
+                            InboxBody::ToolCall { tool, .. } if is_coding_tool(tool) => "Approve and start the job",
+                            _ => "Approve and run",
+                        })
+                        .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::Approve(id)))),
+                )
+                .children(self.edit_button(item, cx));
+        }
+        if item.state == ApprovalState::Unknown {
+            return row
+                .child(labelled(
+                    format!("unknown-note-{id}"),
+                    "The server stopped while this call ran. It may have reached its tool. \
+                     Check the target system, then choose.",
+                ))
+                .child(
+                    buttons
+                        .child(self.resolve_button(id, Resolution::Done, "It ran: mark done", cx))
+                        .child(self.resolve_button(id, Resolution::Drop, "It did not run: drop", cx))
+                        .child(self.resolve_button(id, Resolution::Retry, "Run again", cx)),
+                )
+                .child(labelled(
+                    format!("retry-warning-{id}"),
+                    "Run again sends the call as a new item. If the first call reached its tool, it is sent twice.",
+                ));
         }
         if matches!(item.state, ApprovalState::Pending | ApprovalState::Draft) {
             buttons = buttons.child(
@@ -434,7 +546,62 @@ impl Shell {
             );
             row = row.child(buttons);
         }
+        if reportable(item, self.state.autonomy.as_ref()) {
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .child(
+                        Button::new(SharedString::from(format!("report-{id}")))
+                            .outline()
+                            .label("Report a problem")
+                            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::ReportAutonomous(id)))),
+                    )
+                    .child(quiet(
+                        "This call ran without asking. A report holds its tool: each later call asks you.",
+                        cx,
+                    )),
+            );
+        }
         row
+    }
+
+    /// A button that resolves an item whose call a stop cut.
+    fn resolve_button(&self, id: i64, resolution: Resolution, text: &'static str, cx: &Context<Self>) -> Button {
+        let name = match resolution {
+            Resolution::Done => "done",
+            Resolution::Drop => "drop",
+            Resolution::Retry => "retry",
+        };
+        let button = Button::new(SharedString::from(format!("{name}-{id}")));
+        // Only a retry can send something, maybe a second time. It looks like a risk and needs a second click.
+        if resolution == Resolution::Retry {
+            let armed = self.retry_armed == Some(id);
+            return button
+                .danger()
+                .label(if armed { "Yes, run it again" } else { text })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.retry(id);
+                    cx.notify();
+                }));
+        }
+        button
+            .outline()
+            .label(text)
+            .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::ResolveUnknown(id, resolution))))
+    }
+
+    /// The first click on Run again of an item asks. The second click on the same item runs the call.
+    fn retry(&mut self, id: i64) {
+        if self.retry_armed != Some(id) {
+            self.retry_armed = Some(id);
+            return;
+        }
+        self.retry_armed = None;
+        self.send(UiCommand::ResolveUnknown(id, Resolution::Retry));
     }
 
     /// The left column: the views, the profiles and the state of the connection.
@@ -458,6 +625,8 @@ impl Shell {
             ("tab-inbox", "Inbox", "inbox", View::Inbox, waiting),
             ("tab-notes", "Notes", "book-open", View::Notes, 0),
             ("tab-permissions", "Permissions", "circle-check", View::Permissions, 0),
+            ("tab-agent", "Agent", "bot", View::Agent, 0),
+            ("tab-learning", "Learning", "chart-pie", View::Learning, 0),
             ("tab-settings", "Settings", "settings", View::Settings, 0),
         ]
         .map(|(id, text, picture, view, count)| {
@@ -601,17 +770,32 @@ impl Shell {
             View::Inbox => "Inbox",
             View::Notes => "Notes",
             View::Permissions => "Permissions",
+            View::Agent => "Agent",
+            View::Learning => "Learning",
             View::Settings => "Settings",
+            View::Setup => "Setup",
         };
         let switch = Button::new("kill-switch")
             .label(if stopped { "Resume changes" } else { "Stop all changes" })
             .icon(icon(if stopped { "play" } else { "pause" }))
             .on_click(cx.listener(move |this, _, _, _| this.send(UiCommand::SetKillSwitch(!stopped))));
+        // The Agent view opens the setup again. The button sits in this line, so it moves no card.
+        let setup = (self.view == View::Agent).then(|| {
+            Button::new("open-setup")
+                .outline()
+                .icon(icon("settings-2"))
+                .label("Set up the agent")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_setup();
+                    cx.notify();
+                }))
+        });
         div()
             .flex()
             .items_center()
             .gap_4()
             .child(div().flex_1().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
+            .children(setup)
             .child(labelled_as("status", status, state_mark(status, color)))
             .child(if stopped { switch.primary() } else { switch.outline() })
     }
@@ -621,6 +805,9 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The forms are built first. They need `cx` for writing.
         let notes = (self.view == View::Notes).then(|| self.notes_section(cx).into_any_element());
+        let callers = (self.view == View::Agent).then(|| self.callers_section(cx).into_any_element());
+        let publishing = (self.view == View::Agent).then(|| self.publishing_cards(cx));
+        let checks = (self.view == View::Settings).then(|| self.checks_cards(cx));
         let forms = (self.view == View::Settings).then(|| {
             (
                 self.connections_section(cx).into_any_element(),
@@ -635,8 +822,28 @@ impl Render for Shell {
         let audit = snapshot.map(|s| s.audit.as_slice()).unwrap_or_default();
         let error = self.state.error.clone().unwrap_or_default();
 
-        let page = if self.view == View::Permissions {
+        let page = if self.view == View::Setup {
+            self.setup_section(cx)
+        } else if self.view == View::Permissions {
             self.permissions_section(cx)
+        } else if self.view == View::Learning {
+            self.learning_section(cx)
+        } else if self.view == View::Agent {
+            div()
+                .id("agent")
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .gap_5()
+                .overflow_y_scroll()
+                .child(self.principles_section(cx))
+                .child(self.polls_section(cx))
+                .children(callers)
+                .children(publishing.into_iter().flatten())
+                .into_any_element()
         } else if let Some(notes) = notes {
             notes
         } else if let Some((connections, privacy)) = forms {
@@ -652,6 +859,7 @@ impl Render for Shell {
                 .overflow_y_scroll()
                 .child(connections)
                 .child(privacy)
+                .children(checks.into_iter().flatten())
                 .into_any_element()
         } else {
             let activity = audit.iter().take(AUDIT_ROWS).map(|entry| {
@@ -809,7 +1017,55 @@ mod tests {
             state: ApprovalState::Pending,
             created_at: 0,
             updated_at: 0,
+            autonomous: false,
+            retry_of: None,
         }
+    }
+
+    #[test]
+    fn only_a_finished_autonomous_call_of_a_tool_that_is_not_held_can_be_reported() {
+        let post = || InboxBody::ToolCall {
+            tool: "slack/post".into(),
+            args: json!({"text": "hi"}).as_object().unwrap().clone(),
+        };
+        let ran = InboxItem {
+            autonomous: true,
+            state: ApprovalState::Executed,
+            ..item(post())
+        };
+        assert!(reportable(&ran, None));
+        let failed = InboxItem {
+            state: ApprovalState::Failed,
+            ..ran.clone()
+        };
+        assert!(reportable(&failed, None));
+        for state in [
+            ApprovalState::Approved,
+            ApprovalState::Executing,
+            ApprovalState::Unknown,
+        ] {
+            assert!(!reportable(&InboxItem { state, ..ran.clone() }, None), "{state:?}");
+        }
+        let approved_by_owner = InboxItem {
+            autonomous: false,
+            ..ran.clone()
+        };
+        assert!(!reportable(&approved_by_owner, None));
+        let entry = |tool: &str, held| bunsin_api::ToolAutonomy {
+            tool: tool.into(),
+            counts: Default::default(),
+            held,
+            suggested: false,
+        };
+        let autonomy = |tools| Autonomy {
+            thresholds: None,
+            tools,
+        };
+        assert!(!reportable(&ran, Some(&autonomy(vec![entry("slack/post", true)]))));
+        assert!(reportable(
+            &ran,
+            Some(&autonomy(vec![entry("slack/post", false), entry("slack/react", true)]))
+        ));
     }
 
     #[test]
@@ -845,6 +1101,24 @@ mod tests {
             inbox_basis(&with_reads).as_deref(),
             Some("Read: slack/search {\"query\":\"deploy date\"}\nRead: jira/get_issue {\"key\":\"PRJ-1\"}")
         );
+    }
+
+    #[test]
+    fn a_coding_call_says_what_an_approval_starts_and_that_it_never_merges() {
+        let mut job = item(InboxBody::ToolCall {
+            tool: "bunsin.coding/start".into(),
+            args: serde_json::Map::new(),
+        });
+        assert!(coding_note(&job).unwrap().contains("never merges"));
+        job.state = ApprovalState::Executing;
+        assert!(coding_note(&job).unwrap().contains("runs on the server"));
+        job.state = ApprovalState::Executed;
+        assert_eq!(coding_note(&job), None);
+        let post = item(InboxBody::ToolCall {
+            tool: "slack/post".into(),
+            args: serde_json::Map::new(),
+        });
+        assert_eq!(coding_note(&post), None);
     }
 
     #[test]

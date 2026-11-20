@@ -1,0 +1,3 @@
+# The system user of the Bunsin server, for systemd-sysusers.
+# Install it as /usr/lib/sysusers.d/bunsin.conf and run `systemd-sysusers`.
+u bunsin - "Bunsin server" /var/lib/bunsin /usr/sbin/nologin

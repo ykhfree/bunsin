@@ -294,6 +294,7 @@ async fn replay_runs_no_tool() {
     let case = ReplayCase {
         event: event("old", "lee", "when do we deploy?"),
         actual_reply: "REAL".into(),
+        expect: bunsin_core::eval::Expect::Reply,
     };
     let result = rig.engine.replay("kim", case).await.unwrap();
     // The proposal is reported as it is. The search is not made.

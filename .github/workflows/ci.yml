@@ -32,3 +32,26 @@ jobs:
       - run: rustup show
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # The Linux server package. It is uploaded as an artifact of the run; nothing is published.
+  package-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      # The ubuntu runner image has shellcheck.
+      - run: shellcheck packaging/linux/build-tarball.sh packaging/macos/build-app.sh
+      - name: Build the tarball
+        run: packaging/linux/build-tarball.sh
+      - name: Check the systemd unit
+        # Informational: no test here has started the unit under systemd. The copy points at the built binary.
+        continue-on-error: true
+        run: |
+          sed "s#/usr/local/bin/bunsind#$PWD/target/release/bunsind#" packaging/linux/bunsind.service \
+            > "$RUNNER_TEMP/bunsind.service"
+          systemd-analyze verify "$RUNNER_TEMP/bunsind.service"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bunsin-server-linux
+          path: target/package/bunsin-server-*.tar.gz*
+          if-no-files-found: error

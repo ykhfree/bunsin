@@ -1,21 +1,39 @@
 //! `EngineApi` over HTTPS: how the app and the command line reach a Bunsin server.
 
-use bunsin_api::http::{ApproveBody, ApproveToolsBody, ErrorBody, KillSwitchBody, PROFILES, RejectBody, profile_path};
-use bunsin_api::{
-    ApiError, ApiResult, CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, LlmTest, LlmUpdate,
-    Outcome, Permissions, PermissionsUpdate, PollPreview, PrivacyUpdate, ProfileConfig, ProfileSnapshot, ReplayCase,
-    ReplayResult, ToolsReport, WikiPageUpdate,
+use bunsin_api::http::{
+    AddCallerBody, AddReplayCasesBody, ApproveBody, ApproveToolsBody, ClearAutonomyHoldBody, DeleteReplayCaseBody,
+    DismissFindingBody, DismissPrincipleBody, ErrorBody, ExtractPrinciplesBody, KillSwitchBody, OAuthFinishBody,
+    OAuthStartBody, PROFILES, RejectBody, ReportAutonomousBody, ResolveUnknownBody, RetireCorrectionBody,
+    WebhookSecretBody, WikiSearchBody, profile_path,
 };
+use bunsin_api::{
+    AdoptPrinciple, ApiConnectorUpdate, ApiError, ApiResult, ArdRegistriesUpdate, Autonomy, AutonomyThresholdsUpdate,
+    CommandConnectorUpdate, Connections, ConnectorUpdate, Edit, EngineApi, EvalReport, EvalSettingsUpdate,
+    InboundStatus, InboundUpdate, LlmTest, LlmUpdate, NewCallerToken, NotesSettingsUpdate, OAuthStarted, Outcome,
+    Permissions, PermissionsUpdate, PollPreview, PollsUpdate, PreloadNotes, PrinciplesUpdate, PrivacyUpdate,
+    ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WebhooksUpdate, WikiPageUpdate,
+};
+use bunsin_core::ard::ArdRegistry;
+use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::eval::EvalConfig;
+use bunsin_core::eval::ReplayCaseRecord;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundConfig;
+use bunsin_core::lint::LintFinding;
+use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
-use bunsin_core::records::ProfileInfo;
+use bunsin_core::records::{CallerToken, CorrectionRecord, LlmUsage, ProfileInfo};
 use bunsin_core::tool::PinSet;
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::NotesConfig;
 use bunsin_core::wiki::{WikiPage, WikiSummary};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -254,6 +272,20 @@ impl EngineApi for RemoteEngine {
         })
     }
 
+    fn principles<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<String>>> {
+        Box::pin(async move {
+            self.call(Method::GET, &profile_path(profile, "principles"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_principles<'a>(&'a self, profile: &'a str, update: PrinciplesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::PUT, &profile_path(profile, "principles"), Some(&update))
+                .await
+        })
+    }
+
     fn privacy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<PrivacyConfig>> {
         Box::pin(async move { self.call(Method::GET, &profile_path(profile, "privacy"), NO_BODY).await })
     }
@@ -261,6 +293,17 @@ impl EngineApi for RemoteEngine {
     fn set_privacy<'a>(&'a self, profile: &'a str, update: PrivacyUpdate) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             self.send_only(Method::PUT, &profile_path(profile, "privacy"), Some(&update))
+                .await
+        })
+    }
+
+    fn polls<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PollConfig>>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "polls"), NO_BODY).await })
+    }
+
+    fn set_polls<'a>(&'a self, profile: &'a str, update: PollsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::PUT, &profile_path(profile, "polls"), Some(&update))
                 .await
         })
     }
@@ -279,6 +322,295 @@ impl EngineApi for RemoteEngine {
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>> {
         Box::pin(async move {
             self.call(Method::POST, &profile_path(profile, "llm/test"), NO_BODY)
+                .await
+        })
+    }
+
+    fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "llm-usage"), NO_BODY)
+                .await
+        })
+    }
+
+    fn resolve_unknown<'a>(
+        &'a self,
+        profile: &'a str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> BoxFuture<'a, ApiResult<Option<Outcome>>> {
+        Box::pin(async move {
+            let body = ResolveUnknownBody { inbox_id, resolution };
+            self.call(Method::POST, &profile_path(profile, "resolve-unknown"), Some(&body))
+                .await
+        })
+    }
+
+    fn autonomy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Autonomy>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "autonomy"), NO_BODY)
+                .await
+        })
+    }
+
+    fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = ReportAutonomousBody { inbox_id };
+            self.send_only(Method::POST, &profile_path(profile, "report-autonomous"), Some(&body))
+                .await
+        })
+    }
+
+    fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = ClearAutonomyHoldBody { tool: tool.to_owned() };
+            self.send_only(Method::POST, &profile_path(profile, "clear-autonomy-hold"), Some(&body))
+                .await
+        })
+    }
+
+    fn autonomy_thresholds<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Option<AutonomyThresholds>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "autonomy-thresholds"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_autonomy_thresholds<'a>(
+        &'a self,
+        profile: &'a str,
+        update: AutonomyThresholdsUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-autonomy-thresholds"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(async move {
+            let body = AddReplayCasesBody { cases };
+            self.call(Method::POST, &profile_path(profile, "add-replay-cases"), Some(&body))
+                .await
+        })
+    }
+
+    fn replay_cases<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ReplayCaseRecord>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "replay-cases"), NO_BODY)
+                .await
+        })
+    }
+
+    fn delete_replay_case<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = DeleteReplayCaseBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "delete-replay-case"), Some(&body))
+                .await
+        })
+    }
+
+    fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "start-eval"), NO_BODY)
+                .await
+        })
+    }
+
+    fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "eval-report"), NO_BODY)
+                .await
+        })
+    }
+
+    fn extract_principles<'a>(
+        &'a self,
+        profile: &'a str,
+        source: PrincipleSource,
+    ) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(async move {
+            let body = ExtractPrinciplesBody { source };
+            self.call(Method::POST, &profile_path(profile, "extract-principles"), Some(&body))
+                .await
+        })
+    }
+
+    fn principle_candidates<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "principle-candidates"), NO_BODY)
+                .await
+        })
+    }
+
+    fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::POST, &profile_path(profile, "adopt-principle"), Some(&adoption))
+                .await
+        })
+    }
+
+    fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = DismissPrincipleBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "dismiss-principle"), Some(&body))
+                .await
+        })
+    }
+
+    fn preload_notes<'a>(&'a self, profile: &'a str, request: PreloadNotes) -> BoxFuture<'a, ApiResult<Vec<i64>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "preload-notes"), Some(&request))
+                .await
+        })
+    }
+
+    fn caller_tokens<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CallerToken>>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "callers"), NO_BODY).await })
+    }
+
+    fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>> {
+        Box::pin(async move {
+            let body = AddCallerBody {
+                label: label.to_owned(),
+            };
+            self.call(Method::POST, &profile_path(profile, "callers"), Some(&body))
+                .await
+        })
+    }
+
+    fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>> {
+        Box::pin(async move { self.call(Method::GET, &profile_path(profile, "inbound"), NO_BODY).await })
+    }
+
+    fn set_webhook_secret<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        secret: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("webhooks/{name}/secret"));
+            self.send_only(Method::PUT, &path, Some(&WebhookSecretBody { secret }))
+                .await
+        })
+    }
+
+    fn inbound_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundConfig>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "inbound-settings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_inbound_settings<'a>(&'a self, profile: &'a str, update: InboundUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-inbound-settings"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn ard_registries<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ArdRegistry>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "ard-registries"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_ard_registries<'a>(&'a self, profile: &'a str, update: ArdRegistriesUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-ard-registries"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn webhooks<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<BTreeMap<String, WebhookConfig>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "webhooks"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_webhooks<'a>(&'a self, profile: &'a str, update: WebhooksUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::POST, &profile_path(profile, "set-webhooks"), Some(&update))
+                .await
+        })
+    }
+
+    fn notes_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<NotesConfig>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "notes-settings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_notes_settings<'a>(&'a self, profile: &'a str, update: NotesSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::POST,
+                &profile_path(profile, "set-notes-settings"),
+                Some(&update),
+            )
+            .await
+        })
+    }
+
+    fn eval_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalConfig>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "eval-settings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn set_eval_settings<'a>(&'a self, profile: &'a str, update: EvalSettingsUpdate) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(Method::POST, &profile_path(profile, "set-eval-settings"), Some(&update))
+                .await
+        })
+    }
+
+    fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            self.send_only(
+                Method::DELETE,
+                &profile_path(profile, &format!("callers/{id}")),
+                NO_BODY,
+            )
+            .await
+        })
+    }
+
+    fn lint_notes<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "lint-notes"), NO_BODY)
+                .await
+        })
+    }
+
+    fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "lint-findings"), NO_BODY)
+                .await
+        })
+    }
+
+    fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = DismissFindingBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "dismiss-finding"), Some(&body))
                 .await
         })
     }
@@ -321,10 +653,65 @@ impl EngineApi for RemoteEngine {
         })
     }
 
+    fn set_api_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ApiConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connections/connectors/{name}/api"));
+            self.send_only(Method::PUT, &path, Some(&update)).await
+        })
+    }
+
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let path = profile_path(profile, &format!("connections/connectors/{name}"));
             self.send_only(Method::DELETE, &path, NO_BODY).await
+        })
+    }
+
+    fn start_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, ApiResult<OAuthStarted>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connectors/{connector}/oauth/start"));
+            let body = OAuthStartBody {
+                redirect_uri: redirect_uri.to_owned(),
+            };
+            self.call(Method::POST, &path, Some(&body)).await
+        })
+    }
+
+    fn finish_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        callback_url: String,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let path = profile_path(profile, &format!("connectors/{connector}/oauth/finish"));
+            self.send_only(Method::POST, &path, Some(&OAuthFinishBody { callback_url }))
+                .await
+        })
+    }
+
+    fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>> {
+        Box::pin(async move {
+            self.call(Method::POST, &profile_path(profile, "corrections"), NO_BODY)
+                .await
+        })
+    }
+
+    fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let body = RetireCorrectionBody { id };
+            self.send_only(Method::POST, &profile_path(profile, "retire-correction"), Some(&body))
+                .await
         })
     }
 
@@ -335,6 +722,16 @@ impl EngineApi for RemoteEngine {
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>> {
         Box::pin(async move {
             self.call(Method::GET, &profile_path(profile, &format!("wiki/{slug}")), NO_BODY)
+                .await
+        })
+    }
+
+    fn wiki_search<'a>(&'a self, profile: &'a str, query: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>> {
+        Box::pin(async move {
+            let body = WikiSearchBody {
+                query: query.to_owned(),
+            };
+            self.call(Method::POST, &profile_path(profile, "wiki-search"), Some(&body))
                 .await
         })
     }

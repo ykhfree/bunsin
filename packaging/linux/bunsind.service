@@ -1,0 +1,54 @@
+# systemd unit of the Bunsin server. INSTALL.md says where each file goes.
+#
+# The server stops taking requests on SIGTERM and waits up to 300 s for running ones.
+# TimeoutStopSec is longer, so systemd does not cut that wait (its default is 90 s).
+
+[Unit]
+Description=Bunsin server (bunsind serve)
+Documentation=file:/usr/local/share/doc/bunsin/INSTALL.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bunsin
+Group=bunsin
+# The values of the server: paths and serve options. Secret values go only into this file.
+EnvironmentFile=/etc/bunsin/bunsind.env
+# Unquoted $BUNSIND_SERVE_ARGS splits into one argument per word.
+ExecStart=/usr/local/bin/bunsind serve $BUNSIND_SERVE_ARGS
+KillSignal=SIGTERM
+TimeoutStopSec=330
+Restart=on-failure
+RestartSec=5
+
+# /var/lib/bunsin is the home of the user: the data directory, the key file, and the files that
+# programs of stdio connectors and coding CLIs keep in their home.
+StateDirectory=bunsin bunsin/data bunsin/key
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/bunsin
+Environment=HOME=/var/lib/bunsin
+UMask=0077
+
+# Hardening. These options keep --allow-stdio-connectors and --allow-coding working.
+# INSTALL.md lists what to change for them, and the options that are left out on purpose.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

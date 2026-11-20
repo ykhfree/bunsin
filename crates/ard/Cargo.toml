@@ -1,0 +1,21 @@
+[package]
+name = "bunsin-ard"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url = "2"
+# The same reqwest as the other crates. It is named here to build the client without redirects.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The HTML tokenizer for `<link rel="ard">` and JSON-LD blocks. Already in Cargo.lock (the window uses it).
+html5ever = "=0.27.0"
+
+[dev-dependencies]
+jsonschema.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { workspace = true, features = ["net"] }

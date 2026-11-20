@@ -3,7 +3,7 @@
 //! MCP servers return different shapes, so the settings say where the items and their
 //! fields are. Nothing here is specific to one service.
 
-use crate::event::InboundEvent;
+use crate::event::{Channel, InboundEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -131,6 +131,8 @@ pub fn extract(poll: &PollConfig, result: &Value) -> Result<Extracted, String> {
             thread: poll.mapping.thread.as_deref().and_then(field),
             author,
             text,
+            // The owner set up the search, but other people wrote what it found.
+            channel: Channel::Outside,
         });
     }
     Ok(extracted)
@@ -177,6 +179,8 @@ mod tests {
                 thread: Some("1699999999.000001".into()),
                 author: "lee".into(),
                 text: "deploy?".into(),
+                // Other people wrote the messages that a poll finds.
+                channel: Channel::Outside,
             }
         );
         assert_eq!(extracted.events[1].thread, None);

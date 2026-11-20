@@ -6,40 +6,103 @@
 ## 1. 프로세스
 
 ```
-[서버]   bunsind serve ── engine ── llm, connectors, store, core
-              ▲
-              │  HTTPS + 프로필별 접속 token   (bunsin-api::http)
-              ▼
-[내 컴퓨터]  GPUI app, bunsind의 원격 명령   (bunsin-client)
+[서버]   bunsind serve ─┬─ engine ── store, ard, core
+                        └─ RealBackends ── llm, connectors, coding   (엔진은 Backends trait으로 받는다)
+            ▲                                    ▲
+            │ 제어 리스너 --listen                │ 내부·공개 리스너 --internal-listen, --public-listen
+            │ HTTPS + 프로필별 접속 token          │ 인바운드 MCP(호출자 token), server card,
+            │ (bunsin-api::http)                 │ ARD catalog, ARD registry, webhook(서명)
+            ▼                                    ▼
+[내 컴퓨터]  GPUI app, bunsind의 원격 명령        [다른 사람의 agent, ARD client, Slack, Jira Cloud]
+            (bunsin-client)
 ```
 
 - 엔진은 서버의 `bunsind serve` 프로세스 안에서만 돈다. 화면이 없는 서버에서 동작한다.
 - GPUI app은 관리 화면이다. app은 엔진을 품지 않고, `EngineApi`의 원격 구현(`RemoteEngine`)으로 서버에 접속한다.
 - 같은 컴퓨터에서 시험할 때는 `bunsind serve`를 `127.0.0.1`에 띄우고 app이 그 주소로 접속한다.
 - data dir 하나에 엔진 하나만 뜬다. `engine.lock` 파일의 배타 잠금이 이중 폴링과 이중 실행을 막는다.
-- 서버 운영자의 명령(`profile-add`, `token-add`, `token-list`, `token-revoke`)은 저장소 파일을 직접 다룬다.
+- 서버 운영자의 명령(`profile-add`, `token-add`, `token-list`, `token-revoke`, `registry-status`)은 저장소 파일을 직접 다룬다.
   엔진 잠금이 필요 없으므로 서버가 도는 동안에도 실행된다. 두 프로세스가 같은 SQLite 파일을 쓰므로 busy timeout을 둔다.
 - 서버는 SIGTERM이나 Ctrl-C를 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다린 뒤에 종료한다.
-  그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다.
+  그 시간 안에 끝나지 않은 승인 실행은 끊기고, 항목은 `executing` 상태로 남는다. 다음 시작이 그 항목을 `unknown`으로 옮긴다(아래 "재개").
   서비스 관리자의 종료 대기 시간(systemd의 기본값은 90초)이 더 짧으면 그 시간에 끊긴다.
-- 공개 리스너(ARD, 인바운드 MCP)는 아직 없다. 만들 때 제어 API와 분리한다.
+  그래서 `packaging/linux/bunsind.service`는 `TimeoutStopSec=330`을 둔다.
+- **배포 패키지**(PLAN 6절 4단계): 저장소의 스크립트가 만든다. 스크립트는 비밀 값을 읽지도 담지도 않는다.
+  - `packaging/linux/build-tarball.sh`: `cargo build --release -p bunsin-daemon --locked` 뒤에 `bunsind`, unit, sysusers 파일,
+    환경 파일 견본(`bunsind.env.example`, 비밀은 이름만), `INSTALL.md`, LICENSE, README를 tarball과 sha256 파일로 묶는다.
+  - unit: 전용 사용자 `bunsin`, `EnvironmentFile=/etc/bunsin/bunsind.env`, `ExecStart=... serve $BUNSIND_SERVE_ARGS`,
+    `StateDirectory`(home, data, key 폴더, 0700), `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, 빈 capability 집합 등.
+    stdio 커넥터와 코딩 CLI가 깨지지 않게 `MemoryDenyWriteExecute`(Node.js JIT), `RestrictNamespaces`(CLI의 sandbox), `SystemCallFilter`는 두지 않았다.
+    `--allow-coding`은 `ReadWritePaths=<repo root>`가 필요하다(git worktree가 `.git`에 쓴다). `INSTALL.md`가 바꿀 옵션을 적는다.
+  - `packaging/macos/build-app.sh`: `cargo build --release -p bunsin-app --locked` 뒤에 `Bunsin.app`(Info.plist, PkgInfo)을 만든다.
+    Developer ID 서명과 공증은 손으로 한다(`packaging/macos/README.md`). 저장소에 아이콘이 없어 아이콘을 넣지 않았다.
+    bundle ID는 `BUNSIN_BUNDLE_ID`이고, 기본값 `local.bunsin.app`은 로컬 빌드용이다.
+  - CI의 `package-linux` job이 ubuntu에서 shellcheck, tarball 빌드, `systemd-analyze verify`(결과를 막지 않음)를 하고 tarball을 artifact로 올린다. 배포는 하지 않는다.
+  - 확인한 것(macOS): 두 스크립트 실행, bundle 구조와 `plutil -lint`, tarball 목록과 sha256, 견본 환경 값으로 `bunsind serve` 시작과 SIGTERM 종료.
+    이 Mac에는 `systemd-analyze`와 `shellcheck`가 없어 실행하지 않았다. unit을 systemd로 시작해 보지 않았다.
+- **재개**: `server::start`가 아래 순서로 시작한다. `main.rs`와 daemon 테스트가 같은 함수를 부른다.
+  1. `mark_interrupted()`: 모든 프로필의 `executing` 항목을 `unknown`으로 옮기고 감사 `outcome_unknown`을 남긴다.
+     같은 단계에서 `approved` 도구 호출의 ID를 적어 둔다.
+  2. 서버가 요청을 받기 시작한다.
+  3. `resume_approved()`: 1단계에서 적은 항목만 본다. 시작 뒤에 승인된 항목은 그 요청이 실행한다.
+     정책을 다시 묻는다(`decide`: 정지 스위치, pin, 규칙, 보류). 소유자가 승인한 항목은 `Execute`나 `NeedsApproval`일 때,
+     자율 항목은 `Execute`일 때만 실행한다(감사 `resumed`, 실행은 `Approved→Executing` CAS를 지난다).
+     그 밖이면 항목을 `failed`로 옮기고 같은 내용의 `pending` 사본(`retry_of`)을 만든다(감사 `resume_abandoned`).
+     옮기기와 사본 만들기는 한 transaction이다. 사본의 승인은 정책을 다시 본다.
+  4. 폴링을 시작한다.
+  - 프로필 하나의 실패는 stderr에 쓰고, 다른 프로필과 서버의 시작을 막지 않는다.
+  - `unknown`에서 `approved`나 `executing`으로 가는 전이는 없다. 이미 보냈을 수 있으므로 자동 재실행은 기각했다.
+  - **답이 없는 호출.** `execute`가 커넥터에서 `ConnectorError::Unanswered`를 받으면 항목을 `executing`에서 `unknown`으로 옮긴다.
+    감사는 `outcome_unknown`(`inbox_id`, `tool`, `error`)이고, 결과는 `Outcome::ExecutionUnknown`이다. 이벤트는 다시 처리하지 않는다.
+    `Unanswered`는 요청이 서버에 닿았을 수 있다는 뜻이다. MCP 커넥터는 도구 호출 단계의 시간 초과에 쓴다.
+    호출 앞의 도구 목록 단계의 시간 초과는 호출을 보내지 않았으므로 `Transport`이다.
+    REST API 커넥터는 reqwest가 연결 오류(`is_connect`)나 요청 생성 오류(`is_builder`)로 분류하지 않은 전송 오류와, 응답 본문 읽기 오류에 쓴다.
+    쓰기 도구(`WRITE_TOOLS`: `post_message`, `add_comment`, `create_page`)가 HTTP 2xx와 JSON이 아닌 본문을 받을 때도 쓴다.
+    서버가 요청을 받았으므로 쓰기가 끝났을 수 있다. 읽기 도구가 같은 답을 받으면 전처럼 `Transport`("the response is not JSON")이다.
+    문구로 분류하지 않는다. `Failed`(서버의 거절, HTTP 4xx·5xx), `Transport`, `UnknownTool`은 전처럼 `failed`이다.
+    읽기 도구의 오류는 모든 종류가 전처럼 자료로 LLM에 간다. 창은 승인 결과가 `ExecutionUnknown`이면 오류 줄에 "the outcome of the call is unknown"을 보인다.
+  - inbox 열 `autonomous`는 정책이 소유자 없이 승인한 항목이다(처음부터 `approved`로 생긴 항목).
+    이 열이 없던 DB의 `approved` 항목은 자율 항목으로 본다. 그래서 정책이 소유자 없이 허용할 때만 다시 실행되고, 아니면 소유자에게 다시 묻는다.
+  - `execute`는 도구를 부르기 전에 감사 `execution_started`를 남긴다. 실행의 ID는 inbox ID이다.
+  - **`resolve_unknown(id, done|retry|drop)`**(`POST .../resolve-unknown`, `bunsind resolve-unknown`, 창의 버튼): `unknown` 항목만 받는다.
+    done은 `executed`, drop은 `failed`로 옮긴다. retry는 항목을 `failed`로 옮기고 `pending` 사본(`retry_of`)을 한 transaction으로 만든 뒤,
+    그 사본을 `approve_item`으로 실행한다. 그래서 새 inbox ID로 한 번 실행되고, 정책을 다시 본다.
+    정책이 거부하면 사본은 `pending`으로 남고, 오류가 사본의 번호를 알려 준다. 감사는 `unknown_resolved`이다.
+  - 처음 설계는 `updated_at < started_at`으로 시작 전 항목을 골랐다. 시계가 초 단위라서 같은 초의 항목을 놓치므로, 1단계에서 ID를 적어 두는 방식으로 바꿨다.
+- **리스너 셋.** 리스너마다 router가 따로 있다.
+  - 제어(`--listen`): `/v1/...`만 있다. 접속 token을 받는다.
+  - 내부(`--internal-listen`, `--internal-url`)와 공개(`--public-listen`, `--public-url`): `/v1`이 없다(404).
+    인바운드 MCP와 server card, ARD catalog(7절), webhook(11절)이 여기에 있다.
+    운영자가 `--ard-registry`로 켜면 ARD registry(18절)도 리스너 루트에 있다. 켜지 않은 리스너에서는 그 경로가 404이다.
+    registry의 task는 운영자가 seed로 적은 도메인을 서버의 네트워크로 가져온다(`--ard-registry-source`, `--ard-registry-public-source`).
+  - 리스너 L은 `InboundConfig::served_on(L)`인 프로필만 제공한다: endpoint가 켜져 있고, L이 내부이거나 범위가 `public`이다.
+    MCP 경로, card, ARD catalog가 이 함수 하나를 쓴다(불변식: `ard.json`은 L이 endpoint를 제공하는 프로필만 싣는다). daemon의 `served_on(config, Reach)`는 이 함수를 부른다.
+  - `--*-url`은 호출자가 쓰는 주소이다. server card의 URL과 Host 검사가 이 주소에서 나온다.
+    `https://`만 받고, `http://`는 host가 loopback일 때만 받는다. 사용자 이름, query, fragment는 거부한다.
+  - 리스너마다 제어 API의 TLS 규칙(loopback이 아니면 TLS)을 적용한다. 같은 주소를 두 리스너가 쓸 수 없다(포트 0은 예외).
+    이 검사(`check_listeners`)는 데이터 폴더의 잠금과 키 읽기 전에 한다.
+  - 기각: 리스너 하나를 Host로 나누기. 프록시 설정 하나로 경계가 사라진다.
+  - SIGTERM이면 모든 리스너가 함께 새 요청을 멈추고, 실행 중인 요청을 기다린다(`Started::stop`).
 - 기각한 안: GPUI 바이너리 하나에 엔진을 넣는 구조. 창을 닫으면 agent가 멈추고, Linux 서버에 디스플레이가 필요하다.
 
 ## 2. Crate
 
 | Crate | 역할 | 의존 |
 |---|---|---|
-| `bunsin-core` | 정책, 제안 검증, 승인 상태 머신, AI 표시, 도구 pin 비교, `LlmClient`와 `Connector` trait. IO가 없다. | 없음 |
-| `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그 | core |
+| `bunsin-core` | 정책, 제안 검증, 승인 상태 머신, AI 표시, 도구 pin 비교, 설정 형식, `LlmClient`·`Connector`·`Coder` trait. IO가 없다. | 없음 |
+| `bunsin-store` | SQLite 저장소, 산출물 파일, 감사 로그, 봉인된 비밀 값의 행, ARD registry index(`registry.db`) | core |
 | `bunsin-llm` | LLM 어댑터 | core |
-| `bunsin-connectors` | MCP 커넥터, API 커넥터 | core |
-| `bunsin-coding` | 코딩 위임 실행기 | core |
-| `bunsin-engine` | 하네스 파이프라인 | core, store, llm, connectors, coding |
+| `bunsin-connectors` | MCP 커넥터, REST API 커넥터, webhook 서명 검사와 해석 | core |
+| `bunsin-ard` | ARD 항목 검사, catalog, registry 검색 client, registry 요청 해석과 필터(`query.rs`) | 없음 |
+| `bunsin-coding` | 코딩 위임 실행기(git worktree, 코딩 CLI 백엔드) | 없음 |
 | `bunsin-api` | `EngineApi` trait과 DTO, HTTP 경로와 요청 본문(`http` 모듈) | core |
-| `bunsin-client` | `RemoteEngine`: HTTPS로 서버에 접속하는 `EngineApi` 구현 | api |
-| `bunsin-daemon` | HTTP 서버, 프로필 설정으로 실제 LLM client와 커넥터를 만드는 `RealBackends`, 실행 파일 `bunsind` | engine, api, client, llm, connectors, store |
-| `bunsin-app` | GPUI 창 | api, client |
+| `bunsin-engine` | 하네스 파이프라인, `EngineApi`의 구현, 비밀 값 봉인(`secrets.rs`), ARD registry의 수집과 순위(`registry.rs`). LLM, 커넥터, 코딩 실행기는 `Backends` trait으로 받는다. | api, ard, core, store |
+| `bunsin-client` | `RemoteEngine`: HTTPS로 서버에 접속하는 `EngineApi` 구현 | api, core |
+| `bunsin-daemon` | HTTP 서버와 리스너, ARD registry 경로와 task, 프로필 설정으로 실제 LLM client, 커넥터, ARD 검색, 코딩 실행기를 만드는 `RealBackends`, 실행 파일 `bunsind` | api, ard, client, coding, connectors, core, engine, llm, store |
+| `bunsin-app` | GPUI 창 | api, client, core |
 | `bunsin-testkit` | 테스트용 가짜 LLM, 가짜 커넥터 | core |
+
+- 의존 열은 workspace crate만 적는다. 일반 의존이고, dev 의존은 뺐다 (검증: crate마다 `cargo tree -p <crate> --depth 1 -e normal`, 2026-11-17).
 
 - `bunsin-core`는 tokio, reqwest, rusqlite, gpui에 의존하지 않는다. 시각은 호출자가 넣는다.
 - `bunsin-daemon`의 의존성 트리에 gpui가 없어야 한다. CI가 이를 검사한다.
@@ -62,7 +125,7 @@
 - 서버 주소와 CA 경로는 `connection.json`에 저장한다(macOS: `~/Library/Application Support/Bunsin/`).
   접속 token은 macOS Keychain에 저장한다. token은 JSON 파일, 오류 문구, 접근성 label에 들어가지 않는다.
 - token 입력칸은 가려져 있고, 값을 보여 주는 토글이 없다.
-- **기존 Keychain 항목에서 LLM token 복사.** 창이 Mac의 로그인 Keychain에서 서비스와 계정으로 항목을 찾아
+- **기존 Keychain 항목에서 token 복사(LLM, 주소 커넥터).** 창이 Mac의 로그인 Keychain에서 서비스와 계정으로 항목을 찾아
   가려진 token 칸에 넣는다. Save를 눌러야 서버로 간다. 복사이지 연결이 아니다: 이후 Keychain의 변경은 서버에 가지 않는다.
   - Keychain 접근은 `KeychainLookup` trait 뒤에 있다. 실제 구현(`MacKeychain`)은 `main.rs`만 설치한다.
     그 외의 창과 모든 테스트는 아무것도 읽지 않는 `NoKeychain`을 쓴다.
@@ -70,26 +133,81 @@
   - 읽기는 창의 주 스레드에서 실행된다. macOS가 접근 허용을 묻는 동안 창은 반응하지 않는다.
   - 읽기가 실패하면 token 칸을 비운다. 앞서 읽은 token이 "읽지 못했다"는 문구 옆에 남아 저장되지 않게 하기 위해서이다.
   - 로그인 Keychain의 generic password(응용 프로그램 암호)만 찾는다. 인터넷 암호와 iCloud Keychain 항목은 찾지 못한다.
-  - 대상은 LLM token뿐이다. 커넥터 token에는 없다. 실제 Keychain으로는 확인하지 않았다.
+  - 대상은 LLM token과 주소 커넥터의 token이다. Keychain 입력란은 한 벌이고, 한 번에 한 token 칸에만 열린다.
+    읽은 값은 그때 열린 칸에만 들어간다. 실패하면 그 칸을 비운다.
+  - 그 칸의 저장이 성공하거나, 커넥터 입력란이 다른 커넥터로 바뀌거나, 프로필이 바뀌면 입력란을 닫고 비운다.
+  - 명령 커넥터의 비밀 변수 값에는 이 기능이 없다. 실제 Keychain으로는 확인하지 않았다.
 - **모양.** 색과 공통 요소는 `theme.rs`에 있다. 라이트와 다크 두 팔레트가 있고, 창은 시스템 설정을 따른다.
   강조색은 서명 잉크의 파랑이다(승인은 서명이다). 왼쪽 열에 화면 메뉴, 프로필, 접속 상태가 있고,
   모든 화면 위에 agent 상태와 정지 스위치가 있다. Inbox는 승인 카드 목록과 활동 기록(감사 로그)을 나란히 둔다.
   - 승인 카드는 호출의 인자를 한 줄에 하나씩 보여 준다. 긴 값은 줄바꿈하고, 자르거나 높이를 제한하지 않는다.
+- **승인 전 초안 편집**(`draft_editor.rs`): 대기 중인 도구 호출의 카드에 "Edit the text" 버튼이 있다.
+  - 편집 대상은 그 시점 권한 규칙의 `outgoing_text`가 가리키는 자리뿐이다. `*`는 목록의 항목마다 입력란 하나가 된다
+    (`bunsin_core::marker::text_places`). 규칙이 글을 보내지 않거나 자리가 호출에 없으면 버튼이 없다.
+  - 입력란은 AI 표시를 뺀 글로 시작한다(`strip_marker`). 표시는 입력란 밖의 고정된 글로 보인다.
+    표시 문구는 `permissions` 응답의 `ai_marker`에서 온다. 엔진은 수정 뒤에 표시를 다시 붙인다(8절).
+  - 편집 중에도 카드는 모든 인자를 그대로 보여 준다. 승인은 불러온 인자에서 글의 자리만 바꾼 `Edit`를 보낸다.
+  - 글을 바꾸지 않으면 `Edit` 없이 승인한다. 교정 기록이 생기지 않는다. 빈 글은 보내지 않는다.
+  - 다른 프로필을 고르거나, 항목이 대기 상태가 아니거나, 서버의 인자가 바뀌면 편집을 닫는다.
   - 테스트는 접근성 label을 읽고, 그림은 읽지 않는다. 그래서 label과 그림을 같은 값에서 만든다(`labelled_as`).
   - 실제 앱은 아이콘 자원을 등록한다(`with_assets`). 등록하지 않으면 체크 표시 같은 아이콘이 그려지지 않는다.
   - 그림 확인: `cargo test -p bunsin-app --test screens -- <폴더>`가 창을 띄우지 않고 각 화면을 두 모드의 PNG로 그린다.
     이 방법으로는 hover, focus 이동, 제목 표시줄, 시스템 모드 변경을 따르는 동작을 확인할 수 없다.
-- 창은 Inbox, Notes, Permissions, Settings 네 화면 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
+- 창은 Inbox, Notes, Permissions, Agent, Learning, Settings 여섯 화면과 Setup 중 하나를 보여 준다. 다른 화면이 승인함의 자리를 좁히지 않게 하기 위해서이다.
   승인함 테스트는 1280x800 창에서 실행한다.
-  - Inbox: 상태, 정지 스위치, 승인함, 감사 로그.
-  - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제(15절).
+  - Inbox: 상태, 정지 스위치, 승인함, 감사 로그. `unknown` 항목은 done, drop, retry 버튼과 "두 번 보낼 수 있다"는 안내를 보인다.
+    retry는 같은 항목에서 두 번 눌러야 실행한다. 첫 클릭은 버튼을 "Yes, run it again"으로 바꾼다. 다른 항목의 retry를 누르면 그 항목이 대신 묻는 상태가 된다.
+    정책이 소유자 없이 실행한 항목(`executed`, `failed`)에는 "Report a problem" 버튼이 있다(`report_autonomous`). 도구가 보류 중이면 버튼을 감춘다.
+  - Notes: 페이지 목록과 한 페이지의 열람, 편집, 생성, 삭제, 오른쪽 열의 미리 읽기와 점검 결과(15절).
   - Permissions: 승인된 도구마다 권한 규칙 하나. 아래 "Permissions 화면" 항목.
-  - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인)과 개인정보 설정.
-- 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `remove_connector`, `privacy`, `set_privacy`).
+  - Agent: 소유자의 원칙과 poll, 호출자 token(9절), 인바운드 endpoint와 ARD 등록, webhook, ARD registry. 아래 "Agent 화면" 항목과 "부분 저장 카드" 항목.
+  - Learning: 교정 기록, 원칙 후보, 재현 평가, 자율 제안 기준. 아래 "Learning 화면" 항목.
+  - Settings: 연결 설정(LLM endpoint, 커넥터, token, 연결 확인, 도구 승인), 개인정보 설정, notes 설정, 평가 설정.
+  - Setup: 새 agent의 구성 마법사. 아래 "Setup 화면" 항목.
+- 설정 화면은 전용 API만 쓴다(`connections`, `set_llm`, `set_connector`, `set_command_connector`, `set_api_connector`, `remove_connector`,
+  `privacy`, `set_privacy`, 그리고 아래 "부분 저장 카드"의 `notes_settings`, `eval_settings`와 그 저장).
   app은 설정 전체를 읽거나 쓰지 않는다.
 - 설정 화면의 입력 내용은 사용자의 초안이다. 5초마다의 새로고침은 초안을 덮어쓰지 않는다. 프로필을 바꾸면 초안을 버린다.
 - token 입력칸은 가려져 있다. token은 입력칸에서 명령으로만 이동하고, 화면 상태나 label에 들어가지 않는다. 저장에 성공하면 입력칸을 비운다.
-- 원칙과 poll은 아직 창에서 설정할 수 없다. 설정 파일(`config-set`)로 넣는다.
+- **Agent 화면의 원칙**은 전용 API `principles`와 `set_principles`(목록 전체를 바꾼다)를 쓴다.
+  - 소유자는 원칙을 더하고, 고치고, 위아래로 옮기고, 지운다. Save를 눌러야 서버로 간다. 새로고침은 초안을 덮어쓰지 않는다.
+  - 저장은 읽은 목록을 `Expected`로 보낸다. 그 사이에 목록이 바뀌었으면 충돌(412)이고, 화면은 "서버 것 불러오기"와 "그래도 저장"을 보여 준다.
+  - 한도는 서버가 검사한다: 최대 50개, 하나는 앞뒤 공백을 뺀 1자에서 1,000자. 오류는 원칙을 번호로 가리킨다. 서버는 앞뒤 공백을 지우고 저장한다.
+    한도는 이 호출에만 있다. `config-set`으로 넣은 설정은 검사하지 않는다.
+  - 원칙은 소유자의 지시이므로 개인정보 필터를 거치지 않는다(12절). 프롬프트에도 거르지 않고 들어간다.
+  - 감사 로그 `principles_changed`는 개수만 남긴다(이전, 이후, 더한 것, 지운 것). 글은 남기지 않는다.
+  - 원칙 하나를 고치는 동안에는 목록의 순서와 삭제 버튼을 감춘다. 고치는 원칙의 번호가 바뀌지 않게 하기 위해서이다.
+- **Agent 화면의 poll**은 전용 API `polls`와 `set_polls`(목록 전체를 바꾼다), 기존 `test_poll`을 쓴다.
+  - 입력란: 커넥터, 도구, 간격(초), 인자(JSON 객체), mapping의 dot 경로(items, id, text, author, thread), 건너뛸 작성자(한 줄에 하나).
+    창은 숫자와 JSON만 검사한다. 나머지는 서버가 검사하고, 창은 서버의 거부 이유를 그대로 보여 준다.
+  - 저장은 `check_config`(간격 30초 이상, mapping 경로, `read` 규칙)를 지나고, 이어서 도구가 승인된 목록에 있는지 검사한다.
+    승인 검사는 이 호출에만 있다. `config-set`과 `set_permissions`는 그대로이고, 승인되지 않은 도구는 실행할 때 실패한다.
+  - 충돌 검사(`Expected`)와 "그래도 저장"은 원칙과 같다. 감사 로그 `polls_changed`는 개수만 남긴다. 검색 인자에 사람 이름이 있을 수 있기 때문이다.
+  - 각 poll은 snapshot의 마지막 실행 결과를 보여 준다. 초안이 서버 목록과 다르면 보여 주지 않는다. 결과는 서버 목록의 순서를 따르기 때문이다.
+  - Test는 저장된 poll만 실행한다. 바뀐 초안에서는 "먼저 저장하라"고 알린다. 결과는 개인정보 필터를 거친 이벤트이다(11절의 `poll-test`와 같다).
+- **부분 저장 카드**(`publishing_form.rs`, `checks_form.rs`, 공통 `part_form.rs`): 설정 파일이나 명령줄로만 바꾸던 설정을 창에서 바꾼다.
+  - Agent 화면: "Inbound endpoint and ARD listing"(`inbound` 전체), "Webhooks"(`webhooks`와 서명 secret), "ARD registries"(`ard_registries`).
+    Settings 화면: "Notes"(`notes`: `auto_apply`, `stale_days`, `lint_every_hours`, `lint_conflicts`), "Evaluation"(`eval`: `pass`, `judge`).
+  - 전용 API 쌍: `inbound_settings`/`set_inbound_settings`, `ard_registries`/`set_ard_registries`, `webhooks`/`set_webhooks`,
+    `notes_settings`/`set_notes_settings`, `eval_settings`/`set_eval_settings`(`POST .../<이름의 kebab case>`).
+    저장은 엔진의 `replace_part`(`crates/engine/src/settings_parts.rs`) 하나를 지난다.
+  - `replace_part`는 그 부분만 `Expected`와 비교하고, 바꾼 설정 전체에 `set_profile_config`와 같은 단계를 적용한다:
+    답 도구 규칙 추가(`with_reply_rule`), 서버 규칙(`Backends::validate`: ARD publisher 도메인, registry 주소), `check_config`,
+    읽은 그대로일 때만 저장, 지운 webhook의 secret 삭제(`prune_secrets`). registry 저장은 runtime을 버린다. 검색 client가 registry 목록으로 만들어지기 때문이다.
+  - 감사: `inbound_settings_changed`(on/off, scope, 등록 여부만. 제목과 설명 글은 남기지 않는다), `ard_registries_changed`와 `webhooks_changed`(이름),
+    `notes_settings_changed`와 `eval_settings_changed`(새 값).
+  - bridge는 새로고침마다 `inbound_status`와 다섯 getter를 더 읽는다. 저장 결과는 `UiState::part_result`(`Part`, 결과) 하나와 `part_saves` 하나로 센다.
+  - 카드는 원칙 카드처럼 초안을 지킨다. 바꾸지 않은 카드만 서버 값을 다시 읽는다. 충돌이면 "서버 것 불러오기"와 "그래도 저장"을 보여 준다.
+  - 인바운드 카드는 `inbound_status`의 listener별 주소, 등록 identifier, 등록한 catalog, catalog가 빼는 이유(`refused`), 경고(`warnings`)를 양식 위에 보인다.
+    입력란은 글을 다듬지 않는다. 그래서 창이 쓴 설정은 다시 읽어도 "Not saved"가 되지 않는다. 질문은 한 줄에 하나이고 빈 줄은 버린다.
+  - webhook 카드는 서버에 있는 webhook에만 "Store the signing secret"을 보인다. secret은 가린 입력란에서 `UiCommand::SetWebhookSecret`으로만 간다.
+    그 값은 `Typed`에 담겨 `Debug`에 나오지 않고, `UiState`와 label에 들어가지 않는다. 저장되면 입력란을 닫고 비운다.
+  - Notes 카드는 자동 적용이 하지 않는 일을 적는다: 미리 읽기, 인바운드 질문, webhook 이벤트의 변경은 적용하지 않고, 사용자가 쓴 페이지를 덮어쓰지 않는다(15절, `notes.rs`의 `may_apply`).
+  - 배치: 새 카드는 각 화면의 기존 카드 뒤에 온다. 그래서 기존 카드의 자리와 1280x800 승인함 테스트는 그대로이다.
+    화면 그림 도구는 스크롤을 고정 픽셀 대신 요소 위치로 맞춘다(`bring`). 페이지가 길어지면 고정 픽셀 스크롤이 끝에서 멈추지 않기 때문이다.
+  - 명령은 더하지 않았다. 명령줄 사용자는 `config-show`/`config-set`과 `webhook-secret`, `inbound`를 쓴다.
+  - 테스트: `crates/app/tests/publishing.rs`, `checks.rs`(창), daemon `tests/server.rs`(HTTP, 권한, 충돌), `ard_search.rs`(다음 검색이 새 registry로 감), `webhooks.rs`(지운 webhook의 secret 삭제).
+    그림: `docs/screens/agent-publishing-light.png`, `agent-webhooks-light.png`, `settings-checks-light.png`.
 - **Permissions 화면**은 전용 API `permissions`(승인된 도구와 권한 표를 읽는다. 어디에도 접속하지 않는다)와
   `set_permissions`(표 전체를 바꾼다)를 쓴다.
   - 저장은 설정 파일과 같은 검증을 지난다. 그래서 poll이 쓰는 read 규칙을 지우면 거부된다.
@@ -99,12 +217,56 @@
   - write/delete 규칙은 소유자가 글 인자를 고르거나 "글을 보내지 않음"을 고르기 전에는 저장되지 않는다.
     AI 표시 없는 쓰기가 기본값으로 생기지 않게 하기 위해서이다.
   - class를 바꾸면 단계는 `approve`로 돌아간다. delete에는 `autonomous` 버튼이 없다(저장된 규칙에 있으면 보여 준다).
-  - 버튼은 입력 schema의 최상위 string 인자만 보여 준다. 그 밖의 인자를 가리키는 저장된 규칙은 그대로 보여 주고, 그 인자를 선택지에 남긴다.
+  - 버튼은 입력 schema의 최상위 string 인자만 보여 준다. 인자 버튼을 누르면 그 인자가 더해지거나 빠진다(8절).
+    마지막 인자를 빼면 선택이 없는 상태가 된다. "글을 보내지 않음"이 되지 않는다.
+  - schema에 없는 인자나 다른 값 안의 자리를 가리키는 저장된 규칙은 그대로 보여 주고, 저장할 때 유지하고, 선택지에 남긴다.
   - 승인된 도구가 없는 규칙은 목록 맨 위에 보여 주고, 지울 수 있게 한다.
   - Save와 바뀐 규칙 목록은 스크롤되는 목록 밖에 있다. 목록의 첫 줄은 바뀐 규칙의 개수이다. 도구가 30개여도 1280x800 창에서 Save를 누를 수 있다.
   - **기다리는 항목**: 승인 시점에 엔진이 그때의 규칙으로 AI 표시를 다시 붙인다.
-    규칙이 가리키는 인자가 호출에 없으면 승인은 거부된다.
-- 한계: 다른 client가 같은 설정을 바꾼 뒤에 Save를 누르면 그 변경을 덮어쓴다. 충돌을 알리지 않는다.
+    규칙이 가리키는 자리가 호출에 없으면 승인은 거부된다.
+  - **지표, 제안, 보류**: 화면은 `autonomy` API도 읽는다. write·delete 도구마다 개수 한 줄을 보여 준다(4절의 "결정 기록과 보류").
+    제안된 도구에는 "Suggested: Autonomous" 표시가 붙는다. 표시는 단계를 바꾸지 않는다. 소유자가 단계를 고르고 Save를 눌러야 한다.
+    보류된 도구에는 안내와 "Clear the hold" 버튼이 있다. 버튼은 `clear_autonomy_hold`만 부르고 규칙을 저장하지 않는다.
+    목록 위의 한 줄이 기준을 알려 준다. 기준이 없으면 제안이 꺼져 있다고 알린다. 이 줄을 한 줄로 둔 이유: 1280x800 창에서 기존 클릭 테스트의 버튼이 화면 밖으로 밀렸다.
+- **Learning 화면**(`learning_form.rs`)은 카드 네 개를 감싸서 함께 스크롤한다. bridge는 새로고침마다 `corrections`, `principle_candidates`,
+  `replay_cases`, `eval_report`를 더 읽는다.
+  - 교정: 최신순 목록과 "Retire"(`retire_correction`). 폐기한 것은 표시만 남는다.
+  - 원칙 후보: "Find in my corrections"와 "Find in my replay cases"가 `extract_principles`를 부른다. 결과 개수나 거부 이유는 카드 안에 보인다.
+    `read` 출처는 도구와 인자 입력이 필요하므로 Learning 화면에는 없다. 명령(`bunsind extract-principles --from read`)과 Setup 화면의 5단계가 쓴다.
+    `new` 후보마다 "Adopt", "Edit, then adopt"(입력란에 글을 넣고 "Adopt the edit"), "Dismiss". 채택은 창이 가진 원칙 목록을 `expected`로 보낸다.
+    고치는 후보가 서버에서 `new`가 아니게 되면 입력란을 닫는다.
+  - 평가: 사례 목록과 Delete, "Run the evaluation"(`start_eval`), run 상태, 비율, 통과 기준, 사례마다 한 줄(심판 판정 포함). 사례 추가는 명령(`add-replay-cases`)으로 한다.
+    Learning 화면에는 사례 입력란을 두지 않았다. 지난 메시지를 여러 개 한 번에 넣는 일이 대부분이기 때문이다.
+    Setup 화면의 6단계에는 JSON 배열 입력란이 있다(`add_replay_cases`, 명령과 같은 형식).
+  - 자율 제안 기준: 전용 API `autonomy_thresholds`와 `set_autonomy_thresholds`(`POST .../autonomy-thresholds`, `.../set-autonomy-thresholds`).
+    저장은 `check_config`(같은 `AutonomyThresholds::check`)를 지나고, 읽은 기준을 `Expected`로 보낸다. 다르면 412이고 화면은 "서버 것 불러오기"와 "그래도 저장"을 보여 준다.
+    입력란의 기준값은 이미 읽는 `autonomy` 응답의 `thresholds`에서 온다(같은 값이므로 호출을 하나 줄였다). 세 칸이 비면 `None`, 모두 정수면 기준이다. 일부만 채우면 창이 보내지 않는다.
+    감사 `autonomy_thresholds_changed`는 새 기준을 남긴다. 명령은 따로 두지 않았다. `config-set`이 같은 일을 한다.
+- **Setup 화면**(`setup_form.rs`, PLAN 5절과 6절의 4단계): 일곱 단계(LLM endpoint, 연결, 도구와 규칙, 업무지식, 원칙 후보, 재현 평가, 마무리).
+  - 새 API는 없다. 각 단계는 다른 화면의 카드를 그대로 그린다(`llm_card`, `connectors_card`, `permissions_section`, `preload_card`,
+    `candidates_card`, `eval_card`). 더한 명령은 bridge의 `AddReplayCases` 하나이고, 기존 `add_replay_cases`를 부른다.
+  - 서버에 자기 상태를 저장하지 않는다. 창이 열려 있는 동안 프로필마다 단계를 기억한다.
+    새 창은 서버가 결과를 보여 주지 않는 첫 단계에서 시작한다(`first_open_step`: endpoint, 커넥터, 모든 커넥터의 승인 목록과 규칙, notes, 원칙이나 새 후보, 평가 run).
+  - 창은 프로필마다 한 번, LLM endpoint나 커넥터가 없고 승인한 도구도 없는 프로필(`needs_setup`)이면 setup을 스스로 연다.
+    승인한 도구가 있는 프로필은 설정 파일 같은 다른 길로 구성된 것으로 보고 열지 않는다. Agent 화면 머리줄의 "Set up the agent"가 다시 연다.
+  - 1단계의 Next는 이 창에서 시험(`test_llm`)이 성공한 endpoint가 서버의 endpoint와 같을 때만 넘어간다. 모든 단계에 Skip이 있다.
+  - 3단계는 커넥터마다 `connector_tools`의 도구 이름과 설명(데이터)을 보여 주고 `approve_tools`로 승인한다. 규칙은 Permissions 화면의 초안과 같다.
+    Setup 화면에서 단계 버튼은 Observe와 Approve만 보인다(저장된 규칙의 단계는 보인다). 그래서 setup은 Autonomous를 정하지 않는다.
+  - 7단계는 요약을 보여 준다. read가 아닌 규칙이 모두 Observe나 Approve일 때만 Finish가 끝낸다.
+    "Set them to Approve"는 나머지를 Approve로 내리는 `set_permissions`이다(읽은 표를 `Expected`로 보낸다).
+  - 원칙 후보는 교정 기록, 재현 사례, 읽기에서 온다. 새 프로필에는 앞의 둘이 없으므로 5단계는 읽기 출처를 먼저 둔다.
+    PLAN 순서에서 평가(6단계)가 원칙(5단계)보다 뒤라서, 6단계에서 더한 사례로 후보를 찾으려면 Back으로 돌아간다.
+  - 테스트: `crates/app/tests/setup.rs`(가짜 LLM과 커넥터로 일곱 단계 전체, 떠났다가 이어 하기, Autonomous 규칙이 있으면 끝나지 않음).
+    그림: `docs/screens/setup-*-light.png`.
+  - 명령줄 마법사(`bunsind setup`)는 만들지 않았다. 단계마다 입력을 묻는 대화형 명령이 되어 작은 명령 순서가 아니기 때문이다. README에 명령 순서를 적었다.
+- **명령줄의 권한 규칙**: `bunsind rules`, `rule-set`, `rule-remove`는 같은 API(`permissions`, `set_permissions`)를 쓴다.
+  - 명령은 표를 읽고 규칙 하나만 바꾼 뒤, 읽은 표를 `Expected`로 함께 보낸다. 그 사이에 표가 바뀌었으면 충돌로 거부된다.
+    "그래도 저장"은 없다. 명령을 다시 실행하면 새 표에서 시작한다.
+  - write/delete 규칙은 `--text`나 `--no-text`가 없으면 서버에 묻기 전에 거부된다. 창과 같은 규칙이다.
+  - `--text`가 최상위 인자 하나이면 `arg` 형식, 그 밖에는 `paths` 형식으로 저장한다(8절). 창이 다른 값 안의 자리를 만들 수 없으므로 이 명령이 그 경로이다.
+  - delete에 `autonomous`는 거부한다. 창도 그 버튼을 주지 않는다. 승인되지 않은 도구의 규칙도 저장된다(`rules`가 표시한다).
+- 한계: 창의 모든 설정 저장은 읽은 값을 `Expected`로 보낸다(14절). 비교하는 값에 token은 없다.
+  그래서 다른 client가 token만 바꾼 뒤의 저장은 충돌로 알리지 않는다.
 - Disconnect는 Keychain의 token을 지우고 접속 화면으로 돌아간다.
 - 개발할 때는 환경 변수 `BUNSIN_SERVER`와 `BUNSIN_TOKEN`이 저장된 접속보다 우선한다.
 - 저장된 접속으로 시작했는데 서버가 응답하지 않으면 app은 접속 화면에 오류를 보여 준다. 저장된 token은 그대로 둔다.
@@ -121,7 +283,96 @@
   기각한 안: DB 하나에 `profile_id` 컬럼. `WHERE` 조건 하나를 빠뜨리면 다른 프로필의 데이터가 샌다.
 - 산출물은 `profiles/<id>/artifacts/sha256/<해시>` 파일로 저장하고, DB에 메타 행을 둔다.
 - 감사 로그 테이블은 트리거로 UPDATE와 DELETE를 거부한다.
-- 업무지식은 notes(15절)에 쌓인다. 전문 검색은 아직 없다. 계획은 FTS5 `trigram`이다. trigram은 2음절 한국어 검색어를 찾지 못하므로 (검증: /tmp 빌드) 2음절은 `LIKE`로 찾는다.
+- 업무지식은 notes(15절)에 쌓인다.
+- **유사 작업 검색(임베딩 없음)**: 교정 기록과 notes를 FTS5 `trigram` 색인으로 찾는다. 번들 SQLite 3.54.1은 FTS5를 켠다.
+  - `corrections_fts(task, original, edited, reason)`는 외부 콘텐츠 표이다. `corrections`의 `id`로 글을 읽는다.
+    교정은 고치거나 지우지 않으므로 INSERT 트리거 하나로 맞춘다. 폐기는 색인하지 않는 열 `retired_at`만 바꾼다.
+  - `wiki_fts(slug UNINDEXED, title, summary, body)`는 글을 직접 담는다. 외부 콘텐츠 표는 정수 키가 필요한데 `wiki_pages`의 키는 slug이기 때문이다.
+    INSERT, UPDATE(제목, 요약, 본문), DELETE 트리거가 slug로 맞춘다. UPSERT는 UPDATE 트리거를 탄다.
+  - 색인이 없는 DB(옛 DB 포함)를 열면 색인을 만들고 있는 행으로 채운다. 확인과 채우기는 한 transaction이다.
+  - 검색어(core `search::query_terms`): `[REDACTED:…]`를 지우고, 영숫자가 아닌 글자로 나누고, 소문자로 바꾼다.
+    한글만인 3음절 이상 낱말은 조사 하나를 뗀다(먼저 `에서 으로 에게 까지 부터 처럼`, 다음 `은 는 이 가 을 를 에 의 도 로 와 과 만`).
+    3자 이상과 한글 2음절만 남기고, 중복을 빼고 앞의 24개를 쓴다. 영문 2자는 버린다.
+  - trigram은 2자 검색어를 찾지 못한다(검증: probe). 그래서 3자 이상은 `MATCH "<t>"`, 한글 2음절은 `LIKE '%t%'`로 찾는다.
+    `배포는`은 `배포를`을 찾지 못하지만, 조사를 떼면 찾는다.
+  - 점수(core `search::rank`): 일치한 검색어마다 `ln(1+N/df)`를 더한다. N은 검색한 행 수, df는 그 검색어의 행 수이다.
+    `df ≤ max(2, N/4)`인 드문 검색어가 일치한 행만 후보이다. 그래서 `the` 같은 흔한 낱말 하나로는 아무것도 찾지 않는다.
+  - 같은 점수의 순서: 교정은 같은 source, 다음 최신 id. notes는 최근 수정, 다음 slug.
+  - 기각: bm25만 쓰기. `LIKE` 결과와 한 순서로 섞지 못한다. 임베딩. 모델과 저장소가 더 필요하다.
+  - 조사 목록, 드문 검색어 기준, 상수 24는 첫 값이다. 실제 데이터로 확인하지 않았다.
+- **교정 기록**(PLAN 4.4): 소유자가 대기 중인 호출을 Edit로 고쳐 승인하면 엔진이 한 줄을 저장한다.
+  - 열: 도구, source와 task(그 항목의 이벤트, 저장된 `events.payload`에서 읽음), 초안, 수정본, 이유, `retired_at`.
+  - 초안과 수정본의 글은 규칙의 글 자리(`text_places`)에 있는 글을 빈 줄로 잇는다. 자리가 없는 규칙이면 인자 JSON이다.
+    AI 표시는 떼고 저장한다. 표시가 있으면 표시의 낱말이 모든 교정과 일치하기 때문이다.
+  - 초안, 수정본, 이유는 저장하기 전에 개인정보 필터를 거친다. 감사 `edited`와 산출물 `edited_draft`도 걸러진 글을 쓴다.
+    task는 수신할 때 이미 걸러졌다. 보내는 호출은 소유자가 쓴 글 그대로이다(12절).
+  - 실시간 이벤트의 프롬프트에만 유사 교정을 최대 5개 넣는다. 검색어는 이벤트 본문에서 만든다. 교정은 `<data>` 블록으로 인용한다.
+  - **재현에는 교정을 넣지 않는다.** 교정의 수정본이 그 사례의 실제 답이면 점수가 무의미해진다.
+    기각: 시각으로 거른 교정을 재현에 넣기. 믿을 수 있는 사례 시각이 없다.
+  - `corrections`(`POST .../corrections`, `bunsind corrections`)는 폐기한 것까지 최신순으로 200개를 보여 준다.
+    `retire_correction(id)`(`POST .../retire-correction`, `bunsind retire-correction`)는 `retired_at`을 적고 감사 `correction_retired`를 남긴다.
+    폐기한 교정은 검색에서 빠지고 N에도 들지 않는다. 다시 폐기하면 거부한다.
+  - LLM은 교정을 저장하거나 폐기하지 않는다. 저장은 엔진이, 폐기는 소유자가 한다.
+- **결정 기록과 보류(좁은 자율, PLAN 4.7과 6절의 3단계)**: 표 `decisions(id, at, inbox_id, tool, kind)`는 추가 전용이다(트리거가 UPDATE와 DELETE를 거부한다).
+  - kind: `approved`(소유자가 고치지 않고 승인), `edited`(고쳐서 승인), `rejected`(대기 중인 호출을 거부), `autonomous`(정책이 소유자 없이 실행),
+    `reported`, `demoted`(보류 시작), `hold_cleared`(보류 해제).
+  - 적지 않는 것: 초안의 거부(실행되지 않는다), notes 변경안, 넘김 항목. 사본(`retry_of`)의 승인, 수정, 거부도 적지 않는다.
+    사본은 앞 항목을 되풀이하고, 앞 항목의 결정이 이미 적혀 있기 때문이다.
+  - 보류: 그 도구의 `demoted`와 `hold_cleared` 중 마지막이 `demoted`이다. `demoted`는 보류가 아닐 때만 쓴다. 확인과 쓰기는 한 transaction이다.
+  - 보류는 설정 밖에 있다. 그래서 `config-set`이나 낡은 "Save anyway"가 보류를 조용히 풀지 못한다.
+  - 내리기: 소유자가 write·`autonomous` 규칙인 도구의 대기 중인 호출을 거부하면 엔진이 `demoted`와 감사 `autonomy_demoted`를 쓴다.
+    이미 보류 중이면 `demoted`를 다시 쓰지 않는다. 기각: config의 단계를 고쳐 내리기. 낡은 저장이 조용히 되올린다.
+  - 개수(도구별): 마지막 `demoted` 뒤의 `approved`, `edited`, `rejected`, `autonomous`를 센다. 그래서 보류가 개수를 처음부터 다시 센다.
+    자율 실행의 실패는 항목이 `failed`이고 사본이 없는 것이다. 사본이 있으면 시작이나 소유자가 호출을 실행하지 않은 것이기 때문이다.
+  - 보류의 효과: `Policy::decide(tool, pin, kill, held)`는 보류된 도구의 `Execute`를 `NeedsApproval`로 바꾼다. 낮은 단계, 정지 스위치, pin은 그대로이다.
+    엔진의 `decide`가 보류를 읽으므로 새 제안, 승인, 재개가 모두 따른다. 재개에서 자율 항목은 실행되지 않고 `pending` 사본이 된다.
+  - 신고: `report_autonomous(inbox_id)`(`POST .../report-autonomous`, `bunsind report-autonomous`)는 정책이 소유자 없이 실행한 도구 호출 중
+    `executed`나 `failed`인 항목만 받고, 항목마다 한 번만 받는다. `reported`, 감사 `autonomous_reported`를 쓰고 도구를 보류한다(`cause: reported`).
+    기각: 실패만으로 내리기. 아무것도 보내지 않았다.
+  - 해제: `clear_autonomy_hold(tool)`(`POST .../clear-autonomy-hold`, `bunsind clear-autonomy-hold`)만 `hold_cleared`를 쓴다. 감사는 `autonomy_hold_cleared`이다.
+  - 제안(core `autonomy::suggest`, 순수 함수): 설정 `autonomy: {min_reviewed, min_unchanged_percent, window_days}`가 있고, write 도구이고,
+    단계가 `approve`이고, `bunsin.coding/` 도구가 아니고, 보류가 아니고, 최근 `window_days`일의 reviewed가 `min_reviewed` 이상이고,
+    unchanged%(내림)가 `min_unchanged_percent` 이상일 때만 참이다. 설정이 없으면(`None`) 제안이 없고 개수는 모든 날을 센다.
+    `min_unchanged_percent`가 100을 넘거나 `window_days`가 0이면 저장을 거부한다.
+  - 엔진은 단계를 올리지 않는다. 소유자만 `set_permissions`(창, `bunsind rule-set`)로 올린다. delete는 제안하지 않고 자율이 되지 않는다.
+  - `autonomy`(`POST .../autonomy`, `bunsind autonomy`): write·delete 규칙과 보류된 도구마다 개수, 보류, 제안을 돌려준다.
+- **재현 평가(PLAN 4.7)**: 표 `replay_cases(id, event, actual_reply, expect, created_at)`, `eval_runs(id, state, started_at, finished_at)`,
+  `eval_results(run_id, case_id, expect, kind, kind_ok, overlap_permille, draft, error, judge)`.
+  - 사례의 이벤트와 실제 답은 저장하기 전에 개인정보 필터를 거친다. `expect`는 `reply`(기본값), `escalate`, `ignore`이다.
+  - 재현은 도구를 실행하지 않고, notes와 교정 기록을 받지 않는다(13절). LLM 호출 로그의 purpose는 `replay`이다.
+  - 채점은 LLM 없이 한다(core `eval`). 종류: 쓰기 규칙의 도구 호출은 `reply`, 읽기 규칙이나 notes 도구의 호출은 `read`,
+    delete 규칙이나 규칙 없는 도구의 호출은 `other_tool`이다. `read`는 불일치로 세고 비율을 따로 낸다.
+    겹침: 소문자로 바꾸고 공백을 하나로 줄인 글의 문자 3-gram Dice 계수(천분율). 초안 글은 교정 기록과 같은 `draft_text`(AI 표시 제외)이다.
+    `reply` 사례에만 있고, 답이 아닌 초안은 0이다. 경계: `escalate` 사례 중 넘긴 비율. 과잉 넘김: `reply` 사례 중 넘긴 비율.
+    비율은 내림한 백분율이고, 셀 사례가 없으면 `None`이다. 실패한 재현(LLM 오류)은 어느 비율에도 들지 않는다.
+  - 결과 행은 `expect`를 함께 저장한다. 사례를 지워도 보고서가 바뀌지 않게 하기 위해서이다. 그래서 설계의 `eval_runs.summary` 열은 두지 않고 결과에서 계산한다.
+  - 초안 글과 오류 글은 저장하기 전에 필터를 거친다. 오류는 upstream의 응답 본문을 담을 수 있기 때문이다.
+  - `start_eval`은 실행 행만 만든다. 실행은 한 번에 하나이고, 사례가 없으면 거부한다. 서버의 poll 작업이 `poll_all()` 뒤에
+    `background_tick()`을 부르고, 이것이 프로필마다 실행 중인 run의 사례를 3개씩 재현한다. 남은 사례가 없으면 run을 `done`으로 바꾸고 감사 `eval_finished`를 남긴다.
+    진행은 저장된 행에서만 정한다(결과가 없는 사례). 그래서 재시작 뒤에도 이어진다. 실행 중에 더한 사례도 그 run에 든다.
+  - 재현은 밖에 아무것도 보내지 않으므로 정지 스위치와 상관없이 진행한다. 기각: 요청 하나에서 전체 실행. 종료 유예 300초를 넘는다.
+  - 통과 기준은 소유자가 정한다: 설정 `eval.pass: {kind_percent, overlap_percent, boundary_percent}`(serde 기본값 없음). 100을 넘으면 저장을 거부한다.
+    끝난 run은 실패한 사례가 없고 세 비율이 모두 기준 이상일 때만 통과한다. `None`인 비율은 기준을 넘지 못한다(경계 사례가 없는 세트는 통과하지 않는다).
+  - API: `add_replay_cases`, `replay_cases`(200개), `delete_replay_case`, `start_eval`, `eval_report`(최신 run). 경로는 `POST .../<kebab-case 이름>`, 명령은 같은 이름의 `bunsind` 명령이다.
+    `replay`(사례 하나를 바로 재현)는 결과에 `score`를 더한다.
+  - **LLM 심판**(설정 `eval.judge`, 기본 false): `reply` 사례이고 초안의 종류가 `reply`일 때만 사례마다 한 번 묻는다.
+    초안과 실제 답(둘 다 필터를 거친 글)을 `<data>`로 인용하고 `{verdict: same|partial|different, reason}`을 받는다. LLM 호출 로그의 purpose는 `judge`이다.
+    판정은 `eval_results.judge`(이유는 필터를 거친다)에만 저장하고 보고서에만 보인다. 호출이 실패하거나 답이 형식에 맞지 않으면 판정이 없고, 사례는 실패가 아니다.
+    비율과 통과 판정(`EvalSummary::of`)의 입력은 `(Expect, Option<CaseScore>)`이고, 정책과 `suggest`의 입력에도 판정이 없다. 타입으로 막는다.
+    테스트: 심판을 켜고 판정이 `same`, `different`, 형식 오류여도 비율, 통과, `autonomy()`, 결정 개수가 같다.
+- **원칙 후보(PLAN 5절의 5단계)**: 표 `principle_candidates(id, text, evidence, source, state, created_at, decided_at)`. state는 `new`, `adopted`, `dismissed`이다.
+  - `extract_principles(source)`의 출처: `corrections`(폐기하지 않은 교정의 수정본과 이유), `replay_cases`(재현 사례의 실제 답),
+    `read{tool, args}`(read 규칙이고 `decide`가 Execute인 도구를 한 번 부른 결과, poll의 `fetch`와 같은 검사). 글은 다시 필터를 거친다. 저장 뒤에 소유자가 단어를 더했을 수 있기 때문이다.
+  - 글은 `<data source="owner-text">`로 인용하고 합계 20,000자까지 보낸다. LLM은 `{candidates: [{text, evidence}]}`로 답한다. LLM 호출 로그의 purpose는 `principles`이다.
+  - 엔진의 거부 규칙(core `candidates::accept`): 글과 근거를 필터한 뒤, 빈 글, 300자 초과, `[REDACTED:` 포함, 입력 글에 정확히 없는 근거를 버린다.
+    이미 있는 후보(모든 state)나 원칙과 같은 글도 버린다. 그래서 기각한 후보는 다시 나오지 않는다. 최대 10개를 `new`로 저장한다.
+    근거는 `quote_untrusted`가 바꾼 `&lt;`와 `&amp;`를 되돌린 뒤 비교한다. 감사 `principles_extracted`는 출처 이름과 개수만 남긴다(read의 인자는 사람 이름을 담을 수 있다).
+  - LLM 호출이 실패하면 거부(409)이고, 오류 글은 필터를 거친다. 출처에 글이 없으면 LLM을 부르지 않고 거부한다.
+  - `adopt_principle{id, text, expected}`: 후보가 `new`이고 `expected`가 지금 원칙과 같아야 한다(다르면 412). 후보를 `adopted`로 먼저 옮긴 뒤(CAS)
+    `replace_principles`로 글 하나를 끝에 더한다. 그래서 공백 정리, 50개·1,000자 한도, 감사 `principles_changed`가 같다. 저장이 실패하면 후보를 `new`로 되돌린다.
+    `text`는 소유자가 고친 글이다. 원칙은 필터를 거치지 않는다(12절). 감사 `principle_adopted`는 id와 고쳤는지만 남긴다.
+  - `dismiss_principle(id)`: `new`만 `dismissed`로 옮긴다. LLM은 채택하지 않는다. 기각: 일괄 채택.
+  - API와 명령: `extract-principles`, `principle-candidates`, `adopt-principle`(명령은 원칙을 읽어 `expected`로 보낸다), `dismiss-principle`.
 - 비밀 값은 설정에 저장하지 않는다. 9절을 본다.
 
 ## 5. LLM 어댑터
@@ -138,6 +389,15 @@
   요청에는 프로필의 데이터가 없다. 정지 스위치가 켜져 있어도 실행된다(외부에 아무것도 쓰지 않는다).
   감사 로그에 `llm_tested`를 남긴다. 기다리는 시간은 LLM 설정의 timeout까지이고, 그동안 창의 다른 명령은 대기한다.
   창은 저장되지 않은 입력을 테스트하지 않는다.
+- **호출 로그**: 모든 LLM 호출은 `Engine::complete`(`engine/src/llm_log.rs`)를 지난다.
+  이 함수가 호출 1건마다 표 `llm_calls`에 1행을 쓴다: 시각, job, purpose, 입력·출력 token, 지연(ms, `Instant`로 잰다), 끝난 방식.
+  - job은 이벤트 처리와 재현에서 이벤트의 dedupe key이고, 연결 테스트에서는 없다. 수리 요청도 같은 job의 행이 된다.
+  - purpose는 `event`, `replay`, `llm_test`이다.
+  - 끝난 방식은 고정된 종류만 담는다: `end`, `max_tokens`, `refusal`, `rate_limited`, `http_error`, `transport_error`, `malformed`.
+    오류 문구는 저장하지 않는다. HTTP 오류의 본문은 필터를 지나지 않은 상대의 글이기 때문이다. 요청과 응답의 글도 담지 않는다.
+  - `llm_usage`(`POST .../llm-usage`, `bunsind llm-usage`)는 지난 90일의 행을 UTC 날짜와 purpose별로 합친다(SQLite `date(at,'unixepoch')`).
+    실패는 `end`가 아닌 호출이다. 프로필은 DB 파일이 나타내므로 표에 프로필 열은 없다.
+  - LLM client를 만들지 못해 보내지 않은 요청은 기록하지 않는다.
 - `llm-set` 명령과 창의 LLM 화면은 Claude API를 기본값으로 채운다: `https://api.anthropic.com`, `claude-opus-5-5`.
   출처는 Claude 문서의 API overview와 models overview이다(2026-11-15에 읽음). 기본값은 프로필에 미리 저장하지 않는다.
   운영자가 허용 목록을 쓰는 서버에서는 저장된 기본 주소가 다른 설정의 저장까지 막기 때문이다.
@@ -159,22 +419,196 @@
 - 결과(`CodingResult`)는 브랜치, base/head, diff 요약, 테스트 명령과 출력, 종료 상태, 기록 파일을 가진다.
 - 백엔드는 Claude Code(`-p --output-format stream-json --verbose`), Codex(`exec --json -C <작업 폴더> -`), 사용자 지정 명령이다. 지시문은 stdin으로 넘긴다.
 - 백엔드 명령에는 권한 확인이나 sandbox를 끄는 플래그가 없다. 두 CLI의 기본 모드는 파일 수정을 막을 수 있다.
-  편집을 허용하는 opt-in 설정은 아직 없고, 실제 CLI로 실행해 보지 않았다.
-- 실행기는 아직 엔진에 연결되지 않았다.
+  편집을 허용하는 opt-in 설정은 두지 않았고, 실제 CLI로 실행해 보지 않았다. 운영자는 서버에서 CLI 자체의 설정을 바꿀 수 있다.
+- **엔진 연결**(core `coding`, engine `coding.rs`):
+  - 설정 `coding: Option<{backend, command, timeout_secs, repos: {이름: {path, test_command}}}>`(`serde(default)`, `deny_unknown_fields`).
+    프로필은 `claude_code`, `codex`의 프로그램을 정하지 못한다(`program` 필드는 거부된다). `command`는 백엔드 `command`에만 있고 절대 경로로 시작한다.
+    저장소 경로는 절대 경로, 시간 한도는 1초에서 24시간, 저장소 이름은 a-z, 0-9, `-`, `_` 40자까지이다.
+  - 내장 도구 `bunsin.coding/start {repo, base_ref?, instructions}`. 규칙은 `write`와 `"none"`만 받고, 다른 `bunsin.coding/` 도구의 규칙은 거부한다.
+    설정과 규칙이 모두 있을 때만 LLM이 도구를 본다. LLM은 고정 설명과 저장소 이름(스키마의 `enum`)만 보고, 경로, 프로그램, 테스트 명령은 설정에서 온다.
+  - pin은 언제나 참이다(명세가 코드에 있다). `Policy::decide`는 delete처럼 coding 도구의 `Autonomous`도 `NeedsApproval`로 둔다. `autonomy::suggest`도 제안하지 않는다.
+  - 승인 → `Approved→Executing` CAS → `Backends::coder()`의 `Coder::start(CodingJobSpec)` → `Outcome::Started`. 기본 `Backends::coder()`는 Err이다.
+    job ID는 `b<inbox id>-<profile>`(최대 61자)이다. 시작이 실패하면 항목은 `failed`이다.
+  - 끝난 작업은 `Coder::finished()`가 돌려주고, `background_tick`이 모은다. 엔진은 필터를 거친 `coding_result`(브랜치, 커밋, diff 요약, 테스트, 종료)와
+    `coding_transcript`를 산출물로 저장하고, 항목을 `executed`(코딩 agent가 종료 코드 0, 시간 안)나 `failed`로 옮기고, "브랜치를 검토하고 직접 병합하라"는 Draft를 넣는다.
+    `executing`이 아닌 항목의 보고는 무시한다(감사 `coding_report_ignored`).
+  - 설계는 coder가 `engine.finish_coding_job`을 부르는 방식이었다. engine에 tokio와 역참조가 들어오므로, coder가 보고를 쌓고 `background_tick`이 가져가는 방식으로 바꿨다. 끝난 뒤 최대 5초 늦게 기록된다.
+  - 작업 중에 서버가 멈추면 항목은 `executing`으로 남고, 다음 시작이 `unknown`으로 옮긴다(1절의 재개). 자식 프로세스는 자기 process group이라 남을 수 있다(가정).
+  - **서버 쪽**(daemon `coding.rs`): 운영자 플래그 `--allow-coding`과 `--coding-repo-root <dir>`(둘은 서로를 요구한다)가 있어야
+    `RealBackends::with_coding`이 `RealCoder`를 만든다. 없으면 `validate`가 `coding` 설정의 저장을 거부하고, `coder()`는 Err이다.
+  - 프로그램은 운영자가 정한다: `--coding-program claude-code=<절대 경로>`, `--coding-program codex=<절대 경로>`(반복). 운영자 프로그램이 없는 백엔드는 거부한다.
+  - 프로필이 정한 프로그램(백엔드 `command`, `test_command`)은 `--allow-coding-commands`가 있을 때만 받는다. 이 옵션은 `--allow-stdio-connectors`와
+    같은 권한이다(9절): 프로필 소유자가 서버 사용자로 아무 프로그램이나 실행하고, 다른 프로필의 DB와 `master.key`를 읽을 수 있다.
+  - 저장소는 `canonicalize`(링크를 따라감)한 경로가 root 아래이고 `.git`이 있어야 한다. 위의 모든 검사를 저장할 때(`validate`)와 시작할 때(`start`) 한다.
+    그래서 플래그를 빼고 다시 시작한 서버는 전에 저장된 설정의 작업도 시작하지 않는다(항목은 `failed`).
+  - 한계: 작업은 서버 사용자로 실행되고 sandbox가 없다. 코딩 CLI 자체의 권한 설정만 적용된다.
+  - `RealCoder::start`는 tokio task에서 `CodingRunner`를 돌린다. worktree는 `<data>/coding/<profile>/worktrees`, transcript는 `<data>/coding/<profile>/logs`이다.
+    끝나면 transcript 파일을 읽어 `CodingReport`를 쌓고, 엔진의 `background_tick`(5초마다)이 가져간다. 백엔드는 설정의 `backend`로 고른다(`command`는 `Generic`, 인자 그대로).
+  - 테스트는 임시 git 저장소와 `/bin/sh` 명령 백엔드로 끝까지 돈다. 실제 Claude Code와 Codex는 실행하지 않았다.
+  - 한계: 두 CLI의 기본 모드는 사람이 없으면 편집을 막을 수 있다. 그때 작업은 변경 없이 끝나고, Draft가 "no change"를 보인다. 우회 플래그는 넣지 않는다.
+  - 창: 대기 중인 coding 호출의 카드는 "Approve and start the job"과 "Bunsin은 병합하지 않는다"는 안내를, 실행 중인 호출은 "결과는 새 항목으로 온다"는 안내를 보인다.
 
 ## 7. 인바운드 호출 인터페이스
 
-- v1은 MCP 서버 카드를 쓴다. A2A는 두 번째 프로토콜 스택이 되므로 미룬다.
+- 프로토콜은 둘이다. MCP endpoint와 server card가 기본이고, 소유자가 `inbound.a2a`를 켜면 같은 리스너에 A2A v1.0 endpoint와 Agent Card가 더해진다(아래 "A2A endpoint").
 - 도구는 둘이다: `ask`는 즉시 `{request_id, pending_approval}`을 돌려주고, `get_request(id)`가 결과를 돌려준다.
 - 인바운드 요청은 신뢰하지 않는 데이터로 수신 단계에 들어간다. 승인함을 우회하지 않는다.
-- 인증은 프로필별 호출자 bearer token이다. token은 해시로 저장한다. OAuth는 다음 단계이다.
+  - 질문을 처리하다 나온 쓰기와 삭제는 규칙이 `autonomous`여도 승인을 기다린다. 엔진은 이벤트의 글이 아니라 `intake` 행으로 질문인지 판단한다.
+  - 읽기는 규칙대로 실행된다. 답은 답 도구를 거치므로, 읽은 내용은 소유자가 승인한 뒤에만 호출자에게 간다.
+- 인증은 프로필별 호출자 bearer token이다(9절). token은 해시로 저장한다. OAuth는 다음 단계이다.
+- **설정** `inbound: {enabled(기본 false), scope(internal | public, 기본 internal), title?, description}`(`bunsin_core::inbound`).
+  켜져 있으면 description은 1~100자, title은 1~100자이다. server card의 스키마가 100자까지만 받기 때문이다(설계의 500자에서 바꿈).
+  `set_profile_config`가 endpoint를 꺼짐에서 켜짐으로 바꾸고 답 규칙이 없으면 `{class: write, tier: approve, outgoing_text: {arg: "text"}}`를 넣는다.
+- **intake**(agent.db): `intake(id, channel, delivery_id, caller_id, event, event_key, received_at, attempts, next_try_at, outcome, context_id, message_id, canceled_at, UNIQUE(channel, delivery_id))`
+  와 `UNIQUE INDEX (caller_id, message_id) WHERE message_id IS NOT NULL`.
+  - 뒤의 세 열은 A2A 것이다. 옛 표는 열기 때 `pragma_table_info`로 확인해 열을 더하고, 그 뒤에 index를 만든다(`intake::migrate`).
+  - 취소된 행은 처리 대상(`due_intake`)도, 열린 질문(`open_intake_count`)도 아니다. 시간당 한도에는 계속 센다.
+    `finish_intake`가 `outcome`을 조건 없이 덮으므로, 취소는 자기 열 `canceled_at`에 쓴다(처음 시각만).
+  - `ask`는 질문을 필터를 거친 `InboundEvent`(source `bunsin.inbound`, external_id = request ID, author `caller:<label>`, channel outside)로 저장하고 바로 답한다.
+    `ingest`는 LLM을 기다리기 때문이다. request ID는 `req_`와 OS 난수 16바이트의 hex이다.
+  - 한도: 질문 1~4,000자, 호출자당 시간당 20개, 프로필당 처리하지 않은 질문 50개. 한도는 `intake` 행으로 세므로 재시작 뒤에도 유지된다.
+  - `drain_intake`는 서버의 intake task 하나가 부른다(시작할 때, 5초마다, `ask` 직후의 신호). 정지 스위치가 켜진 프로필은 건너뛴다.
+    행마다 `ingest_event`를 부른다. `Failed`나 `Err`이면 `60초 × 시도 수` 뒤에 다시 한다(이벤트는 `events`에서 열린 채이다).
+    `MAX_EVENT_ATTEMPTS`+1번째 호출은 포기 항목을 넣고 `Failed`를 돌려주므로, 그 뒤 `outcome`을 `failed`로 쓴다. 그 밖의 결과는 `Outcome`의 이름이 `outcome`이 된다.
+  - SIGTERM이면 intake task도 폴링 task처럼 진행 중인 주기를 끝내고 멈춘다(`Poller::stop`).
+- **요청 상태**(`request_status(outcome, canceled_at, items)`, 처음 맞는 규칙): `canceled_at`이 있으면 `canceled`. `outcome`이 없으면 `working`. 항목이 failed이고 그 항목의 재시도 사본(`retry_of`)이 없으면 `failed`(사본이 있으면 사본이 정한다).
+  답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
+  - 같은 함수가 결정 시각(`decided_at`)도 정한다: 취소 시각, 또는 상태를 정한 항목의 `updated_at`. 결정이 없으면 없다.
+    A2A가 이 시각을 보이고, 없으면 질문이 도착한 시각(`received_at`)을 보인다. 그래서 agent가 일을 끝낸 시각은 어디에도 없다.
+  - 호출자는 소유자의 결정만 본다. agent의 선택(무시, 거부된 호출, 기록만, 포기)은 `pending_approval`로 보인다.
+    질문이 그 선택을 agent가 읽은 내용에 따르게 만들면, 호출자가 승인 없이 1비트씩 알아내기 때문이다.
+  - 그래서 agent가 답하지 않은 질문(ignored, denied, recorded)에는 넘김 항목이 생긴다. 소유자가 기각하면 `declined`가 된다.
+  - 한계: 처리에 걸린 시간은 여전히 약한 신호이다. 상태가 바뀌는 시각은 읽기 횟수에 따라 다르다.
+  `get_request`는 `(channel, request ID, caller_id)`로 찾는다. 다른 호출자의 ID와 없는 ID는 같은 오류이다.
+- **답 도구 `bunsin.inbound/reply {text}`**
+  - source가 `bunsin.inbound`인 이벤트에만 보인다. 다른 이벤트의 제안은 수리 요청으로 돌린다.
+  - 언제나 승인: `Policy::decide`가 이 도구의 `autonomous`를 `NeedsApproval`로 낮추고(coding 도구와 같다), `check_config`가 `autonomous` 규칙의 저장을 거부한다.
+    이유: 자율 답은 호출자 token을 읽기 도구 전체에 대한 질의 창구로 만든다. 7절 "승인함을 우회하지 않는다"를 지킨다.
+  - 규칙은 class `write`, outgoing text `{arg: "text"}`여야 한다. 다른 `bunsin.inbound/*` 도구는 없다.
+  - `decide`는 이 도구에 pin 검사를 하지 않는다(명세가 코드에 있다). `execute`는 connector를 부르지 않는다. intake 행이 있는지 보고 항목을 `executed`로 옮긴다(감사 `inbound_answered`).
+    행이 취소되었으면 항목을 `failed`로 옮기고 감사 `inbound_reply_canceled`를 남기며, 답을 보내지 않는다. 취소는 `approved`·`executing` 항목을 옮기지 못하기 때문이다.
+    답의 `executed` 이동(`finish_answer`)과 취소(`cancel_intake`)는 각각 SQL 문장 하나에서 상대의 쓰기를 확인한다. 그래서 먼저 쓴 쪽이 이기고, 요청은 답과 취소를 함께 갖지 않는다.
+  - 그래서 AI 표시, 정지 스위치, 수정의 교정 기록, 1회 실행이 다른 쓰기와 같다. 기각: 새 `InboxBody` variant(CLI와 app이 전부 match한다).
+- 인바운드 질문에서 나온 notes 변경은 자동 반영하지 않는다(channel outside, source 검사 둘 다).
+- **A2A endpoint**(daemon `a2a.rs`, A2A v1.0 JSON-RPC binding): `POST /agents/{p}/a2a`, `GET /agents/{p}/a2a/agent-card.json`.
+  - 설정 `inbound.a2a`(기본 false). `InboundConfig::a2a_served_on(L) = a2a && served_on(L)`이다. 새 공개 표면은 소유자가 켠다.
+    `/.well-known/agent-card.json`은 domain당 agent 하나를 전제하므로 두지 않는다. 발견은 ARD 항목과 직접 설정이다(A2A §8.2).
+  - 자료형은 `a2a-lf =0.4.2`(a2aproject/a2a-rs)이고, JSON-RPC 분기는 axum으로 직접 한다. 기각: `a2a-server-lf`(자기 task 저장소와 실행 모델), jsonrpsee(자체 서버 스택).
+    `a2a::Task`는 `contextId`를 요구하지만 A2A §4.1.1에서는 선택이다. endpoint는 task를 쓰기만 하고 언제나 context를 넣으므로 crate 자료형을 그대로 쓴다.
+  - 검사 순서: ① MCP와 같은 미들웨어(`inbound::admit`): `{p}`의 호출자 token, `a2a_served_on`, 리스너당 동시 64. 어긋나면 MCP와 같은 401(`WWW-Authenticate: Bearer`).
+    ② `Host`가 리스너 host가 아니면 403, 본문 64 KiB 초과는 413. rmcp가 MCP에서 하는 일을 직접 한다.
+    ③ JSON이 아니면 -32700. 요청 객체 하나(`jsonrpc: "2.0"`, `id`, `method`)가 아니면 -32600(batch와 notification 포함).
+    ④ 버전: `A2A-Version` 헤더, 없으면 같은 이름의 query parameter(§3.6.1). Major.Minor만 보고 `1.0`만 받는다. 빈 값은 0.3이다(§3.6.2). 그 밖은 -32009, ErrorInfo `supportedVersions: "1.0"`.
+    ⑤ 분기. JSON-RPC 오류도 HTTP 200이다. 오류의 `data`는 `google.rpc.ErrorInfo` 하나이다(§9.5).
+  - 메서드: `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`. `SendStreamingMessage`, `SubscribeToTask`, `GetExtendedAgentCard`는 -32004, push 설정 넷은 -32003, 모르는 메서드는 -32601(§3.3.4).
+  - **SendMessage**: `configuration.returnImmediately: true`가 아니면 -32004이다. §3.2.2는 이 값이 없으면 끝 상태까지 기다리라고 하고, 승인은 며칠 걸린다.
+    이 규칙은 `a2a.rs`의 함수 `refuse_blocking`과 상수 `BLOCKING_REFUSED`에만 있다.
+    `role`이 `ROLE_USER`가 아니거나 `messageId`가 비면 -32602. text part만 읽는다(`mediaType`이 없거나 `text/*`). 다른 part는 -32005이고 `url`은 가져오지 않는다.
+    text들은 줄바꿈으로 잇는다. `acceptedOutputModes`에 `text/plain`·`text/*`·`*/*`가 없으면 -32005. push 설정이 있으면 -32003.
+    `taskId`가 있으면 이 호출자의 task가 아닐 때 -32001, 맞으면 -32004이다. 진행 중인 질문에 글을 더하면 소유자가 보는 질문이 바뀌기 때문이다.
+    `messageId`(필수)와 `contextId`(선택)는 1~128자의 보이는 ASCII이고, 아니면 -32602이다. `contextId`는 저장한다. 없으면 context는 request ID이다. 같은 context의 앞 질문은 agent에게 주지 않는다(§3.4.1의 SHOULD를 따르지 않는다).
+    나머지는 `ask`와 같다(engine `send_message`): 필터, 한도, intake 깨우기, 감사 `inbound_asked`(`protocol: "a2a"`, MCP는 `"mcp"`). 같은 호출자의 같은 `messageId`는 처음 task를 돌려주고 한도를 다시 세지 않는다(§3.3.1).
+  - **Task**는 `request_status`의 출력(core `CallerRequest`)만으로 만든다. `working`과 `pending_approval`은 `TASK_STATE_WORKING`과 고정 문구
+    "The owner of this agent approves every answer. Poll GetTask."이고, `answered`는 `COMPLETED`와 artifact `answer`, `declined`는 `REJECTED`, `failed`는 `FAILED`(둘 다 고정 문구), `canceled`는 `CANCELED`이다.
+    `INPUT_REQUIRED`와 `AUTH_REQUIRED`는 쓰지 않는다: 두 상태는 클라이언트에게 행동을 넘기지만(§4.1.3, §7.6), 소유자 승인은 agent 안의 일이다.
+    `history`는 돌려주지 않는다(저장된 질문은 필터를 거친 글이라 소유자의 필터를 드러낸다). agent가 쓴 글과 agent가 끝낸 시각은 어디에도 없다. 상태 시각은 요청 상태의 결정 시각, 없으면 도착 시각이다.
+  - **ListTasks**: 이 호출자의 task만(MCP로 물은 것 포함, 최근 500개), 상태 시각 내림차순(같으면 request ID). `pageSize` 1~100(기본 50, 밖이면 -32602).
+    `pageToken`은 커서 `<상태 시각>:<request ID>`이다. 필터는 `status`, `contextId`, `statusTimestampAfter`(이상)이다. `includeArtifacts`가 참이 아니면 `artifacts`를 뺀다. 마지막 쪽의 `nextPageToken`은 `""`이다.
+  - **CancelTask**: 없거나 남의 task는 -32001. `COMPLETED`·`REJECTED`·`FAILED`는 -32002. `CANCELED`는 같은 task를 다시 돌려준다.
+    §3.3.1은 취소가 멱등이라고 하고, §3.1.5는 "already canceled"도 -32002의 예로 든다. 멱등을 고른 이유: 응답을 잃은 client의 재시도가 오류가 되지 않는다.
+    `WORKING`이면 engine `cancel_request`가 `canceled_at`을 쓰고, 이벤트의 `draft`·`pending` 항목을 `rejected`로 옮기고(`reject_item`은 쓰지 않는다: 소유자의 기각으로 센다), 감사 `inbound_canceled`를 남긴다.
+    drain 중의 취소는 `drain_profile`이 `ingest_event` 뒤에 본다. agent가 만든 항목을 같은 방법으로 옮기고, 답하지 않은 질문의 넘김 항목은 만들지 않는다.
+  - **한도**: `SendMessage`·`GetTask`·`ListTasks`·`CancelTask`는 MCP `get_request`와 같은 `may_read`(호출자당 분당 120, 같은 리스너 state)를 쓴다.
+    `SendMessage`도 세는 이유: 같은 `messageId`의 재전송은 `GetTask`처럼 task를 돌려준다. 새 질문은 그 위에 `ask`와 같은 intake 한도를 센다.
+    한도 초과는 -32000과 ErrorInfo `RATE_LIMIT_EXCEEDED`이다. `ApiError`는 `Invalid`→-32602, `NotFound`→-32001, `NotAllowed`→-32000, 그 밖→-32603(고정 문구)이다.
+  - **Agent Card**(인증 없음, `a2a_served_on`이 아니면 404): `application/json`, CORS `*`, `max-age=300`, `ETag`(server card와 같은 `card_response`).
+    `name`은 title 또는 프로필 ID, `supportedInterfaces`는 JSONRPC 1.0 하나, `capabilities`는 셋 다 false, 보안은 `callerToken`(HTTP Bearer), skill은 `ask` 하나(tags `["questions"]`, examples는 ARD 대표 질문). token과 소유자 이름은 없다.
+  - 적합성: `crates/daemon/tests/a2a.rs`가 §6·§8.5·§9의 JSON 예를 crate 자료형으로 왕복하고, 실제로 내는 Agent Card와 Task를 A2A v1.0.0 JSON schema 사본(`tests/fixtures/a2a-v1.0.0.schema.json`)으로 검사한다.
+    이 schema는 A2A 저장소가 커밋하지 않는 비규범 빌드 산출물이고(`specification/json/README.md`), `required`가 없다. 그래서 필수 필드와 빈 배열은 테스트가 따로 본다.
+- **MCP endpoint** `POST /agents/{p}/mcp`(daemon `inbound.rs`): rmcp `StreamableHttpService`, 세션 없음(`NeverSessionManager`, legacy session mode off, JSON 응답).
+  - 무상태인 이유: 열린 stream은 폐기된 token보다 오래 살고 종료 대기 300초를 붙잡는다. POST 하나가 응답 하나이고, GET은 405이다.
+  - `route_layer`의 미들웨어가 먼저 확인한다: `Bearer` 값이 `caller_tokens`의 유효한 token이고, 그 프로필이 경로의 `{p}`이고, `served_on`이다.
+    하나라도 아니면 같은 본문의 401(`WWW-Authenticate: Bearer`)이다. 통과하면 `Caller`를 request extension에 넣고, 도구 handler가 `http::request::Parts`의 extension에서 읽는다.
+  - rmcp 설정: `allowed_hosts`는 `--*-url`의 host 하나(다른 Host는 403, DNS rebinding 방어), 본문 64 KiB(넘으면 413).
+  - 리스너당 동시 요청 64(semaphore, 넘으면 503). `get_request`는 호출자당 1분에 120번(메모리, 재시작하면 초기화). `ask`의 한도는 위의 intake 행으로 센다.
+    semaphore와 읽기 횟수는 리스너의 `Inbound` state 하나에 있고, A2A endpoint가 같은 state를 쓴다.
+  - 도구 오류(검사 실패, 한도, 남의 ID)는 MCP tool 오류 결과이다. 내부 오류의 문구는 서버 내용을 담지 않는다.
+  - `ask`가 성공하면 `Notify`로 intake task를 깨운다. 그래서 질문은 5초 tick을 기다리지 않는다.
+  - 기각: token만으로 프로필 고르기. card와 ARD 항목은 프로필마다 URL이 필요하다.
+- **Server card** `GET /agents/{p}/mcp/server-card`: MCP server card 확장(snapshot `526201bb`)이 권하는 `<streamable-http-url>/server-card`이다.
+  인증이 없고, `served_on`이 아니면 404이다.
+  - 헤더: `Content-Type: application/mcp-server-card+json`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=300`, `ETag`(본문의 SHA-256).
+  - 본문: `$schema`(`https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`, 스키마의 pattern이 이 값만 받는다), `name`(리스너 host의 label을 뒤집고 `/<프로필>`, 예 `com.example.agents/kim`),
+    `version`(bunsind 버전), `description`, `title`(있으면), `remotes: [{type: "streamable-http", url, headers: [{name: "Authorization", isRequired, isSecret}]}]`.
+    token과 소유자 이름은 넣지 않는다.
+- **ARD 게시**(engine `ard.rs`, crate `bunsin-ard`): `inbound.ard: {publisher, namespace?, agent_name, representative_queries, tags?, trust_manifest?}`.
+  - 운영자의 `--ard-publisher-domain`(반복) 목록 안의 publisher만 게시한다. 목록이 없으면 아무도 게시하지 않는다.
+    `RealBackends::validate`가 저장할 때, `Backends::ard_publishers`로 catalog가 쓸 때 검사한다. 기각: 소유자가 고르기(운영자 host에서 남의 도메인을 주장한다).
+  - `check_config`의 `check_ard`가 자리표시 URL로 프로필의 모든 항목에 `build_entry`를 돌려 MUST 위반을 거부한다. `ard`는 endpoint가 켜져 있어야 한다.
+    대표 질문 수가 2~5 밖이면 SHOULD 위반이라 경고와 함께 싣는다(설계 결정).
+  - **항목의 용어**: 모든 항목에 `@context: "https://agenticresourcediscovery.org/context/v1"`(§4.1 SHOULD), `capabilities`(MCP `["ask", "get_request"]`, A2A `["ask"]`: 호출자가 부를 도구와 skill),
+    `version`(bunsind 버전, server card와 같다), `updatedAt`, `tags`, `trustManifest`가 있다. 뒤의 셋은 값이 있을 때만 있다. `metadata`는 채울 값이 없어 쓰지 않는다.
+    - `tags`: 0~10개, 각 1~40자 한 줄(core `ArdListing::check`). 어기면 저장을 거부한다. CDDL이 `tags: [+ tstr]`이므로 비면 뺀다.
+    - `updatedAt`: 프로필 settings 키 `ard_updated_at`(RFC 3339 UTC, core `time::utc_text`). `set_profile_config`와 `replace_part`가 `inbound`가 바뀐 저장 뒤에 쓴다.
+      설정 밖에 두는 이유: 설정 안에 두면 저장마다 `inbound`가 바뀌어 창의 `Expected` 비교가 깨진다. 키가 없으면(운영자가 만든 뒤 저장이 없으면) 뺀다.
+  - **A2A 항목**: `inbound.a2a`가 켜지면 프로필의 두 번째 항목이다. 새 설정은 없다(identifier는 파생한다).
+    identifier `urn:air:<publisher>:[<namespace>:]a2a:<agent_name>`, type `application/a2a-agent-card+json`, `url`은 같은 리스너의 Agent Card(`/agents/{p}/a2a/agent-card.json`), displayName은 이름 + ` (A2A)`이다.
+    MCP identifier는 그대로이다(Appendix C의 안정성). 끝 이름이 같아 둘 다 agent 이름으로 끝난다.
+    catalog는 `served_on`인 리스너에 프로필을 싣고 `a2a_served_on = a2a && served_on`이므로, A2A 항목은 Agent Card를 제공하는 리스너에만 실린다.
+    중복 검사(`DuplicateIdentifier`)는 두 종류 전체에 쓴다. 예: namespace `a2a`를 고른 프로필의 MCP 항목과 다른 프로필의 A2A 항목. 그 identifier를 가진 항목만 빠지고, 같은 프로필의 다른 항목은 남는다.
+  - **trustManifest**(§4.5): `inbound.ard.trust_manifest`, ARD 멤버 이름 그대로의 JSON 객체.
+    - 저장 검사(core `check_trust_manifest`): `identity`는 빈 글이 아니다. ARD가 이름 붙인 멤버는 `ard.cddl`과 스키마의 형태를 따른다:
+      `identityType`, `signature`는 글, `trustSchema`는 객체(`identifier`, `version`은 글, `governanceUri`는 절대 URI, `verificationMethods`는 글의 배열),
+      `attestations[]`는 글 `type`과 절대 URI `uri`(필수), 글 `mediaType`, `digest`, `provenance[]`는 글 `relation`과 `sourceId`(필수), 글 `sourceDigest`. 다른 멤버는 무엇이든 된다. JSON 글로 16 KiB 이하.
+    - §4.5.1 결속: `build_entry`가 manifest를 두 항목에 싣고, `validate`가 `TrustIdentityMismatch`(MUST)를 낸다. 그래서 다른 domain의 identity는 `check_ard`가 저장을 거부하고,
+      규칙 전에 저장된 설정(또는 운영자가 검사 없이 만든 설정)은 catalog가 두 항목을 모두 뺀다. `identity_domain`은 `spiffe://`, `https://`, `did:web:`만 읽으므로 `did:key`는 거부된다.
+    - 서명은 검증하지 않는다. §4.5.2는 절차를 신뢰 체계(`trustSchema`)에 맡기고 ARD는 정하지 않는다.
+    - 감사 `inbound_settings_changed`는 `enabled`, `scope`, `a2a`, `ard: bool`, `trust_manifest: bool`을 남긴다. manifest의 글은 남기지 않는다.
+    - 창은 manifest를 보이거나 고치지 않는다. 카드가 읽은 값(`track.base`)을 그대로 저장한다. 목록을 끄면 manifest도 사라진다.
+  - `GET /.well-known/ard.json`(외부 리스너마다, 인증 없음, `Access-Control-Allow-Origin: *`): 요청마다 `bunsin_ard::catalog`로 만든다.
+    endpoint가 켜지고 publisher가 허용된 모든 프로필을 넘겨 identifier 중복을 전체에서 검사하고, catalog의 scope 규칙(공개 리스너는 `public`만)이 `served_on`과 같은 것을 고른다.
+    항목의 `url`은 같은 리스너의 card URL이다. 중복 identifier는 두 프로필 모두 빠진다.
+  - 엔진은 `serve_outer`가 등록한 리스너 주소(`add_outer_listener`)로 URL을 만든다.
+  - **robots.txt** `GET /robots.txt`(외부 리스너마다, `text/plain; charset=utf-8`, `Cache-Control: public, max-age=300`):
+    `User-agent: *`, 빈 `Disallow:`, 빈 줄, `Agentmap: <리스너 URL>/.well-known/ard.json`(§5.1 Agentmap).
+  - **rel="ard"**: `serve_outer`의 `map_response` layer가 외부 리스너의 모든 응답(401과 404 포함)에 `Link: <<리스너 URL>/.well-known/ard.json>; rel="ard"`를 붙인다.
+    §5.1은 게시자가 rel="ard"를 내라고 하는데, Bunsin에는 `<link rel="ard">`를 넣을 HTML이 없기 때문이다. 제어 API에는 robots.txt와 `Link`가 없다.
+  - **DNS**: 서버는 레코드를 쓰지 않고 보여 준다. `InboundStatus.dns_records`와 `bunsind inbound`(`dns\t…`)가 항목을 싣는 리스너마다
+    `_entries._agents.<publisher>. 3600 IN SVCB 1 <리스너 host>.`를 보인다(`bunsin_ard::dns_record`). port가 443이 아니면 ` port=<port>`를 붙인다.
+    - SVCB는 host와 port만 담는다. 그래서 리스너 URL에 경로가 있거나 host가 IP 주소이면 레코드 대신 `;`로 시작하는 zone 파일 주석이 이유를 말한다.
+    - 결정할 수 없는 것: §5.1은 레코드 이름과 SVCB만 말하고 SvcParams를 정하지 않는다. 게시 안내 페이지는 `_catalog._agents` TXT와 SRV를 쓴다. PLAN 4.6 규칙대로 본문(SVCB)을 따른다.
+  - 스키마 적합성: `crates/ard/tests/schema.rs`가 `catalog(..)`의 본문과 모든 항목을 스펙의 JSON 스키마 사본(`tests/fixtures/ard-entry.schema.json`,
+    ard-spec commit `9d33ea1`)으로 검사한다. daemon `tests/server.rs`는 두 리스너가 실제로 내는 본문을 같은 스키마로 검사한다.
+    각 `trustManifest`는 `#/$defs/TrustManifest`로 따로 검사한다. 스키마의 속성 이름이 `TrustManifest`라서 `ArdEntry` 검사는 `trustManifest`를 보지 않기 때문이다.
+    검사기는 dev 의존성 `jsonschema` 0.60.2(기본 기능 없음, `format` 검사 켬)이다. 위반은 찾지 못했다.
+    MUST 위반 항목(url과 data 둘 다나 둘 다 없음, type이나 displayName 없음, 잘못된 URN, 상대 URL)은 스키마와 crate의 `validate`가 모두 거부한다.
+  - 남은 차이: 스펙 본문은 `trustManifest`, 스키마는 `TrustManifest`라고 쓴다. crate는 본문을 따른다. 위의 따로 하는 검사가 이 차이를 메운다.
+  - 공식 conformance 도구는 ard-spec 저장소의 `conformance/bin/conformance-test`(Python 3, 표준 라이브러리만)이다.
+    `manifest <파일>` 모드는 네트워크 없이 돈다. `registry <base URL>` 모드는 `GET /agents`, `POST /search`, `POST /explore`의 기본 형태를 본다.
+    Python `jsonschema`가 있으면 같은 스키마 검사도 한다. 이 도구는 CI에서 돌리지 않는다.
+    - 실행 기록(2026-11-21, ard-spec `main` f073b1e, CLI v0.9.1, 커밋 0340bd0의 `bunsind`, loopback 내부 리스너, `--ard-registry internal`):
+      manifest 모드(MCP 항목과 A2A 항목)와 registry 모드 모두 PASS, 오류 0, 경고 0. `jsonschema`가 없어 도구의 스키마 검사는 건너뛰었다.
+  - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 A2A, Agent Card URL(`a2a_served_on`일 때),
+    항목마다(`ard: Vec<ArdStatus>`, MCP 다음 A2A) `media_type`, identifier, 싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고, 그리고 `dns_records`.
+    - 새 필드는 `#[serde(default)]`이다. 이 속성은 키가 없을 때만 돕는다. `ard`는 `Option`에서 목록으로 바뀌었으므로, 옛 서버가 보낸 `null`이나 객체를 새 창이 읽지 못하고,
+      옛 창도 새 서버의 목록을 읽지 못한다. 창과 서버를 함께 배포한다.
+- 아직 없는 것: 호출자용 OAuth.
 
 ## 8. AI 표시
 
-- 권한 표의 모든 규칙은 `outgoing_text`를 반드시 가진다. 값은 `"none"`(다른 사람에게 글을 보내지 않음) 또는 `{"arg": "<인자 이름>"}`이다.
-  이 필드가 없거나 이름이 틀린 규칙은 설정을 읽을 때 거부된다.
-- 엔진은 그 인자에 AI 표시를 붙인다. 인자가 없거나 문자열이 아니면 호출을 만들지 않는다.
-- 한계: 표시는 문자열 인자 하나만 다룬다. `text`와 `blocks`를 함께 받는 도구에서는 `blocks`의 글에 표시가 붙지 않는다.
+- 권한 표의 모든 규칙은 `outgoing_text`를 반드시 가진다. 값은 셋 중 하나이다.
+  - `"none"`: 다른 사람에게 글을 보내지 않는다.
+  - `{"arg": "<인자 이름>"}`: 최상위 인자 하나. 이름에 `.`이 있어도 인자 이름 하나로 본다.
+  - `{"paths": ["text", "blocks.*.text.text"]}`: 여러 자리. 경로는 인자 이름을 `.`로 잇는다. `*`는 목록의 모든 항목이다.
+  이 필드가 없거나 이름이 틀린 규칙은 설정을 읽을 때 거부된다. 빈 `paths`, 빈 단계, `*`로 시작하는 경로는 저장할 때 거부된다.
+- 엔진은 모든 자리에 AI 표시를 붙인다. 제안을 받을 때 붙이고, 승인할 때 그 시점의 규칙으로 다시 붙인다.
+- 자리 하나라도 없거나 문자열이 아니면 호출을 만들지 않는다. `*` 아래에서는 모든 항목에 나머지 경로가 있어야 한다.
+  항목 하나에 경로가 없으면 그 항목의 글은 규칙이 모르는 자리에 있을 수 있기 때문이다. 빈 목록은 글이 없으므로 통과한다.
+  - 이 규칙 때문에 divider처럼 글이 없는 Slack block이 섞인 메시지는 `blocks.*.text.text` 규칙에서 거부된다.
+- 표시는 실패하면 인자를 바꾸지 않는다. 앞 자리에만 표시가 붙은 호출은 생기지 않는다.
+- 창은 최상위 문자열 인자를 여러 개 고를 수 있다. 하나를 고르면 `arg` 형식으로, 둘 이상이면 `paths` 형식으로 저장한다.
+  다른 값 안의 자리를 가리키는 저장된 규칙은 있는 그대로 보여 주고, 저장할 때 유지한다.
+  다른 값 안의 자리는 `bunsind rule-set --text 'blocks.*.text'`나 설정 파일로 정한다.
 - 한계: 규칙에 `"none"`을 잘못 적으면 표시 없이 나간다. 이 선택은 사용자의 책임이다.
 
 ## 9. 서버 API와 프로필 격리
@@ -187,7 +621,16 @@
   다른 프로필에 대한 요청과 없는 프로필에 대한 요청은 같은 오류(401)를 받는다.
 - token은 OS 난수 32바이트로 만든다. 저장소에는 SHA-256 해시만 저장한다. token은 발급할 때 한 번만 출력된다.
 - 서버는 요청마다 token 표를 읽는다. 운영자가 token을 폐기하면 다음 요청부터 거부된다.
-- 프로필 생성과 token 발급은 네트워크 API에 없다. 서버 운영자가 서버에서 명령으로 한다.
+- 프로필 생성과 접속 token 발급은 네트워크 API에 없다. 서버 운영자가 서버에서 명령으로 한다.
+- **호출자 token**은 다르다. 프로필 소유자가 제어 API로 발급하고 폐기한다
+  (`GET`/`POST /v1/profiles/{p}/callers`, `DELETE .../callers/{id}`, `bunsind callers`, `caller-add`, `caller-revoke`, 창의 Agent 화면).
+  - 호출자 token은 그 프로필의 인바운드 endpoint(`ask`, `get_request`)만 연다. 제어 API는 열지 못한다.
+  - 표가 다르다: 접속 token은 `tokens`, 호출자 token은 `caller_tokens`(app.db)에 있다. 그래서 한쪽 token은 다른 쪽 확인에서 언제나 "없는 token"이다.
+    접두어도 다르다(`bsn_`, `bsc_`).
+  - `caller_tokens`의 key는 정수 `id`이다. 해시는 unique 열이고, 어떤 응답에도 나오지 않는다. 목록과 폐기는 `id`로 한다.
+  - 발급한 token은 한 번만 보인다. 폐기는 행을 지우지 않고 `revoked_at`을 쓴다. 지난 요청이 호출자의 이름을 잃지 않게 하기 위해서이다.
+  - 다른 프로필의 `id`로 폐기하면 없는 `id`와 같은 오류(404)이다. label은 한 줄, 1~60자이다(agent에게 질문의 작성자로 보인다).
+  - 감사 로그는 `caller_token_added`(id, label)와 `caller_token_revoked`(id)이다. token 값은 남기지 않는다.
 - 관리자용 token은 없다. 네트워크로는 누구도 다른 사람의 프로필을 읽을 수 없다.
 
 **전송**
@@ -210,6 +653,8 @@
 - **stdio 커넥터**: 서버에서 명령을 실행하므로 기본으로 거부한다. 운영자가 `--allow-stdio-connectors`로 켠다.
   이 옵션은 프로필 격리를 넘는 권한이다: 프로필 소유자가 서버 사용자의 권한으로 아무 프로그램이나 실행할 수 있고,
   그 프로그램은 다른 프로필의 DB와 `master.key`를 읽을 수 있다. 모든 소유자를 신뢰하는 서버에서만 켠다.
+  `--allow-coding-commands`(6절)도 같은 권한을 준다. `--allow-coding`과 `--coding-program`만으로는 운영자가 정한 코딩 CLI만 실행된다.
+  그 CLI도 서버 사용자로, sandbox 없이 돈다. 지시문은 프로필 소유자가 승인한 글이다.
   설정이 바뀌면 그 프로필의 client를 버리고, `rmcp`의 자식 프로세스 transport가 버려질 때 프로그램을 종료한다
   (`rmcp-3.10.0`의 `ChildWithCleanup::drop`). 그래서 설정을 저장해도 프로그램이 남지 않는다.
 - **LLM과 MCP 주소**: 기본 규칙은 `https://` 주소만 받고, `localhost`와 내부 IP 주소(loopback, 사설, link-local 등)로 적힌 host를 거부한다.
@@ -286,8 +731,13 @@
 - stdio 명령은 절대 경로만 받는다.
 - rmcp의 도구 목록 cache를 끈다. cache된 목록은 서버의 변경을 숨겨 pin 검사를 무력하게 만들기 때문이다.
 - 연결은 30초 안에 끝나야 한다. 시간이 지나면 `RealBackends`가 오류를 돌려준다.
+- 도구 호출 하나는 앞의 도구 목록 조회까지 120초(`CALL_TIMEOUT`) 안에 끝나야 한다. 도구가 느릴 수 있어 넉넉히 잡았다.
+  엔진이 호출 전 pin 검사로 따로 부르는 `list_tools`도 같은 한도이다. 그렇지 않으면 목록에 답하지 않는 서버가 이벤트를 막는다.
+  시간이 지나면 요청을 버리고, rmcp가 서버에 `notifications/cancelled`를 보낸다.
+  목록 단계에서 시간이 지나면 오류는 `Transport`이다. 호출 단계에서 지나면 `Unanswered`이고, 승인된 쓰기는 `unknown`이 된다(1절).
+  쓰기 도구라면 서버가 이미 실행했을 수 있다. 엔진은 다른 호출 오류처럼 `failed`로 둔다. OAuth 커넥터도 같다.
 - 커넥터는 권한을 판단하지 않는다. 엔진이 호출 전에 정책과 pin을 검사한다.
-- OAuth는 아직 없다. HTTP transport는 token을 `Authorization: Bearer <token>`으로 보낸다.
+- HTTP transport는 token을 `Authorization: Bearer <token>`으로 보내거나, OAuth로 받은 access token을 보낸다(아래 **OAuth**).
   커넥터 설정의 `token_header`가 있으면 그 헤더가 token을 그대로 담는다(예: `X-API-Key`).
   연결이 스스로 정하는 헤더(`Host`, `Content-Type`, `Mcp-Session-Id` 등)는 거부한다.
   이 검사는 주소 규칙과 같은 자리에 있어서, 설정 파일로 저장할 때와 접속할 때 모두 지난다.
@@ -295,6 +745,58 @@
   LLM token의 헤더는 wire 형식이 정하고, 바꿀 수 없다.
 - HTTP transport는 redirect를 따르지 않는다.
 - 실제 Slack, Jira, Confluence MCP 서버로는 아직 연결해 보지 않았다. 테스트는 로컬 rmcp 서버를 쓴다.
+
+**OAuth**
+
+- 설정: 주소 커넥터의 `oauth: {client_id?, scopes?}`(`OAuthConfig`). 명령 커넥터, REST API 커넥터, token이나 `token_header`와 함께 쓰면 거부한다
+  (`ConnectorSection::check_oauth`, 저장할 때와 접속할 때). client ID와 scope는 공백과 `"`, `\` 없는 출력 가능 ASCII만 받는다.
+  지금은 설정 파일(`config-set`)로만 켠다. 창과 `connector-set`의 저장은 기존 `oauth`를 유지한다.
+- 흐름은 rmcp `auth` 기능(`AuthorizationManager`, `AuthorizationSession`)을 쓴다. 보호 자원 metadata와 인가 서버 metadata를 찾고,
+  `client_id`가 없으면 dynamic client registration(client 이름 `Bunsin`)을 하고, PKCE S256과 `state`로 인가 주소를 만든다.
+- 모든 OAuth 요청(발견, 등록, token, 갱신)은 `PolicyHttp`를 지난다: 보내기 전에 `UpstreamPolicy::check`, redirect 없음, 요청당 30초, 답은 1 MiB까지.
+  rmcp가 같은 origin 안에서 따라가는 발견의 redirect도 이 client로 다시 들어온다. 정책이 거부하면 그 이유가 오류 문구가 된다.
+- 제어 API `POST /v1/profiles/{p}/connectors/{c}/oauth/start`(`redirect_uri`) → 인가 주소, `.../oauth/finish`(`callback_url`).
+  redirect 주소는 http의 loopback(127.0.0.1, ::1, localhost)만 받는다(RFC 8252 7.3).
+  - 인가 주소는 MCP 서버의 metadata가 정하고, 창이 그 주소를 연다. 그래서 서버와 창 모두 `https`와 loopback `http`만 받는다.
+    `smb:`, `file:`, 앱 전용 scheme을 열면 소유자의 Mac에서 프로그램이 실행되기 때문이다.
+  시작한 로그인은 서버 메모리(`SignIns`)에서 10분 기다리고, 프로필당 3개까지이다. 서버를 다시 시작하면 잊는다.
+  finish는 프로필, 커넥터, `state`가 맞는 로그인을 한 번만 꺼낸다. 거부, 틀린 code, 다른 redirect 위치도 그 로그인을 끝낸다.
+  `OAuthFinishBody`의 Debug는 code를 담은 주소를 출력하지 않는다.
+- 창: **Sign in**이 127.0.0.1의 빈 port에 한 번 쓰는 listener(`sign_in.rs`)를 열고 start를 보낸 뒤 브라우저로 인가 주소를 연다.
+  `/callback` 요청 하나를 받고 닫는다. 다른 경로는 404, 10분이 지나면 오류이다.
+  CLI `bunsind connector-oauth`는 인가 주소를 출력하고, 사용자가 붙여 넣은 주소로 finish를 보낸다.
+- credentials(rmcp `StoredCredentials`의 JSON)는 key `OAUTH_<NAME>`으로 봉인하고, origin 자리에 `oauth of <커넥터> for <MCP origin>`을 둔다.
+  주소가 아니므로 token으로 어느 곳에도 보내지지 않는다. finish는 로그인하는 동안 주소의 origin이 바뀌었으면 거부한다.
+  저장한 뒤 그 프로필의 runtime cache를 버린다. 감사 로그는 `oauth_signed_in`, `oauth_sign_in_needed`와 대상만 남긴다.
+- 접속(`RealBackends::oauth_connector`): 현재 주소의 origin에 묶인 credentials만 쓴다. 없거나 다른 origin이면 접속하지 않고 다시 로그인하라는 오류를 돌려준다.
+  접속 전에 access token을 한 번 받는다. 만료되었고 refresh token이 없거나 갱신이 거부되면 같은 오류이다.
+- 갱신: rmcp가 갱신한 credentials는 엔진의 `SecretWriter`(`ProfileWriter`)로 다시 봉인한다. 인가 서버가 refresh token을 거부하면
+  저장된 credentials가 그 값 그대로일 때만 지우고 `oauth_sign_in_needed`를 남긴다. 그 사이 끝난 새 로그인은 지우지 않는다(엔진 전체의 잠금 하나).
+- 상태(`OAuthState`): `signed_in`은 현재 origin의 credentials가 있고, 그 안에 token 응답이 있고, access token이 만료되지 않았거나 refresh token이 있을 때이다.
+  만료는 `token_received_at + expires_in`을 엔진 시계와 비교한다. 둘 중 하나가 없으면 만료되지 않은 것으로 본다(rmcp도 그대로 쓴다).
+  그 외(없음, 다른 origin, 열 수 없음, 만료되고 refresh token 없음)는 `sign_in_needed`이다.
+- `oauth`나 커넥터를 지우면 다음 저장에서 `OAUTH_` credentials를 지운다(`prune_secrets`).
+- 테스트는 로컬 stub 인가 서버(daemon `tests/support/oauth_stub.rs`: metadata, 등록, PKCE 검사, 갱신, 거부)로 엔진, 서버, CLI, 창을 지난다.
+  실제 OAuth 제공자로는 실행하지 않았다.
+
+**REST API 커넥터**
+
+- 설정은 `mcp` 대신 `api` 키를 쓴다: `{"api": {service: slack|jira|confluence, base_url, auth: bearer|basic(기본 bearer), email?}, token_secret}`.
+  `ConnectorSection`은 두 키 중 하나만 받는다(`ConnectorKind`). 저장 형식은 `deny_unknown_fields`이므로 설정 안의 token은 거부된다.
+  이 키가 없던 설정은 그대로 읽히고 그대로 저장된다.
+- `ApiConnector`(`bunsin-connectors::api`)가 서비스마다 고정된 도구 셋을 둔다. 지우는 도구는 없다. 도구 목록은 요청 없이 코드에서 나온다.
+  그래서 도구 승인(pin), 규칙, 읽기 5회 한도, AI 표시, 승인 실행이 MCP 커넥터와 같은 경로를 지난다.
+- 검사(`ApiConfig::check`, `RealBackends::connector_section`): Slack은 bearer만, basic은 email이 필요하고 bearer는 email이 없다.
+  token이 반드시 있어야 하고 `token_header`는 받지 않는다. `base_url`은 `UpstreamPolicy::check`를 지난다. 저장할 때와 접속할 때 모두 지난다.
+- token은 MCP token처럼 key `MCP_<NAME>`으로 봉인되고 `base_url`의 origin에 묶인다. 다른 origin으로 옮기면 token을 다시 넣어야 한다.
+- 이름은 종류를 지킨다: 주소, 명령, REST API 사이를 바꾸려면 먼저 지운다(`same_kind`).
+- 제어 API `PUT /v1/profiles/{p}/connections/connectors/{c}/api`(`ApiConnectorUpdate`), CLI `connector-set --api <service> [--auth basic --email ...]`,
+  창의 종류 **REST API**(서비스, base URL, 인증 방식, email, token). 창은 Slack을 고르면 `https://slack.com/api`를 채운다.
+  REST API 커넥터의 token은 창에서 지울 수 없다. token이 없으면 쓸 수 없기 때문이다.
+- HTTP client는 redirect를 따르지 않는다. 오류 문구에서 token과 basic 인코딩 값을 지운다.
+- 요청 하나는 30초 안에 끝나야 한다(MCP 커넥터의 연결 한도와 같은 `CONNECT_TIMEOUT`). 답하지 않는 서버는 이벤트 처리를 막지 못한다. 연결 뒤의 시간 초과는 `Unanswered`이다(1절).
+- 요청 모양은 공식 API 문서를 따랐다. 테스트는 로컬 stub(daemon `tests/api_connectors.rs`)으로 도구 목록, 승인, 규칙, 읽기, 승인 뒤 쓰기와 AI 표시를 끝까지 돈다.
+  실제 서비스로는 실행하지 않았다.
 
 ## 11. 이벤트 수신 (폴링)
 
@@ -314,13 +816,31 @@
 - 한 번의 실행은 새 이벤트를 최대 10개 처리한다. 나머지는 다음 실행에서 처리한다. 한 프로필은 동시에 한 작업만 폴링한다.
 - 각 poll의 마지막 결과(항목 수, 쓸 수 있는 항목 수, 새 이벤트 수, 오류)는 `status` 명령과 snapshot에 보인다.
   항목은 있는데 쓸 수 있는 항목이 0이면 `mapping`이 결과와 맞지 않는 것이다. 감사 로그에는 상태가 바뀔 때만 기록한다.
-- `bunsind poll-test`는 poll을 한 번 실행해 추출된 이벤트를 보여 준다. 아무것도 저장하지 않고 처리하지 않는다.
+- `bunsind poll-test`와 창의 Test는 poll을 한 번 실행해 추출된 이벤트를 보여 준다. 아무것도 저장하지 않고 처리하지 않는다.
+- 창은 poll을 `polls`/`set_polls`로 읽고 바꾼다(3절). 이 저장은 도구가 승인된 목록에 있는지도 검사한다.
 - 서버는 SIGTERM을 받으면 진행 중인 폴링 주기가 끝난 뒤에 폴링 작업을 끝낸다.
 - 한계: 검색 결과에 더 이상 나오지 않는 항목은 가져오지 못한다. 검색이 최근 항목을 충분히 돌려주도록 인자를 정해야 한다.
 - 한계: 한 ID는 한 번만 이벤트가 된다. 같은 ID로 내용이 바뀌는 Jira 이슈나 Confluence 문서의 변경은 다시 보지 못한다.
   변경마다 다른 ID를 주는 검색(예: 댓글이나 변경 이력)을 써야 한다. `mapping`의 한 경로는 필드 두 개를 합칠 수 없다.
 - 자율 단계의 쓰기는 호출을 시작하기 전에 이벤트를 닫는다. 호출 뒤의 저장 단계가 실패해도 재시도가 같은 글을 다시 보내지 않는다.
 - 한계: 실제 Slack, Jira, Confluence MCP 서버의 검색 도구와 결과 모양은 확인하지 않았다.
+
+**Webhook**(core `webhook`, engine `webhooks.rs`, daemon `webhooks.rs`, 해석과 서명은 `bunsin-connectors::webhook`)
+
+- 설정 `webhooks: {name: {connector, scope(기본 internal), skip_authors}}`. 설계의 `service`, `source`, `event_types`, `mapping`은 두지 않았다.
+  병합된 고정 해석기(`parse_slack`, `parse_jira`)가 이벤트 ID와 종류를 정하고, 서비스는 connector(같은 서비스의 REST API connector)가 정한다.
+  `check_webhooks`: 이름 규칙, connector가 Slack이나 Jira의 REST API connector, 같은 connector에 poll이 없을 것(이벤트 ID가 달라 두 번 처리된다).
+- secret: `PUT /v1/profiles/{p}/webhooks/{name}/secret`(CLI `webhook-secret`, 표준 입력). key `HOOK_<NAME>`, origin 문구 `webhook of <name>`.
+  주소가 아니므로 `RealBackends::token`이 보내지 않는다. `prune_secrets`(이름이 바뀜)가 `ENV_`와 `HOOK_` 중 설정이 이름을 대지 않는 값을 지운다.
+- `POST /hooks/{p}/{name}`(외부 리스너, `scope`가 고른다. `served_on`은 인바운드와 같은 `reaches`): 1 MiB 넘으면 413(`DefaultBodyLimit`).
+  `webhook_target`이 없으면(프로필, webhook, 리스너, secret, origin) 같은 401이다. 서명 확인이 본문 해석보다 먼저이다.
+  Slack은 `verify_slack`(timestamp 300초), Jira는 `verify_atlassian`과 서명된 본문 `timestamp`(ms)가 2시간 안. 시각은 엔진의 clock이다.
+  `url_verification`은 서명이 맞을 때만 `200 text/plain <challenge>`이다.
+- 전달 ID(Slack `event_id`, Jira `X-Atlassian-Webhook-Identifier`, 없으면 이벤트 ID)로 `intake(channel = webhook 이름)`에 `INSERT OR IGNORE`한다.
+  저장 전에 자기 글(`own_post`: poll과 같은 함수)을 버리고 필터를 적용한다. 처리가 끝난 행은 7일 뒤 지운다(`prune_intake`).
+  저장하면 intake task를 깨우고 바로 200을 준다. 처리는 `drain_intake`가 한다(재시작 뒤에도 남는다). 같은 메시지의 다른 전달은 이벤트 key로 한 번만 처리된다.
+- 이벤트는 `outside`이다. notes 변경은 자동 반영하지 않는다. `ask`의 미처리 한도 50은 이제 `bunsin.inbound` 채널만 센다.
+- 한계: 실제 Slack과 Jira가 보내는 요청으로 시험하지 않았다. Jira의 재시도가 원래 본문을 보낸다는 것은 가정이다.
 
 **도구 목록과 승인**
 
@@ -330,7 +850,8 @@
 
 ## 12. 개인정보 필터
 
-- 필터는 다음을 `[REDACTED:<종류>]`로 바꾼다: 이메일, 전화번호, 주민등록번호, 카드번호(검증 숫자가 맞는 것만), 사용자가 정한 정규식 패턴.
+- 필터는 다음을 `[REDACTED:<종류>]`로 바꾼다: 이메일, 전화번호, 주민등록번호, 카드번호(검증 숫자가 맞는 것만), 사용자가 정한 정규식 패턴,
+  사용자가 정한 단어(`terms`, `[REDACTED:TERM]`).
   새 프로필은 네 가지가 모두 켜져 있다.
 - **필터를 거치지 않은 글은 LLM에 가지 않는다.** 필터는 두 곳에서 적용한다.
   1. 이벤트를 저장하기 전: 본문, 작성자, thread. 그래서 지워진 값은 DB와 산출물 파일에도 없다.
@@ -342,7 +863,15 @@
 - 감사 로그에는 지운 개수만 종류별로 기록한다. 지운 값은 로그, 오류, `poll-test` 출력 어디에도 쓰지 않는다.
 - LLM에는 자리표시자가 지워진 개인정보라는 점을 알린다. 도구 인자에 자리표시자가 들어 있는 제안은 거부하고 한 번 다시 요청한다.
 - GPUI app의 개인정보 설정은 `privacy` 전용 API만 쓴다. app이 설정 전체를 되돌려 보내면, app이 모르는 항목이 지워질 수 있기 때문이다.
-- **한계: 패턴 기반이다.** 사람 이름, 주소, 계좌번호는 찾지 못한다. 필요한 것은 사용자 정의 패턴으로 추가한다.
+- **단어 목록(`terms`)**: 사용자가 적은 이름, 주소 같은 글자 그대로의 단어이다.
+  - 대소문자를 가리지 않고, 단어 경계 없이 글 어디에서나 일치한다. 한국어 이름 뒤에 조사나 `님`이 붙어도 지우기 위해서이다.
+    대신 짧은 단어는 다른 단어의 일부도 지운다(`Kim`은 `Kimball`의 앞부분을 지운다).
+  - 모든 단어를 정규식 하나로 컴파일한다(`regex::escape`). 긴 단어를 앞에 두어, 한 단어가 다른 단어의 앞부분일 때 긴 쪽이 이긴다.
+  - 한도: 200개, 앞뒤 공백을 뺀 2자에서 100자. 한 글자는 너무 많은 글을 지우므로 거부한다.
+  - 단어는 개인정보이다. 오류 문구는 단어를 순서로만 가리키고, 감사 로그 `privacy_changed`에는 단어의 개수만 남는다.
+    단어 자체는 프로필 설정에 저장된다.
+  - 이름을 찾으려고 거르지 않은 글을 다른 곳(LLM, 외부 서비스)에 보내지 않는다. 목록에 없는 이름은 지워지지 않는다.
+- **한계: 패턴과 목록 기반이다.** 목록에 없는 사람 이름과 주소, 계좌번호는 찾지 못한다. 필요한 것은 단어나 사용자 정의 패턴으로 추가한다.
 - 한계: 필터는 들어오는 글에만 적용된다. LLM이 스스로 만들어 낸 글은 거르지 않는다.
 
 ## 13. 여러 단계 처리 (읽고 나서 제안)
@@ -364,17 +893,73 @@ agent는 이벤트만 보고 답하지 않는다. 필요한 사실을 `read` 도
   엔진은 이벤트를 닫고 승인함에 이유를 적은 항목을 넣는다. 재시도하면 같은 비용을 다시 쓰기 때문이다.
   토큰 예산은 LLM을 호출하기 전마다 확인한다.
 - **재현 평가는 도구를 실행하지 않는다.** 오늘 검색하면 사용자의 실제 답이 나와 비교가 무의미해지기 때문이다.
+  같은 이유로 재현에는 notes와 교정 기록도 넣지 않는다(4절).
 - **`read` 등급의 뜻**: 아무것도 바꾸지 않고, 자기 서비스 밖으로 아무것도 보내지 않는 도구이다.
   뒤의 읽기는 앞에서 읽은 글을 인자에 담을 수 있다. 그래서 통제할 수 없는 URL을 가져오는 도구는 `read`로 두면 안 된다.
-- 한계: 무엇을 읽을지는 LLM이 정한다. 문서의 색인이나 관련도 순위는 없다.
+- 한계: 무엇을 읽을지는 LLM이 정한다. notes에는 관련도 순위와 검색이 있다(15절). 커넥터의 문서에는 색인이 없다.
+
+**ARD 도구 `bunsin.ard/{search, explore, list, resolve}`**(core `ard`, ard `search.rs` `resolve.rs` `jsonld.rs` `html.rs`, daemon `ard_search.rs` `fetch.rs`)
+
+- 설정: `ard_registries: [{name, url}]`, `ard_domains: ["acme.com" | {domain, catalog}]`(`ProfileConfig`, 둘 다 `#[serde(default)]`).
+  `ard_domains`는 20개까지, 소문자 도메인 이름, 같은 domain 두 번은 거부(core `check_domains`). 창은 아직 `ard_domains`를 고치지 않는다(`config-set`).
+- 앞의 셋은 registry가 있을 때, `resolve`는 domain이 있을 때 보인다. 목록은 core `tool_specs` 하나가 정하고, 엔진의 도구 안내, 엔진의 읽기 허용, connector의 `list_tools`가 같은 목록을 쓴다.
+- 엔진에는 HTTP client가 없으므로 `RealBackends`가 runtime에 내장 connector `bunsin.ard`를 넣는다. 이름의 `.` 때문에 소유자 connector와 겹치지 않는다.
+- 엔진은 이 도구들을 notes 읽기처럼 규칙 없이 허용한다(보이는 도구만, 읽기 허용 단계에서만). 실행과 결과 처리는 connector 읽기와 같아서
+  필터, 인용, 감사 `read`, 산출물 `read_result`를 지나고 커넥터 읽기 5회 한도에 든다. 정지 스위치는 다른 읽기처럼 막지 않는다.
+- 찾은 자원은 부를 수 없다. 소유자가 connector로 더하고 도구를 승인해야 한다.
+
+registry 도구(ard `SearchClient`, hop 한도 0, redirect를 따르지 않음)
+
+| 도구 | 인자 | 요청 |
+|---|---|---|
+| `search` | `text`, `registry?`, `filter?`(10키×10값, 값 200자), `context?`(prefix→IRI 10개), `page_token?` | `POST <url>/search`, `federation: "none"`, `pageSize: 5` |
+| `explore` | `facets`(1~5), `registry?`, `text?`, `filter?`, `context?` | `POST <url>/explore`. 501은 읽을 수 있는 오류 |
+| `list` | `registry?`, `type?[]`, `publisher?[]`, `display_name?`, `created_after?`, `updated_after?`, `order_by?`, `page_token?` | `GET <url>/agents?filter=…&pageSize=5` |
+
+- `filter`의 값 하나는 한 값 배열로 보낸다(§5.3.1). `context`는 받은 entry의 `@context`와 같은 규칙으로 검사한다(아래 JSON-LD). 결과의 `pageToken`은 agent에게 `page_token`으로 준다.
+- `list`의 식은 `ListFilter::expression`이 만든다: `type = 'a,b' AND publisherId = 'acme.com' AND displayName = 'x' AND createdAfter > '…'`.
+  Appendix A와 OpenAPI 예가 함께 허용하는 범위이다. 값의 `'`·`,`는 식을 바꾸므로 거부한다. 시각은 core `time::parse_utc`가 읽는 RFC 3339만, `order_by`는 네 필드와 `DESC`의 enum이다.
+- referral을 따르지 않는다. referral은 소유자가 아니라 registry가 고른 registry이다(5절 federation은 계속 `none`). 테스트가 목록 안의 registry를 가리키는 referral로 확인한다.
+- search·list 결과는 identifier, displayName, type, url, description, capabilities만 넘기고, search는 score와 source를 더한다. `score`는 글일 뿐이고 `Policy::decide`에는 score 입력이 없다.
+
+`resolve {domain}`(D5: 인자는 `ard_domains`의 enum이고, connector가 다시 목록과 비교한다)
+
+- domain 해석(ard `resolve`, crawl과 같은 코드): ① `https://<domain>/.well-known/ard.json` ② `https://<domain>/`의 `Link` 헤더와 `<body>` 앞 `<link rel="ard">`
+  ③ `https://<domain>/robots.txt`의 `Agentmap:` ④ ②·③이 알린 주소 최대 10개(깊이 1). 세 단계를 모두 돈다(§5.1의 MUST 둘). href는 redirect 뒤 문서 주소 기준이다.
+  - 404와 410은 "거기 없음"이다(`nothing_there`). ①이 404·410이면 source가 아니다. 링크나 `Agentmap`만으로 게시한 domain도 된다(§5.1).
+    ②·③이 404·410이면 알린 것이 없다. 다른 오류면 `Resolution::discovery_error`(처음 오류 하나)가 되고, 알린 source를 모르므로 해석이 불완전하다.
+    crawl은 이것을 읽기 실패로 센다(18절). `resolve` 도구는 `the resolution of <domain> is incomplete: …`로 실패하고, 그 글은 실패한 읽기로 LLM에 간다.
+    catalog 주소와 알린 주소의 404는 그대로 읽지 못한 source이다(주소를 적은 쪽이 거기 있다고 했다).
+  `{domain, catalog}`는 해석을 건너뛰고 catalog 하나만 가져온다(설계 9절 A1).
+- 문서: `{`로 시작하면 manifest이고 항목을 하나씩 따로 읽는다(한 항목이 깨져도 나머지는 산다). 그 밖은 HTML이다.
+  후보 항목이 1,000개(`MAX_SOURCE_CANDIDATES`)를 넘으면 source 오류 `TooManyEntries`이고 항목을 하나도 읽지 않는다(manifest와 HTML 모두).
+  HTML은 html5ever 0.27 tokenizer로 읽는다. sink가 `script`·`style`·`title`·`textarea` 등에서 raw text 상태를 알려 주므로, 주석·script 문자열 속 link와 블록은 나오지 않는다.
+  `application/ld+json` 블록은 20개, 각 64 KiB까지이다. 객체, 배열 원소, `@graph` 원소(바깥 `@context`를 물려받음) 중 `@context`에 기반 URL이 있거나 `@context` 없이 identifier·displayName·type이 있는 것이 후보이다.
+- 항목 수락(`accept_entry`, crawl과 공유): 64 KiB 이하, 지원하는 `@context`, `validate()`의 MUST 위반 없음, URN publisher가 결속 domain과 같음(대소문자 무시).
+  결속 domain은 해석한 domain이거나 소유자가 catalog와 함께 적은 domain이다. 가져온 host가 아니므로 CDN 주소도 된다. 상위 domain은 받지 않는다(공개 suffix 목록 없이 `evil.github.io`가 `urn:air:github.io:…`를 주장하는 것을 막는다).
+  대가: 다른 domain의 항목은 올바라도 거부된다. 거부 이유는 enum `RejectReason`이다(crawl이 이유별로 센다).
+- JSON-LD 최소 전개(ard `jsonld`, D6): 기반 context는 crate 안 사본(`ard.context.jsonld`)이다. 원격 context는 가져오지 않는다.
+  지원: 기반 URL, 용어·prefix 정의(절대 IRI, 알려진 prefix의 compact IRI, `{"@id"}`에 `@type`·`@container`), 그 배열. 최상위 키를 용어, compact IRI, 절대 IRI, `@vocab` 순서로 IRI로 바꾸고 값은 바꾸지 않는다.
+  거부: 다른 원격 context, `null`, `@vocab`·`@base`·`@import`·`@protected` 등 키워드, scoped context, `@reverse`, `@nest`, 기반 용어나 `ard`의 재정의, 기반 용어를 다른 이름으로 쓴 키(`ard:trustManifest` 등. `validate()`는 제 이름만 읽으므로 그 규칙을 피한다), 같은 IRI로 전개되는 두 키(한 값이 다른 값을 가린다).
+- agent가 보는 것: 항목 20개까지. core 용어는 원래 이름, `publisher`(URN에서), `trustIdentity`("(not verified)"), 다른 namespace 용어는 전개한 IRI 키로(항목당 20개). 값은 500자에서 자른다.
+  다른 namespace를 IRI로 보이는 이유: 게시자의 prefix가 core 용어처럼 보이지 않게. 거부 항목은 identifier와 이유만, 읽지 못한 출처는 주소와 Bunsin 문구의 오류만 보인다.
+- 보지 않는 것: `ai-catalog.json`(§5.1 MAY), DNS(SVCB에 항목 출처 주소가 없다). trust manifest는 검증하지 않는다(§4.5.2).
+
+주소 규칙(daemon `validate`, build, `fetch.rs`)
+
+- registry 주소, `https://<domain>/`, catalog는 `UpstreamPolicy::check`를 저장할 때와 만들 때 지난다. registry 이름은 `check_registries`가 검사한다(connector 이름 규칙, 중복 없음).
+- `fetch.rs`의 `Fetcher`: 처음 주소와 redirect hop마다 `UpstreamPolicy::check`, redirect 3번, 요청 10 s, 응답 1 MiB, 해석 30 s.
+  운영자 host 목록이 없으면 reqwest `dns_resolver`가 이름의 내부 주소를 버리고, 남는 주소가 없으면 연결을 거부한다. 이 client는 proxy를 쓰지 않는다. proxy가 이름을 직접 조회하면 resolver를 지나지 않기 때문이다.
+  이유: 이 주소는 소유자가 아니라 제3자가 고른다. ard는 HTTP 규칙을 갖지 않고 `Fetch` trait만 정한다. 그래서 해석 순서와 수락 규칙을 네트워크 없이 시험하고, crawl이 같은 코드를 쓴다.
 
 ## 14. 설정 저장의 충돌 검사
 
 - 저장 요청은 "화면이 읽었던 값"을 함께 보낼 수 있다(`Expected::Value`). 서버의 현재 값이 다르면 서버는 `Conflict`로 거부하고 아무것도 저장하지 않는다.
   개인정보 설정, LLM endpoint, 커넥터 각각이 자기 값만 비교한다. 다른 항목의 변경은 충돌이 아니다.
 - 창은 충돌을 경고하고 두 가지를 제안한다: 서버 값을 다시 읽기, 그래도 저장하기(검사 없이 저장).
-- 좁은 범위의 저장(개인정보, 연결, 도구 승인)은 설정을 "읽은 그대로일 때만 교체"한다. 같은 설정에서 출발한 두 변경이 둘 다 저장되어 하나가 조용히 사라지는 일이 없다.
+- 좁은 범위의 저장(개인정보, 연결, 도구 승인, 3절의 부분 저장 카드)은 설정을 "읽은 그대로일 때만 교체"한다. 같은 설정에서 출발한 두 변경이 둘 다 저장되어 하나가 조용히 사라지는 일이 없다.
 - 한계: token만 바뀐 경우는 비교에 보이지 않는다. 명령줄과 `config-set`은 검사 없이 저장한다.
+  예외는 권한 규칙 명령(`rule-set`, `rule-remove`)이다. 이 명령은 읽은 표를 함께 보낸다(3절).
 
 ## 15. agent의 notes (LLM wiki)
 
@@ -406,8 +991,15 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 **읽기**
 
 - 실시간 이벤트의 프롬프트에는 notes의 색인(한 줄에 한 쪽, 수정 후 지난 날수 포함)이 인용 데이터로 들어간다.
+  - 순서: 이벤트 본문의 검색어와 일치한 후보 페이지를 점수순으로(4절의 검색), 나머지를 최근 수정순으로 둔다.
+  - 최대 60줄이다. 넘치면 "N more page(s) not listed" 한 줄을 붙인다.
+  - 기각: 상위 페이지의 본문을 프롬프트에 미리 넣기. 매번 token이 들고, "읽음"이 아니어서 그 페이지의 변경안이 버려진다.
 - agent는 내장 도구 `bunsin.wiki/read`로 페이지를 읽는다. 이 ID는 커넥터 도구의 ID가 될 수 없다(커넥터 이름에는 `.`을 쓸 수 없다).
   이 도구는 권한 표와 pin 검사를 거치지 않고 엔진이 직접 처리한다. 프로필 자신의 페이지만 읽는다.
+  읽으면 열 `wiki_pages.last_read_at`에 시각을 적는다. 점검(고아 페이지 찾기)이 쓸 값이다.
+- 내장 도구 `bunsin.wiki/search {query}`는 상위 10쪽의 slug, 제목, 요약을 인용 데이터로 돌려준다. LLM은 검색어만 고른다.
+  검색은 notes 읽기 한도 5번에 든다. 페이지를 읽은 것이 아니므로 그 페이지를 고칠 근거가 되지 않는다.
+- `bunsin.wiki/`로 시작하는 도구는 모두 출처가 아니다. 그렇지 않으면 notes가 자기 자신을 근거로 삼는다.
 - **페이지는 데이터이다.** 승인된 페이지의 문장도 인용 블록 안에만 들어간다. 시스템 프롬프트는 바뀌지 않고, 권한은 정책 표가 결정한다.
 - 승인되지 않았거나 거부된 변경안은 어떤 프롬프트에도 들어가지 않는다.
 - LLM에는 notes가 오래됐을 수 있으니, 중요한 사실은 도구로 다시 확인하라고 알린다.
@@ -417,6 +1009,11 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 **사용자의 직접 편집**
 
 - 사용자는 API, 명령(`wiki-list`, `wiki-show`, `wiki-set`, `wiki-delete`), 창의 Notes 화면으로 페이지를 쓰고 지운다.
+- 사용자의 검색은 `wiki_search`(API `POST .../wiki-search`, 명령 `wiki-search`)이다.
+  agent의 `bunsin.wiki/search`와 같은 엔진 함수(`notes.rs`의 `find_pages`)와 같은 저장소 질의(`search_wiki`)를 쓴다. 그래서 순위가 같다.
+  다른 점은 두 가지다. 사용자는 맞는 페이지를 모두 받는다(agent는 10쪽). 쓸 낱말이 없는 검색어는 `Invalid`로 거부한다(agent는 "없음"을 받는다).
+  사용자의 검색은 agent의 읽기가 아니므로 감사 로그에 `read`로 남지 않고 `last_read_at`도 바꾸지 않는다.
+  경로를 `wiki/search`로 두지 않았다. `search`는 올바른 slug라서 `GET wiki/{slug}`와 겹친다.
 - Notes 화면의 규칙:
   - 입력한 글은 Save를 눌러야 서버로 간다. 새로고침은 입력한 글을 덮어쓰지 않는다.
     입력하지 않은 화면은 서버의 새 revision을 따라간다.
@@ -428,51 +1025,246 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   - 바꾼 것이 없으면 Save는 아무것도 저장하지 않는다. 저장하면 새 revision이 사용자 이름으로 생기기 때문이다.
   - agent가 쓴 페이지를 사용자가 고쳐 저장하면 작성 주체가 사용자로 바뀐다. 출처 목록은 남는다. 화면이 이를 미리 알린다.
   - 글자 수 같은 한도는 서버만 검사한다. 창은 서버의 거부 사유를 그대로 보여 준다.
-  - 변경 이력 화면은 없다. `wiki-history`를 쓴다.
+  - 목록 위의 검색란과 Search 버튼은 `UiCommand::SearchNotes`를 보낸다. bridge는 검색어를 `UiState::note_search`에 두고, 새로고침마다 다시 검색한다.
+    목록은 그동안 검색 결과만 순위대로 보인다. "Show all"(`ClearNoteSearch`)이나 빈 검색어는 검색을 끝낸다. 프로필을 바꾸어도 끝난다.
+    거부된 검색어는 연결 실패가 아니다. 창은 서버의 거부 사유를 검색 결과 자리에 보인다.
+  - History 버튼은 열린 페이지의 revision 목록을 보여 준다(`wiki_history`). 보이는 동안 새로고침마다 다시 읽는다.
+    고른 revision의 본문은 읽기 전용이다. "Put this text into the fields"는 옛 본문을 입력란에 넣을 뿐이고,
+    저장은 평소의 Save가 화면이 읽은 revision으로 한다. 저장하지 않은 입력 내용이 있으면 옛 본문을 넣지 않는다.
 - 사용자가 페이지를 고쳐도 그 페이지의 출처 목록은 남는다. 사용자가 새로 만든 페이지에는 출처가 없다.
   사용자가 고친 문장은 남아 있는 출처와 맞지 않을 수 있다. 작성 주체가 owner이면 본문은 사용자가 쓴 것이다.
 - 사용자가 쓴 글은 저장할 때 거르지 않는다. 프롬프트에 인용할 때 필터를 거친다.
 - 편집은 출발한 revision을 보낼 수 있고, 다르면 `Conflict`가 된다.
 
-**아직 없는 것**
+**점검**
 
-- 주기적 점검(모순, 오래된 내용, 고아 페이지 찾기).
-- 변경안을 승인 없이 자동 반영하는 단계.
-- 지정한 Confluence 스페이스나 Jira 프로젝트를 미리 읽어 넣는 기능.
+- 설정 `notes: {stale_days, lint_every_hours, lint_conflicts}`(모두 `serde(default)`, 기본은 꺼짐). `stale_days`나 `lint_every_hours`가 0이면 저장을 거부한다.
+  `lint_every_hours`가 있는데 `stale_days`도 `lint_conflicts`도 없으면 거부한다. 볼 것이 없는 점검은 `lint_notes`가 거부한다.
+- stale: `stale_days`일보다 오래(경계 초과) 고치지 않은 페이지. orphan: 다른 페이지의 제목, 요약, 본문에 slug가 낱말로 없고
+  (앞뒤에 영숫자나 `-`가 없음), `last_read_at`(없으면 마지막 변경)부터 `stale_days`일보다 오래 지난 페이지. 계산은 core `lint`(IO 없음).
+- 모순(`lint_conflicts`): 페이지마다 제목, 요약, 본문의 검색어(4절의 `query_terms`)를 만들고, `df ≤ max(2, N/4)`인 드문 검색어를
+  2개 이상 함께 쓰는 쌍을 공유 수 순서로 10개까지 고른다. 기각한 쌍은 고르지 않는다. 쌍의 페이지를 필터를 거쳐 `<data>`로 인용하고
+  LLM에 한 번 묻는다(purpose `notes_check`). 답 `{conflicts: [{a, b, detail}]}`에서 보낸 쌍만 받고, 이유는 필터를 거쳐 300자로 자른다.
+  기각: 모든 쌍을 묻기. 300쪽이면 44,850쌍이다.
+- 결과는 표 `lint_findings(id, run_at, kind, slugs, detail, state)`에 둔다. 점검은 `new` 결과를 한 transaction으로 새 결과로 바꾼다.
+  `dismissed` 결과는 남고, 같은 종류와 같은 slug의 결과는 다시 넣지 않는다. 모순 LLM 호출이 실패하면 아무것도 바꾸지 않고 거부한다(오류는 필터를 거친다).
+- 점검 시각은 설정 표의 `notes_checked_at`에 시작할 때 적는다. `background_tick`은 `lint_every_hours`가 지났을 때만 점검한다.
+  그래서 실패한 점검도 다음 간격까지 다시 돌지 않는다. 점검은 밖에 아무것도 보내지 않으므로 정지 스위치와 상관없이 돈다.
+- 점검은 페이지를 고치지 않는다. 감사 `notes_checked`는 종류별 개수와 보낸 쌍의 수만 남긴다.
+- API: `lint_notes`, `lint_findings`(`new`만, 찾은 순서), `dismiss_finding`(`POST .../lint-notes` 등, 같은 이름의 `bunsind` 명령).
+  창의 Notes 화면은 오른쪽 열의 **Checks** 카드에 결과, "Check now", 결과마다 "Dismiss"를 보인다. 열은 스크롤한다.
+
+**자동 반영**
+
+- 설정 `notes.auto_apply`(기본 false)가 켜지면 `file_wiki_changes`가 변경안을 `pending`으로 넣은 뒤 같은 요청에서
+  `approve_wiki_change`를 부른다. 그래서 출처 규칙, 읽은 뒤에만 고치기, revision 비교, 한 번만 적용이 승인과 같다.
+- 조건: 정지 스위치가 꺼져 있다. 새 페이지이거나 마지막 작성 주체가 agent이다(owner 페이지는 덮어쓰지 않는다).
+  이벤트의 `channel`이 `owner`이다.
+- `InboundEvent.channel`은 이벤트가 온 길이다. 기본값은 `outside`이고(fail closed), `serde(skip_deserializing)`이라서
+  요청 본문이나 저장된 payload의 값은 읽지 않는다. `owner`는 access token을 확인한 `POST .../events` route만 붙인다.
+  poll의 추출(core `poll::extract`)은 `outside`를 붙인다. 검색은 소유자가 정했지만, 찾은 글은 다른 사람이 썼기 때문이다.
+  webhook 해석기(`bunsin-connectors::webhook`)도 `outside`를 붙인다.
+  인바운드 호출자는 아무것도 붙이지 않아도 `outside`이다. 다른 사람이 직접 넣는 이벤트는 agent를 조종하려고 쓸 수 있으므로,
+  그 변경안은 언제나 소유자를 기다린다. dedupe key에는 들지 않는다.
+- 저장된 이벤트를 다시 읽으면 `outside`이다. 다시 읽는 곳은 교정 기록의 task(`corrections.rs`)뿐이고, 자동 반영은 처리 중인 이벤트의 값만 보므로 동작이 바뀌지 않는다.
+  엔진 안에서 `EngineApi::ingest`를 직접 부르는 코드는 `owner`를 스스로 붙여야 한다.
+- 감사 `wiki_change_applied`에 `auto`가 붙는다. 저장하지 못하면(예: 그 사이 소유자의 편집) 항목은 `pending`으로 남고 감사 `wiki_change_auto_apply_failed`가 남는다.
+- 결정 기록(4절)에는 들지 않는다. 기각: owner 페이지 덮어쓰기.
+
+**미리 읽기**
+
+- `preload_notes{tool, args}`(`POST .../preload-notes`, `bunsind preload-notes`, 창의 "Read into the notes"): 소유자가 시작한다.
+  도구는 `read` 규칙이 있고 `decide`가 `Execute`여야 한다(poll의 `fetch`, 원칙 후보의 read 출처와 같은 `read_once`). 한 번 부른다.
+- 고정된 요청만 담은 이벤트(source `bunsin.preload`, 작성자는 소유자, `channel` `outside`)를 만들고, 그 읽기를 첫 읽기로 넘겨
+  `propose`를 돌린다(LLM 호출 로그의 purpose `preload`). 결과(필터를 거치고 20,000자로 자른 글)는 이벤트 뒤에 `<data source="tool-result">`로만 들어간다.
+  요청 글과 섞지 않는다. 변경안의 출처 규칙이 그대로 지켜진다: 출처는 이벤트 줄과 그 도구의 인자이다. LLM은 평소의 한도 안에서 더 읽을 수 있다.
+- 변경안은 `file_wiki_changes`로 승인함에 가고, 자동 반영은 하지 않는다. 소유자가 시작했지만 읽은 글은 다른 사람이 썼기 때문이다.
+  두 겹으로 막는다: 이벤트의 `channel`이 `outside`이고, `file_wiki_changes`가 source `bunsin.preload`의 변경안을 자동 반영하지 않는다. `ignore`가 아닌 제안은 실행하지 않고 감사 `preload_proposal_skipped`(종류만)를 남긴다.
+  제안이 실패하면(수리 뒤에도 형식 오류, LLM 오류) 거부하고 아무것도 넣지 않는다. 감사 `notes_preloaded`는 도구와 변경안 수만 남긴다.
+- 실제 Confluence나 Jira 검색 도구로는 실행해 보지 않았다.
+
+**아직 없는 것**
 - 사용자가 출처 문서의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
-- 창에서 페이지를 열람하고 편집하는 화면. 창은 승인함에서 변경안만 보여 준다.
-- 한계: 쪽수가 많아지면 색인이 프롬프트를 크게 만든다. 쪽수는 300으로 제한한다.
+- 한계: 쪽수는 300으로 제한한다. 색인은 60줄까지만 프롬프트에 들어가고, 나머지는 검색으로 찾는다.
 
 ## 16. 구현 상태 (PLAN 6절의 단계 기준)
 
 | 항목 | 상태 |
 |---|---|
-| 정책, 제안 검증, 승인 상태 머신, AI 표시, pin 검사 | 구현, 테스트 있음 |
+| 정책, 제안 검증, 승인 상태 머신, AI 표시(여러 자리, 다른 값 안의 자리), pin 검사 | 구현, 테스트 있음 |
 | 프로필별 저장소, 산출물 저장, 추가 전용 감사 로그 | 구현, 테스트 있음 |
 | 엔진 파이프라인(중복 제거, 수리 1회, 정책, 승인, 1회 실행, 정지 스위치, 재현 평가의 제안 단계) | 구현, 테스트 있음 |
 | LLM 어댑터, MCP 커넥터, 코딩 위임 실행기 | 구현, 로컬 stub으로만 테스트 |
-| GPUI 창(접속 화면, 프로필, 승인함, 감사 로그, 정지 스위치, notes 열람과 편집) | 구현, headless 테스트만. 실제 창은 띄워 보지 않았다. |
-| `bunsind serve`(HTTPS 서버), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. CI가 Linux(ubuntu)에서 빌드와 테스트를 돌린다. |
+| 코딩 위임(설정, 내장 도구, 언제나 승인, 운영자 플래그와 root 검사, 백그라운드 실행, 결과 산출물과 Draft) | 구현, 테스트 있음(core, 엔진, 서버, 창). 서버 테스트는 임시 git 저장소와 `/bin/sh`를 쓴다. 실제 Claude Code와 Codex는 실행하지 않았다. |
+| GPUI 창(접속 화면, 프로필, 정지 스위치, Inbox와 감사 로그, Notes, Permissions, Agent, Learning, Settings, Setup) | 구현, headless 테스트와 offscreen 그림만. 실제 창은 띄워 보지 않았다. |
+| `bunsind serve`(HTTPS 서버, 제어·내부·공개 리스너), 접속 token, 원격 client, `bunsind`의 원격 명령 | 구현, 테스트 있음. CI가 Linux(ubuntu)에서 빌드와 테스트를 돌린다. Linux에서 서비스로 실행해 보지는 않았다. |
 | 이벤트 폴링, 실패한 이벤트의 재시도, 도구 목록 조회와 승인 | 구현, 가짜 커넥터로만 테스트 |
-| 개인정보 필터(기본 4종과 사용자 정의 패턴) | 구현, 테스트 있음 |
-| 연결 설정과 token의 서버 저장(암호화, 주소 결합) | 구현, 테스트 있음 |
-| webhook 방식의 이벤트 수신 | 없음 |
-| 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 구현, 테스트 있음. 업무지식의 색인과 순위는 없음. |
+| 개인정보 필터(기본 4종, 사용자 정의 패턴, 단어 목록) | 구현, 테스트 있음 |
+| 연결 설정과 봉인 저장소(`secrets.rs`: 소유자가 넣은 token, 비밀 환경 변수, OAuth credentials, webhook secret. XChaCha20-Poly1305, 키 파일이나 Keychain, origin 결합) | 구현, 테스트 있음. 키의 Keychain 저장은 가짜 Keychain으로만 테스트했다. |
+| webhook 방식의 이벤트 수신(Slack, Jira Cloud: 서명, url_verification, 전달 ID 중복 제거, intake, 자기 글, 설정 검사, 봉인된 secret) | 구현, 테스트 있음(core, store, 서버, CLI 명령, 창). 실제 Slack과 Jira로는 보내 보지 않았다. |
+| 읽기 도구의 결과를 LLM에 되돌리는 여러 단계 처리 | 구현, 테스트 있음. 커넥터 문서의 색인과 순위는 없음. |
 | 설정 저장의 충돌 검사 | 구현, 테스트 있음 |
-| agent의 notes(제안, 승인, 색인, 내장 읽기 도구, 사용자 편집, 내보내기) | 구현, 테스트 있음. 점검과 자동 반영은 없음. |
-| 원칙 후보 추출, 재현 평가의 채점 | 없음 |
-| 승인 화면의 초안 편집 | 엔진과 CLI에만 있음. 창에는 없음. |
-| 구성 마법사, API 커넥터, 비밀 저장소 | 없음 |
-| ARD 게시와 검색, 인바운드 MCP 서버 | 없음 |
-| 승인 후 실행 전에 중단된 항목의 재개 | 없음. 항목은 `approved` 또는 `executing` 상태로 남고 다시 실행되지 않는다. |
+| LLM 호출 로그와 사용량 합계(`llm-usage`) | 구현, 테스트 있음. 창에는 없음. |
+| 권한 규칙의 명령(`rules`, `rule-set`, `rule-remove`) | 구현, 테스트 있음 |
+| agent의 notes(제안, 승인, 관련도 순 색인, 내장 읽기와 검색 도구, 사용자 편집과 검색, 내보내기, 점검, opt-in 자동 반영, 미리 읽기) | 구현, 테스트 있음. 모순 점검은 실제 LLM으로 실행해 보지 않았다. |
+| 재현 평가(사례 저장, 백그라운드 실행, LLM 없는 채점, 소유자의 통과 기준, opt-in LLM 심판) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). 창은 Setup 화면에서만 사례를 추가한다. 통과 기준과 심판은 Settings 화면에서 정한다. |
+| 원칙 후보(추출, 거부 규칙, 채택, 기각) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). `read` 출처는 명령과 Setup 화면에 있다. |
+| 교정 기록(필터, AI 표시 없음, 유사 작업 검색, 목록, 폐기) | 구현, 테스트 있음(엔진, 서버, CLI, 창) |
+| 승인 화면의 초안 편집 | 구현, 테스트 있음(엔진, CLI, 창) |
+| REST API 커넥터(Slack, Jira, Confluence의 고정 도구, 설정, 저장, CLI, 창) | 구현, 테스트 있음(core, connectors, 엔진, 서버, CLI, 창). 로컬 stub으로만 테스트 |
+| MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
+| 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
+| 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
+| A2A v1.0 endpoint(JSON-RPC, Agent Card, 버전 검사, SendMessage·GetTask·ListTasks·CancelTask, 취소, messageId 중복 제거, MCP와 같은 한도) | 구현, 테스트 있음(core, store, 엔진, 서버). 서버 테스트는 실제 TCP에서 직접 만든 JSON-RPC 요청을 보낸다. 스펙 예의 왕복과 v1.0.0 JSON schema 검사를 통과한다. 다른 A2A client로는 해 보지 않았다. |
+| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구의 manifest 모드를 통과했다(7절). |
+| ARD 도구(search·explore·list·resolve 내장 읽기 도구, referral 없음, domain 해석과 결속 규칙, JSON-LD 최소 전개, 제3자 주소 fetcher, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, ard, 서버, 창의 registry 목록 편집). 로컬 stub registry와 stub catalog로만 테스트. 도메인만 적은 해석은 서버 테스트가 loopback으로 닿지 못해(https 443) ard의 메모리 web으로만 테스트. 창에는 `ard_domains` 편집이 없다. |
+| ARD registry(운영자 플래그, `registry.db`, 자기 catalog 수집, seed crawl과 일정, JSON-LD 전개로 맞추는 필터, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. crawl은 loopback의 catalog 주소 seed로만 테스트했다. 도메인만 적은 seed의 해석은 ard의 메모리 web으로만 테스트했다. 공식 conformance 도구의 registry 모드를 통과했다(7절). |
+| 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
+| 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
+| 배포 패키지(Linux 서버 tarball과 systemd unit, macOS `Bunsin.app`, CI artifact) | 구현. macOS에서 두 스크립트를 실행해 확인. unit은 systemd로 시작해 보지 않았고, 앱은 서명하지 않았다. |
 
 ## 17. 미해결
 
-- 사용자의 LLM endpoint가 쓰는 wire 형식.
 - 코딩 백엔드의 편집 허용 설정(예: Claude Code의 permission mode, Codex의 sandbox 설정)을 opt-in으로 둘지.
 - 평문 `env`에 이미 들어 있는 비밀 값을 비밀 변수로 옮기는 기능. 지금은 사용자가 다시 입력하고 평문 줄을 지운다.
 - 설정 파일이나 CLI로 비밀 변수의 값을 넣는 방법. 지금은 창에서만 입력한다.
-- 서버의 systemd 실행 설정.
-- MCP 서버의 인증 방식. OAuth이면 headless 환경의 흐름이 필요하다.
+- OAuth를 창이나 `connector-set`에서 켜는 방법. 지금은 설정 파일로만 켠다.
 - 임베딩 검색의 제공 여부.
-- 라이선스.
+- macOS 앱의 bundle ID와 Developer ID 서명의 주체. 지금은 서명하지 않고, bundle ID는 로컬용 기본값이다. 앱 아이콘도 없다.
+- 인바운드 호출자의 OAuth. 지금은 호출자 token만 있다.
+
+## 18. ARD registry
+
+운영자가 켜면 서버는 ARD Registry(§5.3)가 된다. index에는 서버 자신의 catalog와 운영자가 적은 seed의 항목이 들어간다.
+
+- **켜기**: `bunsind serve --ard-registry internal|public`. 플래그가 없으면 registry 경로가 없다(404).
+  `internal`은 내부 리스너, `public`은 두 리스너에 둔다. 판단은 `reaches(scope, listener)` 하나이다(engine `registry_serves`).
+  기각: 소유자 설정. registry는 서버 전체의 서비스이고, crawl은 서버의 네트워크를 쓴다.
+- **경로**(daemon `registry.rs`): 리스너 루트의 `POST /search`, `POST /explore`, `GET /agents`. base URL은 `--*-url`이다.
+  이유: SVCB 레코드는 host와 port만 담고 경로 자리가 없다. `/ard/...` 같은 경로는 기각했다.
+  - 인증은 없다. 호출자 token은 프로필의 것이고, 접속 token은 외부 리스너에서 쓰지 않는다.
+  - 리스너마다 1분에 600 요청까지 답한다(메모리, 재시작하면 초기화). 넘으면 429이다.
+  - 본문은 64 KiB까지 읽는다. 넘으면 400이다.
+  - 모든 응답에 `Access-Control-Allow-Origin: *`를 붙인다. 브라우저의 preflight(`OPTIONS`)에는 204로 답한다.
+  - 오류 본문은 Appendix B의 `{errorCode, message}`이다. status는 400, 404, 429, 500이다. 내부 오류의 문구는 서버 내용을 담지 않는다.
+- **index**: `<data>/registry.db`(store `RegistryStore`). app.db는 요청마다 token 표를 읽으므로 crawl 쓰기와 겹친다. agent.db는 프로필의 것이다.
+  ```
+  sources(id, url UNIQUE, kind seed|self, scope,
+          next_fetch_at, last_ok_at, failures, last_error)
+  entries(id, source_id, identifier, on_internal, on_public, publisher, display_name,
+          media_type, entry, terms, search_text, first_seen_at, changed_at, UNIQUE(source_id, identifier))
+  entries_fts(search_text) USING fts5(tokenize='trigram', content='entries')
+  refusals(source_id, identifier, reason)
+  ```
+  - source의 종류와 범위가 행을 보는 리스너를 정한다(`RegistryStore::replace`).
+    `self:internal`은 (on_internal 1, on_public 0), `self:public`은 (0, 1), 내부 seed는 (1, 0), 공개 seed는 (1, 1)이다.
+    내부 catalog가 공개 프로필도 내부 주소로 싣기 때문에, `self:public`은 내부 리스너에 보이지 않는다.
+  - 읽기에 성공하면 그 source의 행과 거부를 통째로 바꾼다. 같은 identifier는 `first_seen_at`을 유지하고, 항목 JSON이 바뀔 때만 `changed_at`을 옮긴다.
+    `last_error`에는 Bunsin 문구와 HTTP status만 쓴다. 루트 페이지나 `robots.txt`를 읽지 못한 오류는 그 주소(seed domain 아래)도 쓴다. seed의 `url` 열은 플래그에 적은 글 그대로이다.
+  - 같은 identifier가 여러 source에 있으면 응답에는 하나만 나온다. self source의 행이 이기고, 다음은 작은 source ID이다.
+  - 한 요청은 index의 잠금을 한 번 잡고 모든 읽기(`visible`, `term_hits`, `bodies`)를 한다(store `RegistryStore::read`가 주는 `RegistryRead`).
+    이유: 자기 catalog의 갱신은 행을 지우고 새 ID로 다시 넣는다. 읽기 사이에 갱신이 끼면 앞에서 얻은 ID가 사라져 빈 결과나 500이 된다.
+    기각: 바뀌지 않은 행의 ID를 유지하는 UPSERT. 빠진 identifier, 7일 만료, seed 정리는 행을 정말 지우므로 같은 문제가 남는다.
+    대가: 요청을 계산하는 동안 같은 index의 다른 요청(두 리스너 모두), crawl과 갱신의 쓰기, `inbound`를 바꾼 저장의 갱신이 기다린다. 요청의 비용은 아래 필터 한도가 묶는다.
+  - 항목 수락: 모든 항목이 `bunsin_ard::accept_entry`(3절)를 지난다. JSON 64 KiB 이하, 지원하는 `@context`, MUST 위반 없음(SHOULD 위반은 받는다),
+    URN publisher가 결속 domain과 같음. 그 뒤 engine `index_source`가 identifier 중복, source당 500개, seed 전체 10,000개를 센다.
+    자기 catalog의 행은 10,000개에 들지 않고, 자기 catalog는 `index_full`로 거부되지 않는다. 그 수는 서버의 프로필이 정한다.
+    이유: seed가 index를 채워도 서버 자신의 새 프로필과 registry 항목은 실려야 한다.
+    거부 이유는 고정 낱말이다: `invalid`, `too_large`, `unsupported_context`, `other_publisher`, `duplicate`, `source_full`, `index_full`.
+    자기 catalog의 항목은 자기 URN publisher에 결속한다. 운영자의 `--ard-publisher-domain`이 이미 publisher를 정하기 때문이다.
+  - `terms`는 최상위 키를 IRI로 바꾼 사본이다(값은 그대로). `accept_entry`가 `bunsin_ard::expand_terms`(3절의 최소 전개)로 만든다.
+    `type`은 `ard:mediaType`이다. 항목의 `@context`가 묶은 prefix의 키는 그 IRI가 된다.
+  - `search_text`는 `displayName`, `description`, `representativeQueries`, `capabilities`, `tags`의 글이다.
+  - 프로필 저장이 `inbound`를 바꾸면(engine `stamp_inbound`) 자기 catalog를 바로 다시 넣는다. 그래서 리스너에서 내린 프로필이 다음 tick(최대 60초)까지 남지 않는다.
+    다시 넣기가 실패해도 저장은 성공이다. registry task가 1분 안에 다시 넣고 그 실패를 stderr에 쓴다.
+    자기 catalog의 읽기와 저장은 한 번에 하나씩 한다(`Registry::refreshing`). 그렇지 않으면 task가 저장 전에 읽은 catalog를 저장의 갱신 뒤에 써서, 내린 프로필이 다음 tick까지 돌아온다.
+    이 순서는 결정적인 테스트가 없다.
+- **seed**(9절 A1): `--ard-registry-source <seed>`(내부 리스너)와 `--ard-registry-public-source <seed>`(두 리스너, `--ard-registry public`일 때만). 둘 다 반복한다.
+  - `<seed>`는 `<domain>`이거나 `<domain>=<URL>`이다. 앞의 것은 3절의 domain 해석(ard.json, `Link`·`<link rel="ard">`, robots `Agentmap`, 알린 주소)이다.
+    뒤의 것은 그 주소 하나만 가져온다(JSON manifest 또는 HTML 속 JSON-LD). 두 형태 모두 결속 domain은 `<domain>`이다. URL의 host로 결속하는 규칙은 없다.
+  - 시작할 때 모든 seed를 검사한다: 형태, 개수(200 이하, 자기 catalog는 세지 않는다), 두 번 적은 seed(한 플래그든 두 플래그든), 처음 가져올 주소(`https://<domain>/` 또는 URL)의 `UpstreamPolicy::check`.
+    하나라도 어기면 키를 읽기 전에 시작하지 않는다. 운영자 host 목록이 있으면 그 host만, 없으면 https와 공개 주소만 받는다.
+  - 시작할 때 seed 표를 플래그와 맞춘다(`set_registry_seeds`). 빠진 seed나 범위가 바뀐 seed는 행, 항목, 거부를 잃는다. 새 seed는 바로 때가 된다.
+- **수집**(daemon `crawl.rs`): registry task 하나가 시작할 때 한 번, 그 뒤 60초마다 돈다. 서버가 멈추면 다른 task와 함께 멈춘다(`Poller::stop`).
+  1. registry가 닿는 리스너마다 `ard_catalog(scope)`로 `self:<scope>`의 행을 바꾼다.
+  2. 때가 된 seed를 하나씩 `Fetcher::resolve`(daemon `fetch.rs`, 해석 30 s, 요청 10 s, 응답 1 MiB, redirect 3번, hop마다 주소 규칙)로 읽는다.
+     stop 신호가 오면 다음 seed 앞에서 멈춘다. 한 tick에 한 seed는 한 번만 읽는다.
+     tick이 60초를 넘으면 새 seed를 시작하지 않는다. 남은 seed는 다음 tick에 읽으므로, 1단계는 seed가 많아도 늦지 않는다.
+  - 한 해석이 가져온 entry source는 seed 아래에 둔다(자기 행이 없다). 이유: 해석 한 번이 그 source를 모두 30초 한도 안에서 가져오고, 결속 domain도 seed의 것이다.
+    따로 행을 두면 일정과 실패를 두 번 세야 한다.
+  - 모든 entry source가 읽혀야 성공이다. 그 항목으로 seed의 행을 통째로 바꾸고(`crawl_succeeded`), 1시간 뒤에 다시 읽는다.
+    JSON manifest가 아니고 항목 markup도 없는 페이지는 source 오류 `NoEntries`이다(`{"entries": []}`는 의도한 빈 catalog라서 성공이다).
+    기각: source 하나만 읽혀도 성공. 점검 페이지(200)나 잠깐 내려간 source 하나가 seed의 항목을 바로 지워 7일 보존이 소용없다.
+  - 후보 항목이 1,000개(`MAX_SOURCE_CANDIDATES`, source당 500개의 두 배)를 넘는 source는 source 오류 `TooManyEntries`이다. 그 source의 항목은 하나도 읽지 않는다.
+    이유: 1 MiB manifest `{"entries":[{},{},…]}`는 약 35만 개의 거부 행을 registry 잠금 아래 한 transaction으로 매시간 쓰게 한다.
+    한계: domain seed는 source가 11개까지이므로 거부 행은 seed 하나에 11,000개까지 남는다.
+  - domain seed의 해석(3절): `/.well-known/ard.json`이 404나 410이면 source가 아니다(§5.1은 링크나 `Agentmap`만으로 게시하는 것도 허용한다).
+    루트 페이지나 `robots.txt`가 404·410 말고 다른 오류(transport, 시간 초과, 5xx, 그 밖의 4xx, 1 MiB 초과, 주소 규칙 거부)로 답하면
+    `Resolution::discovery_error`가 된다. 그 페이지가 알린 source를 모르므로 읽기 실패이다(daemon `read_entries`).
+    기각: 그 오류를 "알린 것 없음"으로 읽기. 루트 페이지가 잠깐 503이면 링크로 알린 source의 항목이 바로 지워진다.
+    대가: `robots.txt`가 늘 403이거나 루트 페이지가 1 MiB를 넘는 domain은 ard.json이 멀쩡해도 색인되지 않는다. 운영자는 `registry-status`의 `last_error`로 보고 `<domain>=<URL>` 형태로 바꿀 수 있다.
+  - source 하나라도 실패하거나, 알리는 페이지를 읽지 못했거나, source가 없거나, 해석이 30초를 넘으면 실패이다(`crawl_failed`). 행은 그대로 두고, n번째 연속 실패 뒤에는 1 h × 2^(n−1)(최대 24 h) 뒤에 다시 읽는다.
+    마지막 성공이 7일 전이거나 더 오래되었으면 그 seed의 항목을 지운다. 다음 성공이 다시 채운다.
+  - 실패는 stderr가 아니라 `registry-status`의 `failures`와 `last_error`로 보인다.
+- **순위**: core `query_terms` → store `term_hits`(store `lib.rs`. profile 저장소와 registry가 함께 쓴다) → core `rank_scored`.
+  - s는 행이 맞은 term의 `ln(1+N/df)` 합이다. s_max는 보이는 행 중 어느 행엔가 있는 query term의 가중치 합이다.
+    score는 정수 `round(100·s/s_max)`이고 1~100이다. 모든 term을 가진 행은 100이다.
+  - cutoff는 `rank`의 희귀 term 규칙이다. `rank`는 `rank_scored`를 부르므로 규칙은 한 곳에 있다.
+    Search와 Explore는 같은 함수(engine `matched`)로 일치 집합을 만든다(§5.3.3). 쓸 수 있는 term이 없는 text는 둘 다에서 아무것도 맞지 않는다.
+  - score는 관련도이다. 신뢰 판단이 아니다(§5.3.2).
+- **경계**: `N`, `df`, `s_max`, cutoff, identifier 중복 제거, facet count, `total`은 모두 그 리스너가 보는 행으로만 센다.
+  `term_hits`의 SQL이 보는 열로 거르고, 엔진이 중복 제거한 행과 다시 교차한다.
+  이유: 전체 index로 세면 공개 호출자가 `<공개 term> <탐침 term>`의 score 변화로 내부 항목에 그 낱말이 있는지 1비트씩 알아낸다.
+- **요청**(ard `query.rs`): OpenAPI의 `additionalProperties: false` 객체(`SearchRequest`, `ExploreRequest`, `QueryModel`, `ExploreFacetRequest`)에
+  모르는 멤버가 있으면 400이다. `resultType`은 열려 있다.
+  - 필터 키와 facet field는 기반 context와 `query.@context`로 IRI가 된다(`Context::with(..).expand_key`, 3절).
+    그래서 query의 `okf:taxonomy`는 같은 IRI를 `openknowledge:`로 묶은 항목에 맞는다(§5.3.1).
+    받는 것: core 용어, `ard:` 이름, 묶인 prefix의 이름, `@vocab`으로 가는 이름, `publisher`(URN에서), 절대 IRI(`scheme://` 형태),
+    `trustManifest.`·`metadata.`·`data.` 아래의 글자 그대로 경로. 그 밖의 점 경로, 묶이지 않은 prefix, 키워드(`id` 등)는 400이다(§5.3.1 MAY).
+    3절의 전개가 받지 않는 `query.@context`(원격 context, `@vocab`, 기반 용어의 재정의 등)도 400이다.
+  - 필터 값은 문자열이나 문자열 배열이다(빈 배열은 400). 한 키 안은 OR, 키 사이는 AND이다. 항목의 값이 배열이면 원소 하나만 맞아도 된다.
+  - 필터는 키 20개(`MAX_REQUEST_FILTER_KEYS`), 키마다 값 50개(`MAX_REQUEST_FILTER_VALUES`)까지이다. 넘으면 400 `INVALID_ARGUMENT`이다.
+    이유: 인증 없는 요청 하나가 보이는 행마다 모든 키를 맞춰 본다. 한도가 요청 하나의 CPU를 묶는다. facet 한도(1~10개)는 그대로이다.
+    `publisher`는 대소문자를 무시하고, 그 밖은 문자열이 정확히 같아야 한다. 숫자와 참·거짓은 JSON 글자로 비교한다.
+  - `/search`: `query.text`가 필요하다. `federation`의 `auto`, `referrals`, `none`은 모두 자기 index만 찾고(§5.4, 상류가 없다), 응답에 `referrals`가 없다.
+    그 밖의 값은 400이다. `pageSize`는 기본 10, 100을 넘으면 100, 1보다 작으면 400이다.
+    `pageToken`은 base64url(offset, 요청 digest)이고, offset은 1,000까지이다. 다른 요청의 token은 400이다.
+    결과는 저장한 항목에서 `representativeQueries`와 항목이 스스로 적은 `score`·`source`를 빼고(engine `shown`), 정수 `score`와 `source`(리스너 base URL)를 더한 것이다.
+    `/agents`의 item도 같은 세 멤버를 뺀다. 이유: crawl한 게시자가 registry의 점수나 출처인 척하지 못하게.
+    `shown`에서 빼므로 이미 저장된 행에도 듣는다. 저장한 `terms`에는 남으므로 그 이름의 facet과 필터는 게시자의 값을 본다(게시자의 용어일 뿐 registry의 값으로 보이지 않는다).
+  - `/explore`: facet 1~10개, 같은 field 두 번은 400. `limit`은 기본 20(최대 100), `minCount`는 기본 1이다.
+    한 항목은 값마다 한 번 센다. bucket은 count 내림, value 오름 순서이다. `otherCount`는 잘린 bucket의 count 합이고, 잘린 것이 없으면 없다.
+    세 endpoint를 모두 구현하므로 501은 쓰지 않는다.
+  - `/agents`: Appendix A와 OpenAPI 예가 함께 허용하는 부분 문법만 받는다. 나머지와 모르는 parameter, 반복 parameter는 400이다.
+    ```
+    filter = clause *(" AND " clause)
+    clause = ("displayName" / "type" / "publisherId") " = " quoted
+           / ("createdAfter" / "updatedAfter") " > " quoted
+    quoted = "'" value *("," value) "'"      ; 쉼표 = OR (Appendix A)
+    ```
+    `displayName`은 대소문자를 무시한 부분 일치이다. `createdAfter`는 `first_seen_at`, `updatedAfter`는 `changed_at`과 비교한다(게시자의 `updatedAt`은 없거나 틀릴 수 있다).
+    시각은 RFC 3339이거나 날짜(`2026-01-01`은 그날 0시 UTC)이다.
+    `orderBy`는 `displayName|name`, `createdAt|created_at`, `updatedAt|updated_at`, `identifier`와 `ASC|DESC`이고, 기본은 `identifier ASC`이다.
+    쪽은 기본 20, 최대 100이다. 응답은 `{items, total, pageToken?}`이다.
+- **자기 소개 항목**: registry가 닿는 리스너의 `ard.json`(engine `ard_catalog`)에 `urn:air:<domain>:registry:bunsin`, `application/ai-registry+json`,
+  `url` = 리스너 주소를 싣는다. `<domain>`은 `--ard-publisher-domain` 중 리스너 host와 같거나 host의 label 끝부분인 가장 긴 것이다(`agents.acme.com` → `acme.com`).
+  맞는 것이 없으면 싣지 않는다. 이유: 운영자의 허용 목록을 우회하지 않는다. 프로필이 같은 identifier를 이미 쓰면 이 항목을 싣지 않는다.
+- **DNS**: 서버는 레코드를 쓰지 않고, 시작할 때 stderr에 보인다. 자기 소개 항목이 있는 리스너마다
+  `_search._agents.<domain>. 3600 IN SVCB 1 <host>. ; the registry of the <리스너> listener`이다. port가 443이 아니면 `<host>.` 뒤에 ` port=<port>`를 붙인다.
+  리스너 주소에 경로가 있으면 레코드 대신 경고를 낸다.
+- **운영자 명령** `bunsind registry-status --data-dir <dir>`: `registry.db`를 직접 연다(엔진 잠금이 필요 없다).
+  source마다 `source<TAB>url<TAB>kind<TAB>scope<TAB>N entries<TAB>last ok <RFC 3339|never><TAB>next <RFC 3339|-><TAB>N failures<TAB><last_error|->` 한 줄을 쓰고,
+  그 뒤 거부 이유마다 `refused<TAB>url<TAB>reason<TAB>count`를 쓴다.
+- crawl한 글은 LLM에 가지 않는다. `trustManifest`는 검증하지 않은 주장으로 결과와 필터에 그대로 둔다.
+- **테스트**: core `rank_scored`. store `registry.rs`(시각 유지, 보는 리스너, 중복, term hits, 상태, seed 표와 일정). ard `query.rs`(`unknown_members_and_unbound_prefixes_get_400`,
+  `a_query_prefix_matches_an_entry_that_bound_the_same_iri_under_another_prefix`, `the_list_filter_accepts_only_the_appendix_a_subset`). daemon `crawl.rs`(seed 형태와 시작 검사). 엔진 `tests/registry.rs`(`scores_are_integers_and_a_full_match_scores_100`, `explore_and_search_share_the_cutoff`,
+  `the_public_listener_never_sees_internal_rows`, `an_internal_row_changes_no_public_score_count_or_total`, `self_entries_name_the_card_of_their_listener`).
+  daemon `tests/registry.rs`(`answers_follow_the_openapi_shapes`는 응답을 `ard.openapi.yaml` 응답 스키마의 JSON 사본으로 검사한다. 경로, 400, 429, task, CLI `registry_status_lists_sources_and_counts`,
+  `a_crawl_indexes_a_manifest_and_in_page_markup`, `refused_entries_are_reported_by_reason`, `a_failing_source_keeps_its_entries_for_seven_days`,
+  `a_catalog_seed_binds_its_named_domain_not_the_host`(9절 A1: Bunsin A의 ard.json을 `acme.test=`로 읽으면 넣고 `other.test=`로 읽으면 `other_publisher`로 거부), `a_bad_registry_source_stops_the_start`,
+  `a_source_with_more_than_1000_candidates_is_a_failed_read`).
+  엔진 `tests/registry.rs`의 `a_request_reads_one_state_of_the_index_while_the_own_catalogs_refresh`(갱신과 요청을 함께 돌려 모든 답이 같은지 본다),
+  `the_own_catalogs_take_no_room_of_the_seeds`, `a_save_that_changes_inbound_updates_the_registry_at_once`, `a_crawled_entry_shows_no_score_or_source_of_its_own`.
+  ard `resolve.rs`의 `a_domain_without_ard_json_publishes_through_links_and_agentmaps`, `a_root_page_or_robots_txt_that_cannot_be_read_leaves_the_sources_unknown`,
+  `a_source_may_list_at_most_1000_entries`. daemon `crawl.rs`의 `read_entries` 테스트. domain 형태는 loopback으로 시험할 수 없으므로(443 포트) 이 두 층으로 확인한다.
+- **아직 없는 것**: `trustManifest`의 검증, crawl이 찾은 `application/ai-registry+json` 항목의 federation(항목으로만 싣는다).
