@@ -364,7 +364,12 @@ pub fn request_status(outcome: Option<&str>, canceled_at: Option<i64>, items: &[
         return found(RequestStatus::Working, None, None);
     }
     // Only an approved answer can fail in the run, so this state follows the owner's approval.
-    if let Some(item) = items.iter().find(|item| item.state == ApprovalState::Failed) {
+    // A failed item with a retry copy (`retry_of`) is not the end: the copy decides.
+    let retried = |failed: &InboxItem| items.iter().any(|copy| copy.retry_of == Some(failed.id));
+    if let Some(item) = items
+        .iter()
+        .find(|item| item.state == ApprovalState::Failed && !retried(item))
+    {
         return found(RequestStatus::Failed, None, Some(item.updated_at));
     }
     let answer = items.iter().find_map(|item| match &item.body {
@@ -490,6 +495,36 @@ mod tests {
         let mut failed = escalation(ApprovalState::Failed);
         failed.updated_at = 700;
         assert_eq!(at(Some("executed"), &[late, failed]), Some(700));
+    }
+
+    #[test]
+    fn a_failed_answer_with_a_retry_copy_follows_the_copy() {
+        use ApprovalState::{Executed, Failed, Pending};
+        let status = |items: &[InboxItem]| request_status(Some("pending_approval"), None, items);
+        let failed = reply("Friday.", Failed);
+        let copy = |state| InboxItem {
+            id: 2,
+            retry_of: Some(failed.id),
+            ..reply("Friday.", state)
+        };
+        // The owner chose to retry: the copy waits, so the request is not over.
+        assert_eq!(
+            status(&[failed.clone(), copy(Pending)]).status,
+            RequestStatus::PendingApproval
+        );
+        // The copy ran: the caller gets the answer.
+        let done = status(&[failed.clone(), copy(Executed)]);
+        assert_eq!(
+            (done.status, done.answer.as_deref()),
+            (RequestStatus::Answered, Some("Friday."))
+        );
+        // A copy of another item does not hide this failure.
+        let other = InboxItem {
+            id: 3,
+            retry_of: Some(99),
+            ..reply("x", Pending)
+        };
+        assert_eq!(status(&[failed, other]).status, RequestStatus::Failed);
     }
 
     #[test]

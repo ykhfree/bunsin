@@ -470,7 +470,7 @@
     행마다 `ingest_event`를 부른다. `Failed`나 `Err`이면 `60초 × 시도 수` 뒤에 다시 한다(이벤트는 `events`에서 열린 채이다).
     `MAX_EVENT_ATTEMPTS`+1번째 호출은 포기 항목을 넣고 `Failed`를 돌려주므로, 그 뒤 `outcome`을 `failed`로 쓴다. 그 밖의 결과는 `Outcome`의 이름이 `outcome`이 된다.
   - SIGTERM이면 intake task도 폴링 task처럼 진행 중인 주기를 끝내고 멈춘다(`Poller::stop`).
-- **요청 상태**(`request_status(outcome, canceled_at, items)`, 처음 맞는 규칙): `canceled_at`이 있으면 `canceled`. `outcome`이 없으면 `working`. 항목이 failed이면 `failed`.
+- **요청 상태**(`request_status(outcome, canceled_at, items)`, 처음 맞는 규칙): `canceled_at`이 있으면 `canceled`. `outcome`이 없으면 `working`. 항목이 failed이고 그 항목의 재시도 사본(`retry_of`)이 없으면 `failed`(사본이 있으면 사본이 정한다).
   답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
   - 같은 함수가 결정 시각(`decided_at`)도 정한다: 취소 시각, 또는 상태를 정한 항목의 `updated_at`. 결정이 없으면 없다.
     A2A가 이 시각을 보이고, 없으면 질문이 도착한 시각(`received_at`)을 보인다. 그래서 agent가 일을 끝낸 시각은 어디에도 없다.
@@ -485,7 +485,8 @@
     이유: 자율 답은 호출자 token을 읽기 도구 전체에 대한 질의 창구로 만든다. 7절 "승인함을 우회하지 않는다"를 지킨다.
   - 규칙은 class `write`, outgoing text `{arg: "text"}`여야 한다. 다른 `bunsin.inbound/*` 도구는 없다.
   - `decide`는 이 도구에 pin 검사를 하지 않는다(명세가 코드에 있다). `execute`는 connector를 부르지 않는다. intake 행이 있는지 보고 항목을 `executed`로 옮긴다(감사 `inbound_answered`).
-    행이 취소되었으면 항목을 `failed`로 옮기고 감사 `inbound_reply_canceled`를 남기며, 답을 보내지 않는다. 취소는 `approved`·`executing` 항목을 옮기지 못하기 때문이다(취소와 승인이 겹치면 취소가 이긴다).
+    행이 취소되었으면 항목을 `failed`로 옮기고 감사 `inbound_reply_canceled`를 남기며, 답을 보내지 않는다. 취소는 `approved`·`executing` 항목을 옮기지 못하기 때문이다.
+    답의 `executed` 이동(`finish_answer`)과 취소(`cancel_intake`)는 각각 SQL 문장 하나에서 상대의 쓰기를 확인한다. 그래서 먼저 쓴 쪽이 이기고, 요청은 답과 취소를 함께 갖지 않는다.
   - 그래서 AI 표시, 정지 스위치, 수정의 교정 기록, 1회 실행이 다른 쓰기와 같다. 기각: 새 `InboxBody` variant(CLI와 app이 전부 match한다).
 - 인바운드 질문에서 나온 notes 변경은 자동 반영하지 않는다(channel outside, source 검사 둘 다).
 - **A2A endpoint**(daemon `a2a.rs`, A2A v1.0 JSON-RPC binding): `POST /agents/{p}/a2a`, `GET /agents/{p}/a2a/agent-card.json`.
@@ -516,7 +517,8 @@
     §3.3.1은 취소가 멱등이라고 하고, §3.1.5는 "already canceled"도 -32002의 예로 든다. 멱등을 고른 이유: 응답을 잃은 client의 재시도가 오류가 되지 않는다.
     `WORKING`이면 engine `cancel_request`가 `canceled_at`을 쓰고, 이벤트의 `draft`·`pending` 항목을 `rejected`로 옮기고(`reject_item`은 쓰지 않는다: 소유자의 기각으로 센다), 감사 `inbound_canceled`를 남긴다.
     drain 중의 취소는 `drain_profile`이 `ingest_event` 뒤에 본다. agent가 만든 항목을 같은 방법으로 옮기고, 답하지 않은 질문의 넘김 항목은 만들지 않는다.
-  - **한도**: `GetTask`·`ListTasks`·`CancelTask`는 MCP `get_request`와 같은 `may_read`(호출자당 분당 120, 같은 리스너 state)를 쓴다. `SendMessage`는 `ask`와 같은 intake 한도이다.
+  - **한도**: `SendMessage`·`GetTask`·`ListTasks`·`CancelTask`는 MCP `get_request`와 같은 `may_read`(호출자당 분당 120, 같은 리스너 state)를 쓴다.
+    `SendMessage`도 세는 이유: 같은 `messageId`의 재전송은 `GetTask`처럼 task를 돌려준다. 새 질문은 그 위에 `ask`와 같은 intake 한도를 센다.
     한도 초과는 -32000과 ErrorInfo `RATE_LIMIT_EXCEEDED`이다. `ApiError`는 `Invalid`→-32602, `NotFound`→-32001, `NotAllowed`→-32000, 그 밖→-32603(고정 문구)이다.
   - **Agent Card**(인증 없음, `a2a_served_on`이 아니면 404): `application/json`, CORS `*`, `max-age=300`, `ETag`(server card와 같은 `card_response`).
     `name`은 title 또는 프로필 ID, `supportedInterfaces`는 JSONRPC 1.0 하나, `capabilities`는 셋 다 false, 보안은 `callerToken`(HTTP Bearer), skill은 `ask` 하나(tags `["questions"]`, examples는 ARD 대표 질문). token과 소유자 이름은 없다.

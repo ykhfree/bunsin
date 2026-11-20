@@ -1077,11 +1077,14 @@ async fn a2a_and_mcp_share_the_read_limit() {
     .await
     .unwrap();
     let read_over_mcp = || mcp.call_tool("get_request", json!({"request_id": task}).as_object().unwrap().clone());
-    for _ in 0..40 {
+    // The SendMessage above was the first read. 1 + 39 × 3 + 2 = 120 reads.
+    for _ in 0..39 {
         kim.task(&task).await;
         kim.result("ListTasks", json!({})).await;
         read_over_mcp().await.unwrap();
     }
+    kim.task(&task).await;
+    kim.task(&task).await;
     // 120 reads: the next one fails over both protocols, and also for a cancel.
     let reply = kim.call("GetTask", json!({"id": task})).await;
     let (code, text) = rpc_error(&reply);
@@ -1091,8 +1094,10 @@ async fn a2a_and_mcp_share_the_read_limit() {
     assert_eq!(kim.error("CancelTask", json!({"id": task})).await.0, -32000);
     let refused = read_over_mcp().await;
     assert!(refused.is_err_and(|error| error.to_string().contains("a minute")));
-    // The cancel did not run, and a SendMessage is no read.
-    kim.ask("Where?", "m-2").await;
+    // A repeated messageId returns the task like GetTask, so a send is a read too.
+    let repeated = kim.call("SendMessage", send("When?", "m-1")).await;
+    assert_eq!(rpc_error(&repeated).0, -32000);
+    // The cancel did not run.
     assert_eq!(
         rig.engine
             .caller_request(&rig.engine.app_store().caller(&kim.token).unwrap().unwrap(), &task)

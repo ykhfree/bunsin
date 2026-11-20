@@ -5,6 +5,7 @@
 use super::{INBOX_COLUMNS, ProfileStore, inbox_from_row, inbox_item};
 use crate::Result;
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::REPLY_TOOL;
 use bunsin_core::records::InboxItem;
 use rusqlite::{Connection, OptionalExtension};
 
@@ -229,11 +230,28 @@ impl ProfileStore {
         Ok(())
     }
 
-    /// Marks the row as canceled at `now`. Returns false if it was canceled before; the first time stays.
+    /// Marks the row as canceled at `now`. Returns false if it was canceled before (the first time
+    /// stays) or an answer of its event ran already.
     pub fn cancel_intake(&self, id: i64, now: i64) -> Result<bool> {
+        // One statement with `finish_answer`'s opposite check: whichever runs first wins, so a
+        // request is never both answered and canceled.
         let changed = self.db().execute(
-            "UPDATE intake SET canceled_at = ?1 WHERE id = ?2 AND canceled_at IS NULL",
-            (now, id),
+            "UPDATE intake SET canceled_at = ?1 WHERE id = ?2 AND canceled_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM inbox WHERE inbox.event_key = intake.event_key
+                 AND inbox.state = 'executed' AND json_extract(inbox.body, '$.tool') = ?3)",
+            (now, id, REPLY_TOOL),
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Moves an executing answer of an inbound request to `executed`, unless the caller canceled the
+    /// request. Returns false if the item did not move.
+    pub fn finish_answer(&self, item: i64, now: i64) -> Result<bool> {
+        let changed = self.db().execute(
+            "UPDATE inbox SET state = 'executed', updated_at = ?1 WHERE id = ?2 AND state = 'executing'
+             AND NOT EXISTS (SELECT 1 FROM intake WHERE intake.event_key = inbox.event_key
+                 AND intake.canceled_at IS NOT NULL)",
+            (now, item),
         )?;
         Ok(changed == 1)
     }
@@ -364,6 +382,52 @@ mod tests {
         store.finish_intake(second.id, "pending_approval").unwrap();
         assert_eq!(store.open_intake_count("bunsin.inbound").unwrap(), 0);
         assert!(store.due_intake(1_000, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_answer_and_a_cancel_exclude_each_other() {
+        use bunsin_core::approval::ApprovalState::{Executed, Executing};
+        use bunsin_core::inbound::{REPLY_TEXT, REPLY_TOOL};
+        use bunsin_core::records::InboxBody;
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppStore::open(dir.path()).unwrap();
+        app.create_profile("kim", "Kim", 1).unwrap();
+        let store = app.open_profile("kim").unwrap();
+        let body = |tool: &str| InboxBody::ToolCall {
+            tool: tool.into(),
+            args: serde_json::json!({REPLY_TEXT: "Friday."}).as_object().unwrap().clone(),
+        };
+        let request = |id: &str| {
+            store
+                .add_intake("bunsin.inbound", id, Some(7), &event(id), 100)
+                .unwrap();
+            store.caller_intake("bunsin.inbound", id, 7).unwrap().unwrap()
+        };
+        let answer = |row: &super::IntakeRow, tool: &str| {
+            store
+                .add_inbox_item(&row.event_key, &body(tool), "", &[], Executing, 110)
+                .unwrap()
+        };
+
+        // The answer runs first: a later cancel does not hide it.
+        let first = request("req_1");
+        let item = answer(&first, REPLY_TOOL);
+        assert!(store.finish_answer(item.id, 120).unwrap());
+        assert!(!store.cancel_intake(first.id, 130).unwrap());
+        assert_eq!(store.inbox_for_event(&first.event_key).unwrap()[0].state, Executed);
+
+        // The cancel comes first: the answer does not move to executed.
+        let second = request("req_2");
+        let item = answer(&second, REPLY_TOOL);
+        assert!(store.cancel_intake(second.id, 120).unwrap());
+        assert!(!store.finish_answer(item.id, 130).unwrap());
+        assert_eq!(store.inbox_for_event(&second.event_key).unwrap()[0].state, Executing);
+
+        // Another write that ran does not stop a cancel: the caller can still end the request.
+        let third = request("req_3");
+        let other = answer(&third, "slack/post");
+        store.move_inbox_state(other.id, Executing, Executed, 115).unwrap();
+        assert!(store.cancel_intake(third.id, 120).unwrap());
     }
 
     #[test]

@@ -1011,7 +1011,8 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
 - **CancelTask**는 그 질문의 기다리는 항목을 승인함에서 거둡니다. 이것은 소유자의 기각으로 세지 않습니다. 취소된 task를 다시 취소하면 같은 task를 돌려줍니다.
   완료, 기각, 실패한 task는 `-32002`를 받습니다. 소유자가 같은 순간에 답을 승인하면 취소가 이기고, 서버는 답을 보내지 않습니다.
 - **한도**는 MCP와 같습니다. `SendMessage`는 `ask`처럼 셉니다(호출자당 시간당 20개, 처리하지 않은 질문 50개).
-  `GetTask`, `ListTasks`, `CancelTask`는 `get_request`의 1분 120번을 함께 씁니다. 한도를 넘으면 `-32000`과 이유 `RATE_LIMIT_EXCEEDED`를 받습니다.
+  `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`는 `get_request`의 1분 120번을 함께 씁니다.
+  같은 `messageId`로 다시 보내면 `GetTask`처럼 task를 돌려주기 때문입니다. 한도를 넘으면 `-32000`과 이유 `RATE_LIMIT_EXCEEDED`를 받습니다.
   token, `Host`, 본문 크기, 동시 요청 검사는 MCP와 같습니다(`401`, `403`, `413`, `503`). JSON-RPC 오류는 HTTP 200으로 옵니다.
   없는 task와 다른 호출자의 task는 같은 `-32001`을 받습니다.
 

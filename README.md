@@ -1209,8 +1209,8 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
   failed task gets `-32002`. If you approve the answer at the same moment, the cancel wins, and
   the server sends no answer.
 - **Limits** are the ones of MCP. `SendMessage` counts like `ask` (20 an hour per caller, 50 open
-  questions). `GetTask`, `ListTasks` and `CancelTask` share the 120 reads a minute of
-  `get_request`. A limit gets `-32000` with the reason `RATE_LIMIT_EXCEEDED`. The token, `Host`,
+  questions). `SendMessage`, `GetTask`, `ListTasks` and `CancelTask` share the 120 reads a minute
+  of `get_request`: a repeated `messageId` returns the task, like `GetTask`. A limit gets `-32000` with the reason `RATE_LIMIT_EXCEEDED`. The token, `Host`,
   body size and concurrency checks are those of MCP (`401`, `403`, `413`, `503`). A JSON-RPC error
   comes with HTTP 200. A missing task and another caller's task get the same `-32001`.
 

@@ -375,26 +375,25 @@ impl Engine {
             let error = "no inbound request belongs to this answer".to_owned();
             return self.execution_failed(ctx, item, REPLY_TOOL, error);
         };
-        if row.canceled_at.is_some() {
-            store
-                .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
-                .map_err(store_error)?;
-            let detail = json!({"inbox_id": item.id, "request": row.delivery_id});
-            self.audit(store, "inbound_reply_canceled", Some(&item.event_key), detail)?;
-            return Ok(Outcome::ExecutionFailed {
-                inbox_id: item.id,
-                error: "the caller canceled the request, so the answer was not sent".into(),
-            });
+        // The move checks the cancel in the same statement, so a cancel that comes now cannot be lost.
+        if store.finish_answer(item.id, self.now()).map_err(store_error)? {
+            self.audit(
+                store,
+                "inbound_answered",
+                Some(&item.event_key),
+                json!({"inbox_id": item.id}),
+            )?;
+            return Ok(Outcome::Executed { inbox_id: item.id });
         }
+        // `execute` moved this item to `executing`, so it did not move on because of a cancel.
         store
-            .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Executed, self.now())
+            .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Failed, self.now())
             .map_err(store_error)?;
-        self.audit(
-            store,
-            "inbound_answered",
-            Some(&item.event_key),
-            json!({"inbox_id": item.id}),
-        )?;
-        Ok(Outcome::Executed { inbox_id: item.id })
+        let detail = json!({"inbox_id": item.id, "request": row.delivery_id});
+        self.audit(store, "inbound_reply_canceled", Some(&item.event_key), detail)?;
+        Ok(Outcome::ExecutionFailed {
+            inbox_id: item.id,
+            error: "the caller canceled the request, so the answer was not sent".into(),
+        })
     }
 }

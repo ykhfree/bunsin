@@ -230,7 +230,11 @@ fn answer(state: &Inbound, caller: &Caller, version: &str, body: &[u8]) -> JsonR
 
 fn dispatch(state: &Inbound, caller: &Caller, method: &str, params: Value) -> Result<Value, JsonRpcError> {
     match method {
-        methods::SEND_MESSAGE => send_message(state, caller, params),
+        // A repeated messageId returns the task like GetTask does, so every send counts as a read.
+        methods::SEND_MESSAGE => {
+            read_allowed(state, caller)?;
+            send_message(state, caller, params)
+        }
         methods::GET_TASK => {
             read_allowed(state, caller)?;
             let request: GetTaskRequest = params_of(params)?;
