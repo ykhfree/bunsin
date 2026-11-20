@@ -1774,6 +1774,7 @@ async fn publish(rig: &Rig, profile: &str, token: &str, scope: InboundScope, que
         namespace: Some("team".into()),
         agent_name: profile.into(),
         representative_queries: queries.iter().map(|q| (*q).to_owned()).collect(),
+        ..ArdListing::default()
     });
     client.set_profile_config(profile, config).await.unwrap();
 }
@@ -1789,14 +1790,19 @@ async fn catalog(listener: &Running) -> (reqwest::header::HeaderMap, serde_json:
 /// The errors of a served catalog against the schema `ArdManifest` of the ARD specification.
 /// The schema checks every entry against `ArdEntry`, with formats such as `uri`.
 fn ard_schema_errors(catalog: &serde_json::Value) -> Vec<String> {
+    schema_errors("ArdManifest", catalog)
+}
+
+/// The errors of `instance` against one definition of the ARD schema.
+fn schema_errors(definition: &str, instance: &serde_json::Value) -> Vec<String> {
     let text = include_str!("../../ard/tests/fixtures/ard-entry.schema.json");
     let mut schema: serde_json::Value = serde_json::from_str(text).unwrap();
-    schema["$ref"] = serde_json::json!("#/$defs/ArdManifest");
+    schema["$ref"] = serde_json::json!(format!("#/$defs/{definition}"));
     let validator = jsonschema::options()
         .should_validate_formats(true)
         .build(&schema)
         .unwrap();
-    validator.iter_errors(catalog).map(|error| error.to_string()).collect()
+    validator.iter_errors(instance).map(|error| error.to_string()).collect()
 }
 
 fn identifiers(catalog: &serde_json::Value) -> Vec<&str> {
@@ -1873,6 +1879,161 @@ async fn each_listener_lists_only_the_endpoints_it_serves_and_each_entry_names_i
     assert!(identifiers(&catalog(&public).await.1).is_empty());
 }
 
+/// An outer listener of `reach` with the address `url` for callers.
+async fn listener(rig: &Rig, reach: Reach, url: &str) -> Running {
+    let wake = Arc::new(tokio::sync::Notify::new());
+    bunsin_daemon::server::serve_outer(rig.engine.clone(), outer(reach, "127.0.0.1:0", url), wake)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn each_outer_listener_serves_its_own_agentmap() {
+    let (rig, internal, public) = inbound_rig().await;
+    for (listener, url) in [(&internal, "http://127.0.0.1"), (&public, "http://localhost")] {
+        let response = reqwest::get(format!("{}/robots.txt", listener.url())).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/plain; charset=utf-8");
+        assert_eq!(response.headers()["cache-control"], "public, max-age=300");
+        assert_eq!(
+            response.text().await.unwrap(),
+            format!("User-agent: *\nDisallow:\n\nAgentmap: {url}/.well-known/ard.json\n")
+        );
+    }
+    // The control API has no robots.txt.
+    let response = reqwest::get(format!("{}/robots.txt", rig.server.url())).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn every_outer_response_carries_the_ard_link_even_a_404() {
+    let (rig, internal, public) = inbound_rig().await;
+    let client = reqwest::Client::new();
+    for (listener, url) in [(&internal, "http://127.0.0.1"), (&public, "http://localhost")] {
+        let base = listener.url();
+        let requests = [
+            (client.get(format!("{base}/.well-known/ard.json")), 200),
+            (client.get(format!("{base}/robots.txt")), 200),
+            (client.get(format!("{base}/no/such/page")), 404),
+            // Kim is internal, so the public listener has no card of kim.
+            (
+                client.get(format!("{base}/agents/kim/mcp/server-card")),
+                if url.contains("127") { 200 } else { 404 },
+            ),
+            // A request without a caller token.
+            (client.post(format!("{base}/agents/kim/mcp")).body("{}"), 401),
+            (client.post(format!("{base}/hooks/kim/none")).body("{}"), 401),
+        ];
+        for (request, status) in requests {
+            let response = request.send().await.unwrap();
+            let what = response.url().path().to_owned();
+            assert_eq!(response.status().as_u16(), status, "{url}{what}");
+            let links: Vec<_> = response.headers().get_all("link").iter().collect();
+            assert_eq!(
+                links,
+                [format!("<{url}/.well-known/ard.json>; rel=\"ard\"").as_str()],
+                "{url}{what}"
+            );
+        }
+    }
+    // The control API names no catalog.
+    let response = reqwest::get(format!("{}/no/such/page", rig.server.url()))
+        .await
+        .unwrap();
+    assert!(response.headers().get("link").is_none());
+}
+
+#[tokio::test]
+async fn no_dns_record_for_a_listener_url_with_a_path() {
+    let rig = rig().await;
+    let _internal = listener(&rig, Reach::Internal, "https://acme.com/bunsin").await;
+    let public = listener(&rig, Reach::Public, "https://agents.acme.com:8443").await;
+    publish(
+        &rig,
+        "kim",
+        &rig.kim_token,
+        InboundScope::Public,
+        &["When do we deploy?", "Who reviews?"],
+    )
+    .await;
+    let status = rig.kim().inbound_status("kim").await.unwrap();
+    assert_eq!(status.ard[0].listed_on, [InboundScope::Internal, InboundScope::Public]);
+    assert_eq!(
+        status.dns_records,
+        [
+            "; no _entries._agents record for https://acme.com/bunsin: \
+             SVCB names a host and a port, not the path /bunsin",
+            "_entries._agents.acme.com. 3600 IN SVCB 1 agents.acme.com. port=8443",
+        ]
+    );
+    // The catalog and the Agentmap still name the path.
+    assert_eq!(
+        status.endpoints[0].catalog_url,
+        "https://acme.com/bunsin/.well-known/ard.json"
+    );
+    let robots = reqwest::get(format!("{}/robots.txt", public.url()))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(robots.ends_with("Agentmap: https://agents.acme.com:8443/.well-known/ard.json\n"));
+}
+
+#[tokio::test]
+async fn a2a_tags_and_the_trust_manifest_reach_the_served_catalog() {
+    let (rig, internal, _public) = inbound_rig().await;
+    publish(
+        &rig,
+        "kim",
+        &rig.kim_token,
+        InboundScope::Internal,
+        &["When do we deploy?", "Who reviews?"],
+    )
+    .await;
+    let mut config = rig.kim().profile_config("kim").await.unwrap();
+    config.inbound.a2a = true;
+    let ard = config.inbound.ard.as_mut().unwrap();
+    ard.tags = vec!["deploys".into()];
+    let manifest = json!({"identity": "https://acme.com/.well-known/identity",
+        "provenance": [{"relation": "publishedFrom", "sourceId": "urn:air:acme.com:team:kim"}]});
+    ard.trust_manifest = Some(manifest.as_object().unwrap().clone());
+    rig.kim().set_profile_config("kim", config).await.unwrap();
+
+    let (_, body) = catalog(&internal).await;
+    assert_eq!(
+        identifiers(&body),
+        ["urn:air:acme.com:team:kim", "urn:air:acme.com:team:a2a:kim"]
+    );
+    assert_eq!(ard_schema_errors(&body), Vec::<String>::new());
+    for entry in body["entries"].as_array().unwrap() {
+        assert_eq!(entry["@context"], "https://agenticresourcediscovery.org/context/v1");
+        assert_eq!(entry["tags"], json!(["deploys"]));
+        assert_eq!(entry["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(entry["updatedAt"], "1970-01-12T13:46:40Z");
+        assert_eq!(entry["trustManifest"], manifest);
+        assert_eq!(
+            schema_errors("TrustManifest", &entry["trustManifest"]),
+            Vec::<String>::new()
+        );
+    }
+    let a2a = &body["entries"][1];
+    assert_eq!(a2a["type"], "application/a2a-agent-card+json");
+    assert_eq!(a2a["url"], "http://127.0.0.1/agents/kim/a2a/agent-card.json");
+    assert_eq!(a2a["displayName"], "Kim's agent (A2A)");
+
+    let status = rig.kim().inbound_status("kim").await.unwrap();
+    assert_eq!(
+        status.endpoints[0].agent_card_url.as_deref(),
+        Some("http://127.0.0.1/agents/kim/a2a/agent-card.json")
+    );
+    let types: Vec<&str> = status.ard.iter().map(|a| a.media_type.as_str()).collect();
+    assert_eq!(
+        types,
+        ["application/mcp-server-card+json", "application/a2a-agent-card+json"]
+    );
+}
+
 #[tokio::test]
 async fn the_owner_sees_the_addresses_the_listing_and_why_a_catalog_leaves_it_out() {
     let (rig, _internal, _public) = inbound_rig().await;
@@ -1905,7 +2066,9 @@ async fn the_owner_sees_the_addresses_the_listing_and_why_a_catalog_leaves_it_ou
             ),
         ]
     );
-    let ard = status.ard.unwrap();
+    let [ard] = &status.ard[..] else {
+        panic!("one entry: {:?}", status.ard)
+    };
     assert_eq!(ard.identifier.as_deref(), Some("urn:air:acme.com:team:lee"));
     assert_eq!(ard.listed_on, [InboundScope::Internal, InboundScope::Public]);
     assert_eq!(ard.refused, Vec::<String>::new());
@@ -1934,9 +2097,10 @@ async fn the_owner_sees_the_addresses_the_listing_and_why_a_catalog_leaves_it_ou
         namespace: Some("team".into()),
         agent_name: "lee".into(),
         representative_queries: vec!["a?".into(), "b?".into()],
+        ..ArdListing::default()
     });
     rig.engine.create_profile("twin", twin).await.unwrap();
-    let park = rig.engine.inbound_status("park").await.unwrap().ard.unwrap();
+    let park = rig.engine.inbound_status("park").await.unwrap().ard.remove(0);
     assert!(park.listed_on.is_empty());
     assert!(
         park.refused
@@ -1951,7 +2115,7 @@ async fn the_owner_sees_the_addresses_the_listing_and_why_a_catalog_leaves_it_ou
         .await
         .unwrap()
         .ard
-        .unwrap();
+        .remove(0);
     assert!(lee.listed_on.is_empty());
     assert_eq!(
         lee.refused,
@@ -1960,7 +2124,7 @@ async fn the_owner_sees_the_addresses_the_listing_and_why_a_catalog_leaves_it_ou
 
     // Kim's endpoint is internal and has no listing.
     let status = rig.kim().inbound_status("kim").await.unwrap();
-    assert_eq!(status.ard, None);
+    assert_eq!(status.ard, []);
     assert_eq!(status.endpoints.len(), 1, "kim is internal only");
 }
 

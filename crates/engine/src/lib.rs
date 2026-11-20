@@ -1336,10 +1336,12 @@ impl EngineApi for Engine {
     fn set_profile_config<'a>(&'a self, profile: &'a str, config: ProfileConfig) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
             let store = self.store(profile)?;
-            let config = Self::with_reply_rule(&Self::config(&store)?, config);
+            let before = Self::config(&store)?;
+            let config = Self::with_reply_rule(&before, config);
             self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
             Self::check_config(&config)?;
             Self::save_config(&store, &config)?;
+            self.stamp_inbound(&store, &before, &config)?;
             // A settings file can drop a secret variable, its connector or a webhook. Its value goes too.
             self.prune_secrets(&store, &config)?;
             // The next use builds the clients again from the new settings.

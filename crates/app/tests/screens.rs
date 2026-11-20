@@ -970,6 +970,7 @@ async fn publishing_state(rig: &common::Rig) -> UiState {
             namespace: Some("team".into()),
             agent_name: "lee".into(),
             representative_queries: vec!["When is the next release?".into(), "Who approves a release?".into()],
+            ..ArdListing::default()
         }),
         a2a: false,
     };

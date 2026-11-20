@@ -1689,6 +1689,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                     endpoint.card_url,
                     endpoint.catalog_url
                 );
+                if let (Some(a2a), Some(card)) = (&endpoint.a2a_url, &endpoint.agent_card_url) {
+                    println!("a2a\t{}\t{a2a}\t{card}", word(&endpoint.listener));
+                }
             }
             for hook in &status.webhooks {
                 let secret = if hook.secret_stored {
@@ -1703,19 +1706,23 @@ async fn run(cli: Cli) -> Result<(), String> {
                     hook.urls.join(" ")
                 );
             }
-            match &status.ard {
-                None => println!("ard\tnot listed"),
-                Some(ard) => {
-                    let listed: Vec<String> = ard.listed_on.iter().map(word).collect();
-                    let identifier = ard.identifier.as_deref().unwrap_or("-");
-                    println!("ard\t{identifier}\tlisted on: {}", listed.join(", "));
-                    for reason in &ard.refused {
-                        println!("refused\t{reason}");
-                    }
-                    for warning in &ard.warnings {
-                        println!("warning\t{warning}");
-                    }
+            if status.ard.is_empty() {
+                println!("ard\tnot listed");
+            }
+            // One block for each entry: the MCP entry, then the A2A entry.
+            for ard in &status.ard {
+                let listed: Vec<String> = ard.listed_on.iter().map(word).collect();
+                let identifier = ard.identifier.as_deref().unwrap_or("-");
+                println!("ard\t{identifier}\tlisted on: {}", listed.join(", "));
+                for reason in &ard.refused {
+                    println!("refused\t{reason}");
                 }
+                for warning in &ard.warnings {
+                    println!("warning\t{warning}");
+                }
+            }
+            for record in &status.dns_records {
+                println!("dns\t{record}");
             }
         }
         Command::WebhookSecret { remote, profile, name } => {

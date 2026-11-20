@@ -997,7 +997,8 @@ bunsind caller-revoke kim 1                        # the next request with it is
 
   ```json
   "ard": {"publisher": "acme.com", "namespace": "team", "agent_name": "kim",
-          "representative_queries": ["When do we deploy?", "Who reviews a release?"]}
+          "representative_queries": ["When do we deploy?", "Who reviews a release?"],
+          "tags": ["deploys", "releases"]}
   ```
 
   The entry's identifier is `urn:air:acme.com:team:kim`, its type
@@ -1007,8 +1008,44 @@ bunsind caller-revoke kim 1                        # the next request with it is
   `public`: a catalog lists exactly the endpoints that its listener serves. The publisher must
   be a domain that the server operator allows. The server refuses settings whose entry breaks a
   rule of ARD that an entry must follow. ARD asks for 2 to 5 representative queries; another
-  count is listed with a warning. If two profiles make the same identifier, no catalog lists
+  count is listed with a warning. If two entries have the same identifier, no catalog lists
   either of them.
+- **Terms of each entry.** Every entry has the ARD base context
+  (`"@context": "https://agenticresourcediscovery.org/context/v1"`), `capabilities` (the tools a
+  caller uses: `["ask", "get_request"]`), and `version` (the server version). It has `updatedAt`
+  after you save a change of `inbound`: the server stores the time of that save. `tags` are
+  optional: 0 to 10 tags, each 1 to 40 characters on one line.
+- **The A2A entry.** With `"a2a": true` in `inbound`, each catalog that lists the endpoint also
+  lists an A2A entry: the identifier `urn:air:acme.com:team:a2a:kim`, the type
+  `application/a2a-agent-card+json`, the Agent Card on the same listener as `url`, and the
+  display name with ` (A2A)` after it. Its `capabilities` are `["ask"]`.
+- **Trust manifest.** Add `trust_manifest` to `ard` to put an ARD `trustManifest` (§4.5) on
+  both entries. Write it with the member names of ARD:
+
+  ```json
+  "trust_manifest": {"identity": "spiffe://acme.com/ns/agents/kim",
+                     "attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2.pdf"}]}
+  ```
+
+  `identity` is required. Its domain must be the publisher domain: a `spiffe://`, `https://` or
+  `did:web:` identity of `acme.com` for the publisher `acme.com`. The server refuses another
+  domain, an identity without a domain (such as `did:key:`), a member that ARD names in another
+  shape (for example an attestation without `type` and `uri`), and more than 16 KiB. Other
+  members are kept as they are. Bunsin does not check the signature: ARD leaves that to the
+  trust framework (§4.5.2). The window keeps the trust manifest that it loads, but does not show
+  it; set it in the settings file.
+- **Other ways to find the catalog.** Each listener for callers also serves `/robots.txt` with
+  the line `Agentmap: <listener URL>/.well-known/ard.json`. Every response of that listener,
+  a `404` too, has the header `Link: <<listener URL>/.well-known/ard.json>; rel="ard"`.
+- **DNS.** ARD also names a DNS record for the catalog. The server does not write DNS; it shows
+  the text for your zone, one line for each listener that lists an entry:
+
+  ```
+  _entries._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.
+  ```
+
+  A port other than 443 adds ` port=<port>`. SVCB holds a host and a port, not a path, so a
+  listener URL with a path (or an IP address) gets a line that starts with `;` and says why.
 - **Conformance.** The tests check every catalog entry against the JSON schema of the ARD
   specification (`crates/ard/tests/schema.rs`). The specification project also has an official
   conformance tool. It needs only Python 3 and checks a saved manifest without a network:
@@ -1021,10 +1058,12 @@ bunsind caller-revoke kim 1                        # the next request with it is
 
   It also checks the schema if the Python package `jsonschema` is installed. Bunsin has not
   run this tool yet. The specification names the trust envelope `trustManifest`, and its schema file
-  `TrustManifest`; Bunsin follows the specification and writes no trust envelope.
-- `bunsind inbound kim` shows the addresses of the endpoint and the catalog on each listener,
-  the identifier, the listeners whose catalog lists it, and why a catalog leaves it out
-  (for example a publisher domain that the operator no longer allows), with the warnings.
+  `TrustManifest`. Bunsin follows the specification, and its tests check each `trustManifest`
+  against the `TrustManifest` definition of the schema.
+- `bunsind inbound kim` shows the addresses of the endpoint and the catalog on each listener
+  (with the A2A addresses if A2A is on), and for each entry the identifier, the listeners whose
+  catalog lists it, and why a catalog leaves it out (for example a publisher domain that the
+  operator no longer allows), with the warnings. The `dns` lines hold the DNS text.
 - Not built yet: OAuth for callers.
 
 ### Work with the agent
@@ -1139,11 +1178,12 @@ the card offers "Load the server's version" and "Save anyway". A save passes the
 server rules as a settings file, for example the operator's list of ARD publisher domains and the
 address rules. The settings file and these cards change the same settings.
 
-- **Inbound endpoint and ARD listing** (Agent view): on or off, the public listener, the description
-  and title of the server card, and the ARD listing (publisher domain, namespace, agent name, the
-  questions it answers well, one per line). Above the form the card shows the addresses of the
-  endpoint on each listener, the identifier of the listing, the catalogs that list it, and each
-  reason why a catalog leaves it out (the same as `bunsind inbound`).
+- **Inbound endpoint and ARD listing** (Agent view): on or off, the public listener, A2A, the
+  description and title of the server card, and the ARD listing (publisher domain, namespace,
+  agent name, the questions it answers well, one per line, and the tags, with commas). Above the
+  form the card shows the addresses of the endpoint on each listener, for each entry the
+  identifier, the catalogs that list it, and each reason why a catalog leaves it out, and the DNS
+  text (the same as `bunsind inbound`). The card keeps the trust manifest of the settings file.
 - **Webhooks** (Agent view): add and remove webhooks, see the address of each and whether its
   signing secret is stored, and store the secret in a masked field. The window never shows a stored
   secret, and no label holds a typed one.

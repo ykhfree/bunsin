@@ -8,6 +8,37 @@ use std::fmt;
 /// The media type of an MCP Server Card (§3.3).
 /// A Bunsin agent's inbound endpoint is an MCP server card (ARCHITECTURE 7).
 pub const MCP_SERVER_CARD_TYPE: &str = "application/mcp-server-card+json";
+/// The media type of an A2A Agent Card (§3.3).
+pub const A2A_AGENT_CARD_TYPE: &str = "application/a2a-agent-card+json";
+/// The ARD base context (§4.1). An entry SHOULD carry it as its `@context`.
+pub const BASE_CONTEXT: &str = "https://agenticresourcediscovery.org/context/v1";
+
+/// The protocol of the card that an entry points at. A profile has an MCP entry, and an A2A entry
+/// if the owner turned A2A on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Protocol {
+    #[default]
+    Mcp,
+    A2a,
+}
+
+impl Protocol {
+    /// The `type` of the entry.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Protocol::Mcp => MCP_SERVER_CARD_TYPE,
+            Protocol::A2a => A2A_AGENT_CARD_TYPE,
+        }
+    }
+
+    /// The `capabilities` of the entry: the MCP tools or the A2A skills that a caller uses.
+    fn capabilities(self) -> &'static [&'static str] {
+        match self {
+            Protocol::Mcp => &["ask", "get_request"],
+            Protocol::A2a => &["ask"],
+        }
+    }
+}
 
 /// One ARD entry (§4.2, schema `ArdEntry`).
 ///
@@ -44,7 +75,7 @@ pub struct ArdEntry {
 }
 
 /// The `trustManifest` envelope (§4.5). ARD reads only `identity`; the rest stays in `other`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustManifest {
     #[serde(default)]
     pub identity: String,
@@ -130,9 +161,11 @@ impl fmt::Display for Violation {
     }
 }
 
-/// What a Bunsin agent profile gives to make its entry.
+/// What a Bunsin agent profile gives to make one entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentListing {
+    /// The protocol of the card at `endpoint_url`.
+    pub protocol: Protocol,
     /// The fully qualified domain name of the publisher, for example `acme.com`.
     pub publisher_domain: Option<String>,
     /// Optional namespace. It can hold more than one segment, separated by `:` (Appendix C).
@@ -142,8 +175,15 @@ pub struct AgentListing {
     pub display_name: String,
     pub description: Option<String>,
     pub representative_queries: Vec<String>,
-    /// The URL of the agent's inbound MCP server card.
+    /// The URL of the card of the agent's inbound endpoint: the MCP server card or the A2A Agent Card.
     pub endpoint_url: String,
+    /// Keywords for filtering. The entry has no `tags` if this is empty.
+    pub tags: Vec<String>,
+    /// The version of the server that serves the card.
+    pub version: Option<String>,
+    /// RFC 3339 time of the last change of the listing.
+    pub updated_at: Option<String>,
+    pub trust_manifest: Option<TrustManifest>,
 }
 
 /// An entry that breaks no MUST rule, with the SHOULD rules it breaks.
@@ -153,34 +193,62 @@ pub struct Built {
     pub warnings: Vec<Violation>,
 }
 
-/// Makes the entry for one agent profile.
+/// Makes the entry of one listing.
 ///
-/// The entry references the MCP server card by `url` (§4.3) and has no `data`.
-/// Returns every violation if one or more of them is a MUST violation.
+/// The entry references the card by `url` (§4.3) and has no `data`. An A2A entry gets the segment
+/// `a2a` before the agent name and ` (A2A)` after the display name, so that it differs from the
+/// MCP entry of the same profile. Returns every violation if one or more of them is a MUST violation.
 pub fn build_entry(listing: &AgentListing) -> Result<Built, Vec<Violation>> {
     let mut violations = Vec::new();
     let identifier = match listing.publisher_domain.as_deref() {
         Some(domain) if !domain.is_empty() => {
-            let namespace = listing.namespace.as_deref().filter(|n| !n.is_empty());
-            match namespace {
-                Some(namespace) => format!("urn:air:{domain}:{namespace}:{}", listing.agent_name),
-                None => format!("urn:air:{domain}:{}", listing.agent_name),
+            let mut segments = vec![domain];
+            segments.extend(listing.namespace.as_deref().filter(|n| !n.is_empty()));
+            if listing.protocol == Protocol::A2a {
+                segments.push("a2a");
             }
+            segments.push(&listing.agent_name);
+            format!("urn:air:{}", segments.join(":"))
         }
         _ => {
             violations.push(Violation::MissingPublisherDomain);
             String::new()
         }
     };
+    let display_name = match listing.protocol {
+        Protocol::Mcp => listing.display_name.clone(),
+        Protocol::A2a => format!("{} (A2A)", listing.display_name),
+    };
     let queries = &listing.representative_queries;
+    let mut other = Map::new();
+    // CDDL: `tags: [+ tstr]`, so an empty list is left out.
+    if !listing.tags.is_empty() {
+        other.insert("tags".into(), Value::from(listing.tags.clone()));
+    }
+    for (term, value) in [("version", &listing.version), ("updatedAt", &listing.updated_at)] {
+        if let Some(value) = value {
+            other.insert(term.into(), Value::from(value.as_str()));
+        }
+    }
     let entry = ArdEntry {
+        context: Some(Value::from(BASE_CONTEXT)),
         identifier,
-        display_name: listing.display_name.clone(),
-        media_type: MCP_SERVER_CARD_TYPE.to_owned(),
+        display_name,
+        media_type: listing.protocol.media_type().to_owned(),
         url: Some(listing.endpoint_url.clone()),
         description: listing.description.clone(),
         representative_queries: (!queries.is_empty()).then(|| queries.clone()),
-        ..ArdEntry::default()
+        capabilities: Some(
+            listing
+                .protocol
+                .capabilities()
+                .iter()
+                .map(|c| (*c).to_owned())
+                .collect(),
+        ),
+        trust_manifest: listing.trust_manifest.clone(),
+        data: None,
+        other,
     };
     violations.extend(validate(&entry));
     if violations.iter().any(|v| v.level() == Level::Must) {
@@ -338,6 +406,14 @@ mod tests {
             description: Some("Answers questions about the payments team.".into()),
             representative_queries: vec!["who owns the refund service".into(), "is the deploy frozen".into()],
             endpoint_url: "https://bunsin.acme.com/p/kim/mcp/server-card.json".into(),
+            ..AgentListing::default()
+        }
+    }
+
+    fn trust(identity: &str) -> TrustManifest {
+        TrustManifest {
+            identity: identity.into(),
+            other: Map::new(),
         }
     }
 
@@ -364,14 +440,77 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&built.entry).unwrap(),
             json!({
+                "@context": "https://agenticresourcediscovery.org/context/v1",
                 "identifier": "urn:air:acme.com:agents:kim-helper",
                 "displayName": "Kim's helper",
                 "type": "application/mcp-server-card+json",
                 "url": "https://bunsin.acme.com/p/kim/mcp/server-card.json",
                 "description": "Answers questions about the payments team.",
-                "representativeQueries": ["who owns the refund service", "is the deploy frozen"]
+                "representativeQueries": ["who owns the refund service", "is the deploy frozen"],
+                "capabilities": ["ask", "get_request"]
             })
         );
+    }
+
+    #[test]
+    fn the_builder_writes_the_base_context_and_the_descriptive_terms() {
+        let mut input = listing();
+        input.tags = vec!["payments".into(), "refunds".into()];
+        input.version = Some("0.1.0".into());
+        input.updated_at = Some("2026-11-20T08:15:00Z".into());
+        input.trust_manifest = Some(TrustManifest {
+            identity: "spiffe://acme.com/ns/agents/kim".into(),
+            other: json!({"attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2"}]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+        let built = build_entry(&input).unwrap();
+        assert_eq!(built.warnings, vec![]);
+        let entry = serde_json::to_value(&built.entry).unwrap();
+        assert_eq!(entry["@context"], BASE_CONTEXT);
+        assert_eq!(entry["tags"], json!(["payments", "refunds"]));
+        assert_eq!(entry["version"], "0.1.0");
+        assert_eq!(entry["updatedAt"], "2026-11-20T08:15:00Z");
+        assert_eq!(
+            entry["trustManifest"],
+            json!({"identity": "spiffe://acme.com/ns/agents/kim",
+                   "attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2"}]})
+        );
+        // The entry reads back with the same terms, the unnamed ones in `other`.
+        let back: ArdEntry = serde_json::from_value(entry).unwrap();
+        assert_eq!(back, built.entry);
+        assert_eq!(back.other["tags"], json!(["payments", "refunds"]));
+
+        // Without them, the entry has none of these terms: CDDL allows no empty `tags`.
+        let plain = serde_json::to_value(build_entry(&listing()).unwrap().entry).unwrap();
+        for term in ["tags", "version", "updatedAt", "trustManifest"] {
+            assert!(plain.get(term).is_none(), "{term}: {plain}");
+        }
+    }
+
+    #[test]
+    fn an_a2a_listing_gets_its_own_identifier_type_and_name() {
+        let mut input = listing();
+        input.protocol = Protocol::A2a;
+        input.endpoint_url = "https://bunsin.acme.com/agents/kim/a2a/agent-card.json".into();
+        let entry = build_entry(&input).unwrap().entry;
+        assert_eq!(entry.identifier, "urn:air:acme.com:agents:a2a:kim-helper");
+        assert_eq!(entry.media_type, "application/a2a-agent-card+json");
+        assert_eq!(entry.display_name, "Kim's helper (A2A)");
+        assert_eq!(entry.capabilities, Some(vec!["ask".to_owned()]));
+        assert_eq!(entry.url.as_deref(), Some(input.endpoint_url.as_str()));
+        // The terminal segment stays the agent name, without a namespace too.
+        input.namespace = None;
+        let entry = build_entry(&input).unwrap().entry;
+        assert_eq!(entry.identifier, "urn:air:acme.com:a2a:kim-helper");
+        assert_eq!(urn_publisher(&entry.identifier), Some("acme.com"));
+        // The trust binding holds for the A2A entry as for the MCP entry.
+        input.trust_manifest = Some(trust("spiffe://evil.com/ns/kim"));
+        assert!(matches!(
+            build_entry(&input).unwrap_err()[..],
+            [Violation::TrustIdentityMismatch { .. }]
+        ));
     }
 
     #[test]
@@ -509,10 +648,7 @@ mod tests {
     fn the_trust_identity_must_name_the_publisher_domain() {
         let with_identity = |identity: &str| {
             let mut entry = parse(PLAIN);
-            entry.trust_manifest = Some(TrustManifest {
-                identity: identity.into(),
-                other: Map::new(),
-            });
+            entry.trust_manifest = Some(trust(identity));
             validate(&entry)
         };
         for good in [

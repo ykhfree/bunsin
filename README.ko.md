@@ -848,14 +848,43 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 
   ```json
   "ard": {"publisher": "acme.com", "namespace": "team", "agent_name": "kim",
-          "representative_queries": ["When do we deploy?", "Who reviews a release?"]}
+          "representative_queries": ["When do we deploy?", "Who reviews a release?"],
+          "tags": ["deploys", "releases"]}
   ```
 
   항목의 identifier는 `urn:air:acme.com:team:kim`, type은 `application/mcp-server-card+json`, `url`은 같은 리스너의 server card입니다.
   표시 이름은 `title`(없으면 `agent_name`)이고, 설명은 `description`입니다.
   내부 리스너는 범위 `internal`과 `public`을, 공개 리스너는 `public`만 싣습니다. catalog는 그 리스너가 제공하는 endpoint만 싣습니다.
   publisher는 서버 운영자가 허용한 도메인이어야 합니다. 항목이 ARD의 필수 규칙을 어기면 서버가 설정을 거부합니다.
-  ARD는 대표 질문을 2~5개 권합니다. 개수가 다르면 경고와 함께 싣습니다. 두 프로필이 같은 identifier를 만들면 어느 catalog도 둘 다 싣지 않습니다.
+  ARD는 대표 질문을 2~5개 권합니다. 개수가 다르면 경고와 함께 싣습니다. 두 항목이 같은 identifier를 가지면 어느 catalog도 둘 다 싣지 않습니다.
+- **항목의 용어.** 모든 항목에 ARD 기반 context(`"@context": "https://agenticresourcediscovery.org/context/v1"`),
+  `capabilities`(호출자가 부를 도구: `["ask", "get_request"]`), `version`(서버 버전)이 있습니다.
+  `inbound`를 바꾸어 저장하면 서버가 그 시각을 기록하고, 항목에 `updatedAt`이 생깁니다.
+  `tags`는 선택입니다. 0~10개이고, 각각 한 줄에 1~40자입니다.
+- **A2A 항목.** `inbound`에 `"a2a": true`를 넣으면 endpoint를 싣는 catalog마다 A2A 항목도 싣습니다.
+  identifier는 `urn:air:acme.com:team:a2a:kim`, type은 `application/a2a-agent-card+json`, `url`은 같은 리스너의 Agent Card입니다.
+  표시 이름 뒤에는 ` (A2A)`가 붙고, `capabilities`는 `["ask"]`입니다.
+- **trust manifest.** `ard`에 `trust_manifest`를 넣으면 두 항목 모두에 ARD `trustManifest`(§4.5)가 실립니다. ARD의 멤버 이름 그대로 씁니다.
+
+  ```json
+  "trust_manifest": {"identity": "spiffe://acme.com/ns/agents/kim",
+                     "attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2.pdf"}]}
+  ```
+
+  `identity`는 필수이고, 그 도메인은 publisher 도메인이어야 합니다. publisher가 `acme.com`이면 `acme.com`의 `spiffe://`, `https://`, `did:web:` identity입니다.
+  서버는 다른 도메인, 도메인이 없는 identity(예: `did:key:`), ARD가 이름 붙인 멤버의 다른 형태(예: `type`과 `uri`가 없는 attestation), 16 KiB 초과를 거부합니다.
+  다른 멤버는 그대로 둡니다. Bunsin은 서명을 검사하지 않습니다. ARD는 그 절차를 신뢰 체계에 맡기기 때문입니다(§4.5.2).
+  창은 읽은 trust manifest를 그대로 저장하고, 보여 주지는 않습니다. 설정 파일에서 정합니다.
+- **catalog를 찾는 다른 길.** 호출자용 리스너는 `/robots.txt`도 제공하고, 그 안에 `Agentmap: <리스너 URL>/.well-known/ard.json` 줄이 있습니다.
+  그 리스너의 모든 응답(`404` 포함)에는 `Link: <<리스너 URL>/.well-known/ard.json>; rel="ard"` 헤더가 붙습니다.
+- **DNS.** ARD는 catalog를 가리키는 DNS 레코드도 정합니다. 서버는 DNS를 쓰지 않고, zone에 넣을 글을 항목을 싣는 리스너마다 한 줄씩 보여 줍니다.
+
+  ```
+  _entries._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.
+  ```
+
+  port가 443이 아니면 ` port=<port>`가 붙습니다. SVCB는 host와 port만 담고 경로는 담지 않습니다.
+  그래서 리스너 URL에 경로가 있거나 host가 IP 주소이면, `;`로 시작하는 줄이 레코드 대신 이유를 말합니다.
 - **적합성 검사.** 테스트가 catalog의 모든 항목을 ARD 스펙의 JSON 스키마로 검사합니다(`crates/ard/tests/schema.rs`).
   스펙 프로젝트에는 공식 conformance 도구도 있습니다. 이 도구는 Python 3만 있으면 되고, 저장한 매니페스트를 네트워크 없이 검사합니다.
 
@@ -867,9 +896,10 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 
   Python 패키지 `jsonschema`가 설치되어 있으면 스키마도 검사합니다. Bunsin은 이 도구를 아직 실행해 보지 않았습니다.
   스펙 본문은 trust envelope를 `trustManifest`라고 쓰고, 스키마 파일은 `TrustManifest`라고 씁니다.
-  Bunsin은 스펙 본문을 따르고, trust envelope를 쓰지 않습니다.
-- `bunsind inbound kim`은 리스너마다 endpoint와 catalog의 주소, identifier, 항목을 싣는 리스너, catalog가 항목을 빼는 이유
-  (예: 운영자가 더 이상 허용하지 않는 publisher 도메인), 경고를 보여 줍니다.
+  Bunsin은 스펙 본문을 따르고, 테스트가 각 `trustManifest`를 스키마의 `TrustManifest` 정의로 검사합니다.
+- `bunsind inbound kim`은 리스너마다 endpoint와 catalog의 주소(A2A가 켜졌으면 A2A 주소도)를 보여 줍니다.
+  항목마다 identifier, 항목을 싣는 리스너, catalog가 항목을 빼는 이유(예: 운영자가 더 이상 허용하지 않는 publisher 도메인), 경고도 보여 줍니다.
+  `dns` 줄은 DNS 글입니다.
 - 아직 만들지 않은 것: 호출자용 OAuth.
 
 ### agent와 일하기
@@ -971,8 +1001,9 @@ notes 설정과 평가 설정도 Settings에 있습니다.
 저장은 설정 파일과 같은 검사와 서버 규칙을 지납니다. 예를 들어 운영자의 ARD publisher 도메인 목록과 주소 규칙입니다.
 설정 파일과 이 카드들은 같은 설정을 바꿉니다.
 
-- **Inbound endpoint and ARD listing**(Agent 화면): 켜고 끄기, 공개 listener, server card의 설명과 제목, ARD 등록(publisher 도메인, namespace, agent 이름, 잘 답하는 질문을 한 줄에 하나씩)을 정합니다.
-  양식 위에는 listener마다 endpoint 주소, 등록 identifier, 등록한 catalog, catalog가 빼는 이유를 하나씩 보여 줍니다(`bunsind inbound`와 같습니다).
+- **Inbound endpoint and ARD listing**(Agent 화면): 켜고 끄기, 공개 listener, A2A, server card의 설명과 제목, ARD 등록(publisher 도메인, namespace, agent 이름, 잘 답하는 질문을 한 줄에 하나씩, 쉼표로 나눈 tags)을 정합니다.
+  양식 위에는 listener마다 endpoint 주소, 항목마다 identifier, 등록한 catalog, catalog가 빼는 이유, 그리고 DNS 글을 보여 줍니다(`bunsind inbound`와 같습니다).
+  카드는 설정 파일의 trust manifest를 그대로 둡니다.
 - **Webhooks**(Agent 화면): webhook을 더하고 지웁니다. 각 webhook의 주소와 서명 secret 저장 여부를 보여 줍니다.
   secret은 가린 입력란에 넣어 저장합니다. 창은 저장된 secret을 보여 주지 않고, 입력한 secret은 어떤 label에도 없습니다.
 - **ARD registries**(Agent 화면): registry를 더하고 지웁니다.

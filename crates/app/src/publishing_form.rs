@@ -29,6 +29,8 @@ const REGISTRIES_HELP: &str = "The agent may search these ARD registries for age
 const WEBHOOKS_HELP: &str = "Slack or Jira Cloud send events to a webhook of a REST API connector. \
     Give the service the address below and store its signing secret here. Anyone who can write in the \
     service can steer such an event, so its changes always wait for you.";
+const DNS_HELP: &str = "Optional: publish this DNS text in your zone, so that crawlers find the catalog. \
+    A line that starts with ; says why a listener has no record.";
 const SECRET_HELP: &str = "The server keeps the signing secret encrypted and never shows it again.";
 
 /// The scope word that the window shows.
@@ -59,6 +61,7 @@ pub struct InboundForm {
     track: PartTrack<InboundConfig>,
     enabled: bool,
     public: bool,
+    a2a: bool,
     listed: bool,
     title: Entity<InputState>,
     description: Entity<InputState>,
@@ -66,6 +69,8 @@ pub struct InboundForm {
     namespace: Entity<InputState>,
     agent: Entity<InputState>,
     queries: Entity<TextareaState>,
+    /// The tags, separated by commas.
+    tags: Entity<InputState>,
 }
 
 impl InboundForm {
@@ -77,6 +82,7 @@ impl InboundForm {
             track: PartTrack::new(Part::Inbound),
             enabled: false,
             public: false,
+            a2a: false,
             listed: false,
             title: input("Optional, for example Kim's agent", window, cx),
             description: input("For example: questions about the deploy schedule", window, cx),
@@ -84,12 +90,21 @@ impl InboundForm {
             namespace: input("Optional, for example team", window, cx),
             agent: input("For example kim", window, cx),
             queries: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5)),
+            tags: input("Optional, for example payments, refunds", window, cx),
         }
     }
 
-    /// The settings that the fields describe.
+    /// The settings that the fields describe. The card does not show the trust manifest, so the
+    /// listing keeps the one that the card loaded.
     fn value(&self, cx: &App) -> InboundConfig {
         let queries = self.queries.read(cx).value().to_string();
+        let tags = text(&self.tags, cx)
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let base = self.track.base.as_ref();
         InboundConfig {
             enabled: self.enabled,
             scope: if self.public {
@@ -104,15 +119,19 @@ impl InboundForm {
                 namespace: optional(text(&self.namespace, cx)),
                 agent_name: text(&self.agent, cx),
                 representative_queries: queries.lines().filter(|q| !q.is_empty()).map(str::to_owned).collect(),
+                tags,
+                trust_manifest: base
+                    .and_then(|base| base.ard.as_ref())
+                    .and_then(|ard| ard.trust_manifest.clone()),
             }),
-            // The card has no A2A switch yet: it keeps the value that it loaded.
-            a2a: self.track.base.as_ref().is_some_and(|base| base.a2a),
+            a2a: self.a2a,
         }
     }
 
     fn fill(&mut self, config: &InboundConfig, window: &mut Window, cx: &mut App) {
         self.enabled = config.enabled;
         self.public = config.scope == InboundScope::Public;
+        self.a2a = config.a2a;
         self.listed = config.ard.is_some();
         let ard = config.ard.clone().unwrap_or_default();
         set(&self.title, config.title.as_deref().unwrap_or_default(), window, cx);
@@ -127,6 +146,7 @@ impl InboundForm {
         set(&self.agent, &ard.agent_name, window, cx);
         let queries = ard.representative_queries.join("\n");
         self.queries.update(cx, |area, cx| area.set_value(queries, window, cx));
+        set(&self.tags, &ard.tags.join(", "), window, cx);
     }
 
     fn changed(&self, cx: &App) -> bool {
@@ -375,21 +395,30 @@ impl Shell {
             "Endpoint: off".to_owned()
         };
         let addresses = status.endpoints.iter().enumerate().map(|(i, endpoint)| {
-            let lines = format!(
+            let mut lines = format!(
                 "{} listener\nMCP: {}\nServer card: {}\nARD catalog: {}",
                 scope_text(endpoint.listener),
                 endpoint.mcp_url,
                 endpoint.card_url,
                 endpoint.catalog_url
             );
+            if let (Some(a2a), Some(card)) = (&endpoint.a2a_url, &endpoint.agent_card_url) {
+                lines.push_str(&format!("\nA2A: {a2a}\nAgent card: {card}"));
+            }
             code_block(cx).child(labelled(format!("inbound-endpoint-{i}"), lines))
         });
-        let ard = status.ard.as_ref().map(|ard| {
+        // One block for each entry. The ids of the first entry have no number.
+        let entries = status.ard.iter().enumerate().map(|(n, ard)| {
+            let id = |name: &str| if n == 0 { name.to_owned() } else { format!("{name}-{n}") };
             let listed = match ard.listed_on.as_slice() {
-                [] => "ARD listing: not in any catalog".to_owned(),
+                [] => format!("ARD listing ({}): not in any catalog", ard.media_type),
                 on => {
                     let words: Vec<&str> = on.iter().map(|scope| scope_text(*scope)).collect();
-                    format!("ARD listing: in the catalog of the {} listener", words.join(" and "))
+                    format!(
+                        "ARD listing ({}): in the catalog of the {} listener",
+                        ard.media_type,
+                        words.join(" and ")
+                    )
                 }
             };
             let identifier = ard.identifier.clone().unwrap_or_else(|| "no identifier".to_owned());
@@ -397,20 +426,32 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(labelled("ard-listed", listed))
-                .child(labelled_as("ard-identifier", identifier.clone(), quiet(identifier, cx)))
+                .child(labelled(id("ard-listed"), listed))
+                .child(labelled_as(
+                    id("ard-identifier"),
+                    identifier.clone(),
+                    quiet(identifier, cx),
+                ))
                 .children(ard.refused.iter().enumerate().map(|(i, why)| {
-                    div()
-                        .text_sm()
-                        .text_color(palette(cx).stopped)
-                        .child(labelled(format!("ard-refused-{i}"), format!("Left out: {why}")))
+                    div().text_sm().text_color(palette(cx).stopped).child(labelled(
+                        format!("{}-{i}", id("ard-refused")),
+                        format!("Left out: {why}"),
+                    ))
                 }))
                 .children(ard.warnings.iter().enumerate().map(|(i, warning)| {
                     div().text_sm().text_color(palette(cx).waiting).child(labelled(
-                        format!("ard-warning-{i}"),
+                        format!("{}-{i}", id("ard-warning")),
                         format!("Listed with a warning: {warning}"),
                     ))
                 }))
+        });
+        let dns = (!status.dns_records.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(quiet(DNS_HELP, cx))
+                .child(code_block(cx).child(labelled("inbound-dns", status.dns_records.join("\n"))))
         });
         div()
             .flex()
@@ -418,7 +459,8 @@ impl Shell {
             .gap_2()
             .child(labelled("inbound-state", state))
             .children(addresses)
-            .children(ard)
+            .children(entries)
+            .children(dns)
     }
 
     fn inbound_card(&self, cx: &Context<Self>) -> Div {
@@ -462,6 +504,12 @@ impl Shell {
                 form.public,
                 |f, on| f.public = on,
             ))
+            .child(toggle(
+                "inbound-a2a",
+                "Serve it over A2A too, with an Agent Card",
+                form.a2a,
+                |f, on| f.a2a = on,
+            ))
             .child(input(
                 "What callers can ask about",
                 "inbound-description",
@@ -479,6 +527,7 @@ impl Shell {
                     .child(input("Publisher domain", "ard-publisher", &form.publisher))
                     .child(input("Namespace", "ard-namespace", &form.namespace))
                     .child(input("Agent name", "ard-agent", &form.agent))
+                    .child(input("Tags, with commas (up to 10)", "ard-tags", &form.tags))
                     .child(field(
                         "Questions it answers well, one per line (2 to 5)",
                         div()

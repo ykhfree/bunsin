@@ -1081,6 +1081,15 @@ pub async fn serve_outer(engine: Arc<Engine>, config: OuterConfig, wake: Arc<Not
     });
     let router = crate::inbound::routes(engine.clone(), &config, wake.clone())
         .merge(crate::webhooks::routes(engine, &config, wake));
+    // Every answer of this listener names its ARD catalog (§5.1 rel="ard"), a 404 too. Bunsin has
+    // no HTML page for a `<link rel="ard">`.
+    let catalog = config.url_of(bunsin_api::http::ARD_CATALOG);
+    let link = axum::http::HeaderValue::from_str(&format!("<{catalog}>; rel=\"ard\""))
+        .expect("a parsed URL is a valid header value");
+    let router = router.layer(axum::middleware::map_response(move |mut response: Response| {
+        response.headers_mut().append(header::LINK, link.clone());
+        std::future::ready(response)
+    }));
     bind(router, config.listen, config.tls).await
 }
 

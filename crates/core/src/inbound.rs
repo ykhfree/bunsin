@@ -6,7 +6,7 @@
 use crate::approval::ApprovalState;
 use crate::records::{InboxBody, InboxItem};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// The source of the events that callers make with `ask`.
 pub const INBOUND_SOURCE: &str = "bunsin.inbound";
@@ -80,6 +80,155 @@ pub struct ArdListing {
     /// Questions that the agent answers well. ARD asks for 2 to 5; another count is listed with a warning.
     #[serde(default)]
     pub representative_queries: Vec<String>,
+    /// ARD `tags`: keywords for filtering. 0 to `MAX_ARD_TAGS`, each 1 to `MAX_ARD_TAG_CHARS` characters on one line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The ARD `trustManifest` (§4.5), with the member names of ARD. Bunsin does not check its signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_manifest: Option<Map<String, Value>>,
+}
+
+/// The most tags of an ARD listing.
+pub const MAX_ARD_TAGS: usize = 10;
+/// The longest tag, in characters.
+pub const MAX_ARD_TAG_CHARS: usize = 40;
+/// The largest trust manifest, in bytes of its JSON text.
+pub const MAX_TRUST_MANIFEST_BYTES: usize = 16 * 1024;
+
+impl ArdListing {
+    /// Refuses tags outside the limits and a trust manifest that does not have the ARD shapes.
+    pub fn check(&self) -> Result<(), String> {
+        if self.tags.len() > MAX_ARD_TAGS {
+            return Err(format!("`inbound.ard.tags` has at most {MAX_ARD_TAGS} tags"));
+        }
+        for tag in &self.tags {
+            let fits = (1..=MAX_ARD_TAG_CHARS).contains(&tag.trim().chars().count());
+            if !fits || tag.contains(['\n', '\r']) {
+                return Err(format!(
+                    "the tag `{tag}` of `inbound.ard.tags` needs 1 to {MAX_ARD_TAG_CHARS} characters on one line"
+                ));
+            }
+        }
+        match &self.trust_manifest {
+            Some(manifest) => check_trust_manifest(manifest)
+                .map_err(|why| format!("`inbound.ard.trust_manifest` is not an ARD trust manifest: {why}")),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Checks the members of a trust manifest that ARD names, by the shapes of `ard.cddl` and the
+/// JSON schema. Other members can hold anything (§4.5). The size limit is Bunsin's.
+pub fn check_trust_manifest(manifest: &Map<String, Value>) -> Result<(), String> {
+    let size = serde_json::to_string(manifest).map_or(usize::MAX, |text| text.len());
+    if size > MAX_TRUST_MANIFEST_BYTES {
+        return Err(format!("it has more than {MAX_TRUST_MANIFEST_BYTES} bytes"));
+    }
+    match manifest.get("identity") {
+        Some(Value::String(identity)) if !identity.trim().is_empty() => {}
+        _ => return Err("`identity` must be a text that is not empty".into()),
+    }
+    check_members(
+        manifest,
+        "",
+        &[("identityType", Shape::Text), ("signature", Shape::Text)],
+    )?;
+    if let Some(schema) = manifest.get("trustSchema") {
+        let Value::Object(schema) = schema else {
+            return Err("`trustSchema` must be an object".into());
+        };
+        let shapes = [
+            ("identifier", Shape::Text),
+            ("version", Shape::Text),
+            ("governanceUri", Shape::Uri),
+            ("verificationMethods", Shape::Texts),
+        ];
+        check_members(schema, "trustSchema.", &shapes)?;
+    }
+    let attestation = [
+        ("type", Shape::Text),
+        ("uri", Shape::Uri),
+        ("mediaType", Shape::Text),
+        ("digest", Shape::Text),
+    ];
+    check_list(manifest, "attestations", &["type", "uri"], &attestation)?;
+    let link = [
+        ("relation", Shape::Text),
+        ("sourceId", Shape::Text),
+        ("sourceDigest", Shape::Text),
+    ];
+    check_list(manifest, "provenance", &["relation", "sourceId"], &link)
+}
+
+/// Checks the array member `name`, if present: each item is an object with the `required` members,
+/// and its members have the `shapes`.
+fn check_list(
+    manifest: &Map<String, Value>,
+    name: &str,
+    required: &[&str],
+    shapes: &[(&str, Shape)],
+) -> Result<(), String> {
+    let Some(list) = manifest.get(name) else {
+        return Ok(());
+    };
+    let Value::Array(items) = list else {
+        return Err(format!("`{name}` must be an array"));
+    };
+    for (index, item) in items.iter().enumerate() {
+        let path = format!("{name}[{index}].");
+        let Value::Object(item) = item else {
+            return Err(format!("`{name}[{index}]` must be an object"));
+        };
+        if let Some(missing) = required.iter().find(|key| !item.contains_key(**key)) {
+            return Err(format!("`{path}{missing}` is required"));
+        }
+        check_members(item, &path, shapes)?;
+    }
+    Ok(())
+}
+
+/// The value shapes that `check_trust_manifest` checks.
+#[derive(Clone, Copy)]
+enum Shape {
+    Text,
+    /// A text that is an absolute URI (schema `format: uri`).
+    Uri,
+    /// An array of texts.
+    Texts,
+}
+
+/// Checks the members of `object` that `shapes` names and that are present.
+fn check_members(object: &Map<String, Value>, path: &str, shapes: &[(&str, Shape)]) -> Result<(), String> {
+    for (key, shape) in shapes {
+        let Some(value) = object.get(*key) else { continue };
+        let fits = match shape {
+            Shape::Text => value.is_string(),
+            Shape::Uri => value.as_str().is_some_and(is_absolute_uri),
+            Shape::Texts => value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
+        };
+        if !fits {
+            let what = match shape {
+                Shape::Text => "a text",
+                Shape::Uri => "an absolute URI",
+                Shape::Texts => "an array of texts",
+            };
+            return Err(format!("`{path}{key}` must be {what}"));
+        }
+    }
+    Ok(())
+}
+
+/// True for `scheme:rest` by the scheme rule of RFC 3986, with a rest that is not empty and has
+/// no space or control character. No URL crate is needed for this.
+fn is_absolute_uri(text: &str) -> bool {
+    let Some((scheme, rest)) = text.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        && !rest.is_empty()
+        && !rest.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 impl InboundConfig {
@@ -96,11 +245,14 @@ impl InboundConfig {
         self.a2a && self.served_on(listener)
     }
 
-    /// Refuses a title or a description that the server card cannot hold, and an ARD listing of an
-    /// endpoint that is off.
+    /// Refuses a title or a description that the server card cannot hold, an ARD listing of an
+    /// endpoint that is off, and an ARD listing that `ArdListing::check` refuses.
     pub fn check(&self) -> Result<(), String> {
-        if self.ard.is_some() && !self.enabled {
-            return Err("`inbound.ard` lists the endpoint, so the endpoint must be on".into());
+        if let Some(ard) = &self.ard {
+            if !self.enabled {
+                return Err("`inbound.ard` lists the endpoint, so the endpoint must be on".into());
+            }
+            ard.check()?;
         }
         let fits = |text: &str| (1..=MAX_CARD_TEXT_CHARS).contains(&text.trim().chars().count());
         if self.enabled && !fits(&self.description) {
@@ -351,6 +503,153 @@ mod tests {
         // A listing from the settings file with an unknown field is refused.
         let wrong = r#"{"publisher": "acme.com", "agent_name": "kim", "url": "https://x"}"#;
         assert!(serde_json::from_str::<ArdListing>(wrong).is_err());
+    }
+
+    fn manifest(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn a_trust_manifest_needs_an_identity_and_the_ard_member_shapes() {
+        // Every member that ARD names, in its shape, and one member that ARD does not name.
+        let full = manifest(json!({
+            "identity": "spiffe://acme.com/ns/agents/kim",
+            "identityType": "spiffe",
+            "trustSchema": {"identifier": "acme-trust", "version": "1", "governanceUri": "https://acme.com/trust",
+                            "verificationMethods": ["x509"], "acme:extra": 1},
+            "attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2.pdf", "mediaType": "application/pdf",
+                              "digest": "sha256:ab"}],
+            "provenance": [{"relation": "derivedFrom", "sourceId": "urn:air:acme.com:base", "sourceDigest": "sha256:cd"}],
+            "signature": "eyJhbGciOi",
+            "acme:level": {"any": ["shape"]}
+        }));
+        assert_eq!(check_trust_manifest(&full), Ok(()));
+        assert_eq!(
+            check_trust_manifest(&manifest(json!({"identity": "did:web:acme.com"}))),
+            Ok(())
+        );
+        // An empty list holds no item to check.
+        assert_eq!(
+            check_trust_manifest(&manifest(json!({"identity": "x", "attestations": []}))),
+            Ok(())
+        );
+
+        let refused = |value: Value| check_trust_manifest(&manifest(value)).unwrap_err();
+        assert!(refused(json!({})).contains("`identity`"));
+        assert!(refused(json!({"identity": "  "})).contains("`identity`"));
+        assert!(refused(json!({"identity": 7})).contains("`identity`"));
+        for (value, member) in [
+            (json!({"identity": "x", "identityType": 1}), "`identityType`"),
+            (json!({"identity": "x", "signature": ["a"]}), "`signature`"),
+            (json!({"identity": "x", "trustSchema": "acme"}), "`trustSchema`"),
+            (
+                json!({"identity": "x", "trustSchema": {"governanceUri": "/trust"}}),
+                "`trustSchema.governanceUri`",
+            ),
+            (
+                json!({"identity": "x", "trustSchema": {"verificationMethods": ["a", 1]}}),
+                "`trustSchema.verificationMethods`",
+            ),
+            (
+                json!({"identity": "x", "attestations": {"type": "a"}}),
+                "`attestations`",
+            ),
+            (json!({"identity": "x", "attestations": ["SOC2"]}), "`attestations[0]`"),
+            (
+                json!({"identity": "x", "attestations": [{"type": "SOC2"}]}),
+                "`attestations[0].uri` is required",
+            ),
+            (
+                json!({"identity": "x", "attestations": [{"type": "a", "uri": "https://a.com/x"}, {"type": "b", "uri": "not a uri"}]}),
+                "`attestations[1].uri`",
+            ),
+            (
+                json!({"identity": "x", "attestations": [{"type": 1, "uri": "https://a.com/x"}]}),
+                "`attestations[0].type`",
+            ),
+            (
+                json!({"identity": "x", "provenance": [{"relation": "derivedFrom"}]}),
+                "`provenance[0].sourceId` is required",
+            ),
+            (
+                json!({"identity": "x", "provenance": [{"relation": "r", "sourceId": "s", "sourceDigest": 2}]}),
+                "`provenance[0].sourceDigest`",
+            ),
+        ] {
+            let why = refused(value.clone());
+            assert!(why.contains(member), "{value}: {why}");
+        }
+        // 16 KiB of JSON text is the most.
+        let room = MAX_TRUST_MANIFEST_BYTES - r#"{"identity":"x","note":""}"#.len();
+        assert_eq!(
+            check_trust_manifest(&manifest(json!({"identity": "x", "note": "n".repeat(room)}))),
+            Ok(())
+        );
+        assert!(refused(json!({"identity": "x", "note": "n".repeat(room + 1)})).contains("bytes"));
+    }
+
+    #[test]
+    fn an_absolute_uri_has_a_scheme_and_a_rest() {
+        for good in [
+            "https://acme.com/a",
+            "urn:air:acme.com:kim",
+            "did:web:acme.com",
+            "a+b.c-d:x",
+        ] {
+            assert!(is_absolute_uri(good), "{good}");
+        }
+        for bad in [
+            "",
+            "acme.com",
+            "/a/b",
+            ":x",
+            "1http://a",
+            "https://a b",
+            "https:",
+            "ht tp://a",
+        ] {
+            assert!(!is_absolute_uri(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn tags_and_the_trust_manifest_are_checked_with_the_listing() {
+        let config = |ard: ArdListing| InboundConfig {
+            enabled: true,
+            description: "Questions about the deploy schedule.".into(),
+            ard: Some(ard),
+            ..InboundConfig::default()
+        };
+        let listing = |tags: Vec<String>| ArdListing {
+            publisher: "acme.com".into(),
+            agent_name: "kim".into(),
+            tags,
+            ..ArdListing::default()
+        };
+        let ten: Vec<String> = (0..MAX_ARD_TAGS).map(|i| format!("tag{i}")).collect();
+        assert_eq!(config(listing(ten.clone())).check(), Ok(()));
+        assert_eq!(config(listing(vec!["x".repeat(MAX_ARD_TAG_CHARS)])).check(), Ok(()));
+        let mut eleven = ten;
+        eleven.push("one more".into());
+        for tags in [
+            eleven,
+            vec![String::new()],
+            vec!["   ".into()],
+            vec!["x".repeat(MAX_ARD_TAG_CHARS + 1)],
+            vec!["two\nlines".into()],
+        ] {
+            let error = config(listing(tags.clone())).check().unwrap_err();
+            assert!(error.contains("inbound.ard.tags"), "{tags:?}: {error}");
+        }
+        let mut bad = listing(Vec::new());
+        bad.trust_manifest = Some(manifest(json!({"identityType": "spiffe"})));
+        let error = config(bad).check().unwrap_err();
+        assert!(error.contains("inbound.ard.trust_manifest"), "{error}");
+        // A listing from before these fields loads without them, and writes no empty fields back.
+        let old: ArdListing = serde_json::from_str(r#"{"publisher": "acme.com", "agent_name": "kim"}"#).unwrap();
+        assert_eq!((old.tags.len(), &old.trust_manifest), (0, &None));
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(!text.contains("tags") && !text.contains("trust_manifest"), "{text}");
     }
 
     #[test]

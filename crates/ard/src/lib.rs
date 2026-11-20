@@ -9,18 +9,20 @@
 //! If the specification body and a guide page or a schema file differ, this crate follows the specification body.
 //! One difference is left: the body names the trust envelope `trustManifest`, and `ard-entry.schema.json`
 //! names it `TrustManifest`. The crate reads and writes `trustManifest`. The schema allows other members,
-//! so it takes `trustManifest` but does not check it. The catalog never writes a trust envelope.
+//! so its `ArdEntry` check takes `trustManifest` without checking it. The catalog writes the trust
+//! manifest that the owner gives, and does not verify its signature (§4.5.2).
 //!
-//! The test `tests/schema.rs` checks every entry of a catalog against a copy of `ard-entry.schema.json`.
+//! The test `tests/schema.rs` checks every entry of a catalog against a copy of `ard-entry.schema.json`,
+//! and each `trustManifest` against its `TrustManifest` definition.
 
 mod catalog;
 mod entry;
 mod search;
 
-pub use catalog::{Catalog, PublishedProfile, Refused, Scope, catalog};
+pub use catalog::{Catalog, PublishedProfile, Refused, Scope, catalog, dns_record};
 pub use entry::{
-    AgentListing, ArdEntry, ArdManifest, Built, Level, MCP_SERVER_CARD_TYPE, TrustManifest, Violation, build_entry,
-    urn_publisher, validate,
+    A2A_AGENT_CARD_TYPE, AgentListing, ArdEntry, ArdManifest, BASE_CONTEXT, Built, Level, MCP_SERVER_CARD_TYPE,
+    Protocol, TrustManifest, Violation, build_entry, urn_publisher, validate,
 };
 pub use search::{
     DeclineReason, Declined, ErrorCode, Failed, Federated, Federation, MAX_ERROR_MESSAGE_BYTES, MAX_RESPONSE_BYTES,

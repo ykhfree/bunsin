@@ -46,6 +46,7 @@ impl Engine {
         self.backends.validate(profile, &config).map_err(ApiError::Invalid)?;
         Self::check_config(&config)?;
         Self::save_config_from(&store, &loaded, &config)?;
+        self.stamp_inbound(&store, &before, &config)?;
         // A removed webhook takes its signing secret with it.
         self.prune_secrets(&store, &config)?;
         Ok((store, config))
@@ -67,9 +68,11 @@ impl Engine {
             update.inbound,
             update.expected,
         )?;
-        // No text: the title and the description are the owner's words, not facts of the change.
+        // No text: the title, the description and the trust manifest are the owner's words, not facts of the change.
         let inbound = &config.inbound;
-        let detail = json!({"enabled": inbound.enabled, "scope": inbound.scope, "ard": inbound.ard.is_some()});
+        let trust_manifest = inbound.ard.as_ref().is_some_and(|ard| ard.trust_manifest.is_some());
+        let detail = json!({"enabled": inbound.enabled, "scope": inbound.scope, "a2a": inbound.a2a,
+            "ard": inbound.ard.is_some(), "trust_manifest": trust_manifest});
         self.audit(&store, "inbound_settings_changed", None, detail)
     }
 

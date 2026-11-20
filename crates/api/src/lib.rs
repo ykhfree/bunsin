@@ -524,11 +524,17 @@ pub struct InboundStatus {
     pub scope: InboundScope,
     /// One for each listener for callers that serves the endpoint now.
     pub endpoints: Vec<InboundEndpoint>,
-    /// `None` if the settings have no `inbound.ard`.
-    pub ard: Option<ArdStatus>,
+    /// One for each entry of the listing: the MCP entry, and the A2A entry if A2A is on.
+    /// Empty if the settings have no `inbound.ard`.
+    #[serde(default)]
+    pub ard: Vec<ArdStatus>,
     /// The webhooks of the settings.
     #[serde(default)]
     pub webhooks: Vec<WebhookStatus>,
+    /// The DNS text for the owner to publish: an SVCB record for each listener whose catalog lists an
+    /// entry of this profile (ARD §5.1), or a `;` comment that says why a listener has none.
+    #[serde(default)]
+    pub dns_records: Vec<String>,
 }
 
 /// Where Slack or Jira sends the events of one webhook.
@@ -550,13 +556,22 @@ pub struct InboundEndpoint {
     pub card_url: String,
     /// The `/.well-known/ard.json` of this listener.
     pub catalog_url: String,
+    /// The A2A endpoint, if this listener serves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a_url: Option<String>,
+    /// The A2A Agent Card, if this listener serves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_card_url: Option<String>,
 }
 
-/// What the ARD catalogs do with the listing of a profile.
+/// What the ARD catalogs do with one entry of the listing of a profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArdStatus {
     /// `urn:air:...`, if the listing makes one.
     pub identifier: Option<String>,
+    /// The `type` of the entry, for example `application/a2a-agent-card+json`.
+    #[serde(default)]
+    pub media_type: String,
     /// The listeners whose catalog lists the entry.
     pub listed_on: Vec<InboundScope>,
     /// Why the catalogs leave the entry out. Empty if a catalog lists it.

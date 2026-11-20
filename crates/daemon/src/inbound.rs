@@ -3,6 +3,7 @@
 //! `POST /agents/{p}/mcp` is a stateless MCP server with two tools: `ask` and `get_request`.
 //! A caller token of profile `p` opens it. `GET /agents/{p}/mcp/server-card` describes it without a token.
 //! A listener serves a profile only if the profile turned the endpoint on for that listener's reach.
+//! Each listener also serves its ARD catalog, and a `robots.txt` whose `Agentmap` names the catalog.
 
 use crate::server::{OuterConfig, Reach};
 use axum::Router;
@@ -104,6 +105,7 @@ pub fn routes(engine: Arc<Engine>, listener: &OuterConfig, wake: Arc<Notify>) ->
         .route_layer(from_fn_with_state(state.clone(), authenticate))
         .route("/agents/{profile}/mcp/server-card", get(server_card))
         .route(ARD_CATALOG, get(ard_catalog))
+        .route("/robots.txt", get(robots))
         .with_state(state)
 }
 
@@ -194,6 +196,20 @@ async fn ard_catalog(State(state): State<Arc<Inbound>>) -> Response {
     for (name, value) in [
         (header::CONTENT_TYPE, "application/json"),
         (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (header::CACHE_CONTROL, "public, max-age=300"),
+    ] {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
+    response
+}
+
+/// The robots.txt of this listener: every crawler may read it, and `Agentmap` names its ARD catalog (§5.1).
+async fn robots(State(state): State<Arc<Inbound>>) -> Response {
+    let catalog = state.listener.url_of(ARD_CATALOG);
+    let mut response = format!("User-agent: *\nDisallow:\n\nAgentmap: {catalog}\n").into_response();
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
         (header::CACHE_CONTROL, "public, max-age=300"),
     ] {
         headers.insert(name, HeaderValue::from_static(value));

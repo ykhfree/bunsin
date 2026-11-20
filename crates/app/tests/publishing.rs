@@ -5,7 +5,7 @@ mod common;
 
 use bunsin_api::{ApiConnectorUpdate, EngineApi, Expected, InboundUpdate, TokenChange};
 use bunsin_app::shell::Shell;
-use bunsin_core::inbound::{InboundScope, REPLY_TOOL};
+use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope, REPLY_TOOL};
 use bunsin_core::settings::{ApiAuthMethod, ApiConfig, ApiService};
 use bunsin_engine::OuterListener;
 use common::window::{label, on_screen, open_sized, runtime, screen_texts, value, wait_until};
@@ -87,7 +87,10 @@ fn the_owner_turns_the_endpoint_on_lists_it_and_sees_why_a_catalog_leaves_it_out
         assert_eq!(label(window, "inbound-state"), "Endpoint: on, internal listener only");
         assert_eq!(label(window, "ard-identifier"), "urn:air:acme.com:kim");
         // No listener for callers runs, so the catalogs leave the entry out, and the window says why.
-        assert_eq!(label(window, "ard-listed"), "ARD listing: not in any catalog");
+        assert_eq!(
+            label(window, "ard-listed"),
+            "ARD listing (application/mcp-server-card+json): not in any catalog"
+        );
         assert_eq!(
             label(window, "ard-refused-0"),
             "Left out: no listener for callers serves the endpoint of this profile"
@@ -114,9 +117,15 @@ fn the_owner_turns_the_endpoint_on_lists_it_and_sees_why_a_catalog_leaves_it_out
         );
         assert_eq!(
             label(window, "ard-listed"),
-            "ARD listing: in the catalog of the internal listener"
+            "ARD listing (application/mcp-server-card+json): in the catalog of the internal listener"
         );
         assert!(window.try_find("ard-refused-0").is_none());
+        // A2A is off, so the profile has one entry.
+        assert!(window.try_find("ard-listed-1").is_none());
+        assert_eq!(
+            label(window, "inbound-dns"),
+            "_entries._agents.acme.com. 3600 IN SVCB 1 agents.acme.com."
+        );
     });
 
     // A publisher domain that the operator does not allow is refused, and the form keeps the change.
@@ -135,6 +144,126 @@ fn the_owner_turns_the_endpoint_on_lists_it_and_sees_why_a_catalog_leaves_it_out
         assert_eq!(value(window, "ard-publisher"), "other.example");
     });
     assert_eq!(rt.block_on(rig.engine.inbound_settings("kim")).unwrap(), stored);
+}
+
+#[gpui_kit::test]
+fn the_owner_turns_a2a_on_and_tags_the_listing(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rig.engine.add_outer_listener(OuterListener {
+        scope: InboundScope::Internal,
+        url: "https://agents.acme.com".into(),
+    });
+    let (window, shell) = open_agent(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.click("inbound-on", cx);
+        retype(window, cx, "inbound-description", "Questions about deploys.");
+        window.click("inbound-a2a", cx);
+        window.click("ard-on", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "ard-publisher", common::PUBLISHER);
+        retype(window, cx, "ard-agent", "kim");
+        // Spaces around a tag and an empty item between commas do not count.
+        retype(window, cx, "ard-tags", " deploys,, release calendar ");
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    let stored = rt.block_on(rig.engine.inbound_settings("kim")).unwrap();
+    assert!(stored.a2a);
+    assert_eq!(stored.ard.as_ref().unwrap().tags, ["deploys", "release calendar"]);
+    wait_until(cx, &shell, "the A2A entry", |s| {
+        s.state
+            .inbound_status
+            .as_ref()
+            .is_some_and(|status| status.ard.len() == 2)
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbound-result"), "Saved");
+        // The loaded tags read back as the stored ones, so nothing waits to be saved.
+        assert_eq!(value(window, "ard-tags"), "deploys, release calendar");
+        assert_eq!(label(window, "inbound-changes"), "");
+        assert_eq!(
+            label(window, "inbound-endpoint-0"),
+            "internal listener\nMCP: https://agents.acme.com/agents/kim/mcp\n\
+             Server card: https://agents.acme.com/agents/kim/mcp/server-card\n\
+             ARD catalog: https://agents.acme.com/.well-known/ard.json\n\
+             A2A: https://agents.acme.com/agents/kim/a2a\n\
+             Agent card: https://agents.acme.com/agents/kim/a2a/agent-card.json"
+        );
+        assert_eq!(label(window, "ard-identifier-1"), "urn:air:acme.com:a2a:kim");
+        assert_eq!(
+            label(window, "ard-listed-1"),
+            "ARD listing (application/a2a-agent-card+json): in the catalog of the internal listener"
+        );
+        // Eleven tags are more than ARD listings take here; the server says so and keeps nothing.
+        let eleven: Vec<String> = (0..11).map(|i| format!("t{i}")).collect();
+        retype(window, cx, "ard-tags", &eleven.join(", "));
+        window.click("inbound-a2a", cx);
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 2);
+    on_screen(cx, window, |window, _| {
+        assert!(
+            label(window, "inbound-result").contains("at most 10 tags"),
+            "{}",
+            label(window, "inbound-result")
+        );
+        assert_eq!(label(window, "inbound-changes"), "Not saved");
+    });
+    assert_eq!(rt.block_on(rig.engine.inbound_settings("kim")).unwrap(), stored);
+}
+
+#[gpui_kit::test]
+fn the_inbound_card_keeps_the_trust_manifest_it_does_not_show(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // The owner set the trust manifest in the settings file. The card has no field for it.
+    let manifest = serde_json::json!({"identity": "spiffe://acme.com/ns/agents/kim",
+        "attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2.pdf"}]});
+    let inbound = InboundConfig {
+        enabled: true,
+        description: "Questions about deploys.".into(),
+        ard: Some(ArdListing {
+            publisher: common::PUBLISHER.into(),
+            agent_name: "kim".into(),
+            trust_manifest: Some(manifest.as_object().unwrap().clone()),
+            ..ArdListing::default()
+        }),
+        ..InboundConfig::default()
+    };
+    let update = InboundUpdate {
+        inbound,
+        expected: Expected::Unchecked,
+    };
+    rt.block_on(rig.engine.set_inbound_settings("kim", update)).unwrap();
+    let (window, shell) = open_agent(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        // The loaded settings show no change: the card counts the manifest as kept.
+        assert_eq!(label(window, "inbound-changes"), "");
+        assert!(!screen_texts(window).iter().any(|text| text.contains("spiffe")));
+        retype(
+            window,
+            cx,
+            "inbound-description",
+            "Questions about deploys and reviews.",
+        );
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    let stored = rt.block_on(rig.engine.inbound_settings("kim")).unwrap();
+    assert_eq!(stored.description, "Questions about deploys and reviews.");
+    assert_eq!(
+        stored.ard.as_ref().unwrap().trust_manifest,
+        Some(manifest.as_object().unwrap().clone())
+    );
+    // A listing that the owner turns off takes its manifest with it.
+    on_screen(cx, window, |window, cx| {
+        window.click("ard-on", cx);
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 2);
+    assert_eq!(rt.block_on(rig.engine.inbound_settings("kim")).unwrap().ard, None);
 }
 
 #[gpui_kit::test]

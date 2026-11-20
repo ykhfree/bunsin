@@ -495,24 +495,53 @@
   - 본문: `$schema`(`https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`, 스키마의 pattern이 이 값만 받는다), `name`(리스너 host의 label을 뒤집고 `/<프로필>`, 예 `com.example.agents/kim`),
     `version`(bunsind 버전), `description`, `title`(있으면), `remotes: [{type: "streamable-http", url, headers: [{name: "Authorization", isRequired, isSecret}]}]`.
     token과 소유자 이름은 넣지 않는다.
-- **ARD 게시**(engine `ard.rs`, crate `bunsin-ard`): `inbound.ard: {publisher, namespace?, agent_name, representative_queries}`.
+- **ARD 게시**(engine `ard.rs`, crate `bunsin-ard`): `inbound.ard: {publisher, namespace?, agent_name, representative_queries, tags?, trust_manifest?}`.
   - 운영자의 `--ard-publisher-domain`(반복) 목록 안의 publisher만 게시한다. 목록이 없으면 아무도 게시하지 않는다.
     `RealBackends::validate`가 저장할 때, `Backends::ard_publishers`로 catalog가 쓸 때 검사한다. 기각: 소유자가 고르기(운영자 host에서 남의 도메인을 주장한다).
-  - `check_config`의 `check_ard`가 자리표시 URL로 `build_entry`를 돌려 MUST 위반을 거부한다. `ard`는 endpoint가 켜져 있어야 한다.
+  - `check_config`의 `check_ard`가 자리표시 URL로 프로필의 모든 항목에 `build_entry`를 돌려 MUST 위반을 거부한다. `ard`는 endpoint가 켜져 있어야 한다.
     대표 질문 수가 2~5 밖이면 SHOULD 위반이라 경고와 함께 싣는다(설계 결정).
+  - **항목의 용어**: 모든 항목에 `@context: "https://agenticresourcediscovery.org/context/v1"`(§4.1 SHOULD), `capabilities`(MCP `["ask", "get_request"]`, A2A `["ask"]`: 호출자가 부를 도구와 skill),
+    `version`(bunsind 버전, server card와 같다), `updatedAt`, `tags`, `trustManifest`가 있다. 뒤의 셋은 값이 있을 때만 있다. `metadata`는 채울 값이 없어 쓰지 않는다.
+    - `tags`: 0~10개, 각 1~40자 한 줄(core `ArdListing::check`). 어기면 저장을 거부한다. CDDL이 `tags: [+ tstr]`이므로 비면 뺀다.
+    - `updatedAt`: 프로필 settings 키 `ard_updated_at`(RFC 3339 UTC, core `time::utc_text`). `set_profile_config`와 `replace_part`가 `inbound`가 바뀐 저장 뒤에 쓴다.
+      설정 밖에 두는 이유: 설정 안에 두면 저장마다 `inbound`가 바뀌어 창의 `Expected` 비교가 깨진다. 키가 없으면(운영자가 만든 뒤 저장이 없으면) 뺀다.
+  - **A2A 항목**: `inbound.a2a`가 켜지면 프로필의 두 번째 항목이다. 새 설정은 없다(identifier는 파생한다).
+    identifier `urn:air:<publisher>:[<namespace>:]a2a:<agent_name>`, type `application/a2a-agent-card+json`, `url`은 같은 리스너의 Agent Card(`/agents/{p}/a2a/agent-card.json`), displayName은 이름 + ` (A2A)`이다.
+    MCP identifier는 그대로이다(Appendix C의 안정성). 끝 이름이 같아 둘 다 agent 이름으로 끝난다.
+    catalog는 `served_on`인 리스너에 프로필을 싣고 `a2a_served_on = a2a && served_on`이므로, A2A 항목은 Agent Card를 제공하는 리스너에만 실린다.
+    중복 검사(`DuplicateIdentifier`)는 두 종류 전체에 쓴다. 예: namespace `a2a`를 고른 프로필의 MCP 항목과 다른 프로필의 A2A 항목. 그 identifier를 가진 항목만 빠지고, 같은 프로필의 다른 항목은 남는다.
+  - **trustManifest**(§4.5): `inbound.ard.trust_manifest`, ARD 멤버 이름 그대로의 JSON 객체.
+    - 저장 검사(core `check_trust_manifest`): `identity`는 빈 글이 아니다. ARD가 이름 붙인 멤버는 `ard.cddl`과 스키마의 형태를 따른다:
+      `identityType`, `signature`는 글, `trustSchema`는 객체(`identifier`, `version`은 글, `governanceUri`는 절대 URI, `verificationMethods`는 글의 배열),
+      `attestations[]`는 글 `type`과 절대 URI `uri`(필수), 글 `mediaType`, `digest`, `provenance[]`는 글 `relation`과 `sourceId`(필수), 글 `sourceDigest`. 다른 멤버는 무엇이든 된다. JSON 글로 16 KiB 이하.
+    - §4.5.1 결속: `build_entry`가 manifest를 두 항목에 싣고, `validate`가 `TrustIdentityMismatch`(MUST)를 낸다. 그래서 다른 domain의 identity는 `check_ard`가 저장을 거부하고,
+      규칙 전에 저장된 설정(또는 운영자가 검사 없이 만든 설정)은 catalog가 두 항목을 모두 뺀다. `identity_domain`은 `spiffe://`, `https://`, `did:web:`만 읽으므로 `did:key`는 거부된다.
+    - 서명은 검증하지 않는다. §4.5.2는 절차를 신뢰 체계(`trustSchema`)에 맡기고 ARD는 정하지 않는다.
+    - 감사 `inbound_settings_changed`는 `a2a`와 `trust_manifest: bool`만 남긴다. manifest의 글은 남기지 않는다.
+    - 창은 manifest를 보이거나 고치지 않는다. 카드가 읽은 값(`track.base`)을 그대로 저장한다. 목록을 끄면 manifest도 사라진다.
   - `GET /.well-known/ard.json`(외부 리스너마다, 인증 없음, `Access-Control-Allow-Origin: *`): 요청마다 `bunsin_ard::catalog`로 만든다.
     endpoint가 켜지고 publisher가 허용된 모든 프로필을 넘겨 identifier 중복을 전체에서 검사하고, catalog의 scope 규칙(공개 리스너는 `public`만)이 `served_on`과 같은 것을 고른다.
     항목의 `url`은 같은 리스너의 card URL이다. 중복 identifier는 두 프로필 모두 빠진다.
   - 엔진은 `serve_outer`가 등록한 리스너 주소(`add_outer_listener`)로 URL을 만든다.
+  - **robots.txt** `GET /robots.txt`(외부 리스너마다, `text/plain; charset=utf-8`, `Cache-Control: public, max-age=300`):
+    `User-agent: *`, 빈 `Disallow:`, 빈 줄, `Agentmap: <리스너 URL>/.well-known/ard.json`(§5.1 Agentmap).
+  - **rel="ard"**: `serve_outer`의 `map_response` layer가 외부 리스너의 모든 응답(401과 404 포함)에 `Link: <<리스너 URL>/.well-known/ard.json>; rel="ard"`를 붙인다.
+    §5.1은 게시자가 rel="ard"를 내라고 하는데, Bunsin에는 `<link rel="ard">`를 넣을 HTML이 없기 때문이다. 제어 API에는 robots.txt와 `Link`가 없다.
+  - **DNS**: 서버는 레코드를 쓰지 않고 보여 준다. `InboundStatus.dns_records`와 `bunsind inbound`(`dns\t…`)가 항목을 싣는 리스너마다
+    `_entries._agents.<publisher>. 3600 IN SVCB 1 <리스너 host>.`를 보인다(`bunsin_ard::dns_record`). port가 443이 아니면 ` port=<port>`를 붙인다.
+    - SVCB는 host와 port만 담는다. 그래서 리스너 URL에 경로가 있거나 host가 IP 주소이면 레코드 대신 `;`로 시작하는 zone 파일 주석이 이유를 말한다.
+    - 결정할 수 없는 것: §5.1은 레코드 이름과 SVCB만 말하고 SvcParams를 정하지 않는다. 게시 안내 페이지는 `_catalog._agents` TXT와 SRV를 쓴다. PLAN 4.6 규칙대로 본문(SVCB)을 따른다.
   - 스키마 적합성: `crates/ard/tests/schema.rs`가 `catalog(..)`의 본문과 모든 항목을 스펙의 JSON 스키마 사본(`tests/fixtures/ard-entry.schema.json`,
     ard-spec commit `9d33ea1`)으로 검사한다. daemon `tests/server.rs`는 두 리스너가 실제로 내는 본문을 같은 스키마로 검사한다.
+    각 `trustManifest`는 `#/$defs/TrustManifest`로 따로 검사한다. 스키마의 속성 이름이 `TrustManifest`라서 `ArdEntry` 검사는 `trustManifest`를 보지 않기 때문이다.
     검사기는 dev 의존성 `jsonschema` 0.60.2(기본 기능 없음, `format` 검사 켬)이다. 위반은 찾지 못했다.
     MUST 위반 항목(url과 data 둘 다나 둘 다 없음, type이나 displayName 없음, 잘못된 URN, 상대 URL)은 스키마와 crate의 `validate`가 모두 거부한다.
-  - 남은 차이: 스펙 본문은 `trustManifest`, 스키마는 `TrustManifest`라고 쓴다. crate는 본문을 따른다. catalog는 trust envelope를 쓰지 않으므로 게시물에는 영향이 없다.
+  - 남은 차이: 스펙 본문은 `trustManifest`, 스키마는 `TrustManifest`라고 쓴다. crate는 본문을 따른다. 위의 따로 하는 검사가 이 차이를 메운다.
   - 공식 conformance 도구는 ard-spec 저장소의 `conformance/bin/conformance-test`(Python 3, 표준 라이브러리만)이다.
     `manifest <파일>` 모드는 네트워크 없이 돈다. Python `jsonschema`가 있으면 같은 스키마 검사도 한다. 이 도구는 CI에서 돌리지 않는다.
-  - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 ARD identifier,
-    싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고.
+  - 제어 경로 `GET /v1/profiles/{p}/inbound`(`InboundStatus`, CLI `bunsind inbound`): 리스너별 MCP, card, catalog URL과 A2A, Agent Card URL(`a2a_served_on`일 때),
+    항목마다(`ard: Vec<ArdStatus>`, MCP 다음 A2A) `media_type`, identifier, 싣는 리스너, 빠진 이유(MUST 위반, 허용 밖 publisher, 제공하는 리스너 없음, 중복), 경고, 그리고 `dns_records`.
+    - 새 필드는 `#[serde(default)]`이다. `ard`는 `Option`에서 목록으로 바뀌었으므로, 옛 서버가 보낸 객체는 새 창이 읽지 못한다. 창과 서버를 함께 배포한다.
 - 아직 없는 것: 호출자용 OAuth.
 
 ## 8. AI 표시
@@ -993,7 +1022,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
-| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, 소유자의 상태 조회) | 구현, 테스트 있음(core, 서버, CLI, 창). 게시 본문은 스펙 JSON 스키마 검사를 통과한다. 공식 conformance 도구는 실행해 보지 않았다. |
+| ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구는 실행해 보지 않았다. |
 | ARD 검색(내장 읽기 도구, referral 없음, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, 서버, 창의 목록 편집). 로컬 stub registry로만 테스트 |
 | 좁은 자율(결정 기록, 도구별 개수, 기준에 따른 제안, 거부·신고로 보류, 소유자만 해제) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창) |
 | 서버가 멈춘 뒤의 재개(`executing`→`unknown`, 시작하지 않은 `approved`의 정책 재확인과 실행 또는 사본), 답이 없는 승인 호출(시간 초과)의 `unknown`, `unknown`의 처리(done, retry, drop) | 구현, 테스트 있음(connectors, 엔진, 서버, CLI, 창) |
