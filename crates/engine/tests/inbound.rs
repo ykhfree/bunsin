@@ -5,13 +5,18 @@ mod common;
 
 use bunsin_api::{ApiError, Edit, EngineApi, Expected, PermissionsUpdate, ProfileConfig};
 use bunsin_core::approval::ApprovalState;
+use bunsin_core::event::InboundEvent;
 use bunsin_core::inbound::{
     INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS, REPLY_TOOL, RequestState, RequestStatus,
 };
+use bunsin_core::llm::{CompletionRequest, CompletionResponse, LlmError, StopReason, Usage};
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
-use bunsin_core::records::{Caller, InboxBody};
+use bunsin_core::ports::{BoxFuture, LlmClient};
+use bunsin_core::records::{Caller, InboxBody, InboxItem};
+use bunsin_engine::{Backends, Engine, Runtime};
 use common::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 const EMAIL: &str = "lee.park@corp.example.com";
 
@@ -384,4 +389,267 @@ async fn a_question_never_makes_an_autonomous_write_run_without_the_owner() {
 
     rig.engine.approve("kim", inbox_id, None).await.unwrap();
     assert_eq!(rig.slack.calls().len(), 2);
+}
+
+/// The inbox items of the event of a caller's request, oldest first.
+fn request_items(rig: &Rig, request_id: &str) -> Vec<InboxItem> {
+    let key = InboundEvent {
+        source: INBOUND_SOURCE.into(),
+        external_id: request_id.into(),
+        thread: None,
+        author: String::new(),
+        text: String::new(),
+        channel: Default::default(),
+    }
+    .dedupe_key();
+    rig.kim_store().inbox_for_event(&key).unwrap()
+}
+
+/// The owner's dismissals of waiting calls, over all tools.
+async fn rejections(rig: &Rig) -> u32 {
+    let autonomy = rig.engine.autonomy("kim").await.unwrap();
+    autonomy.tools.iter().map(|tool| tool.counts.rejected).sum()
+}
+
+async fn audit_kinds(engine: &Engine) -> Vec<String> {
+    let audit = engine.snapshot("kim").await.unwrap().audit;
+    audit.into_iter().map(|entry| entry.kind).collect()
+}
+
+#[tokio::test]
+async fn cancel_withdraws_items_without_counting_a_rejection() {
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    let asked = rig.engine.send_message(&bot, "When?", "m-1", None).unwrap();
+    rig.llm.reply(&answer("Friday."), 10);
+    rig.engine.drain_intake().await;
+    let (inbox_id, state, _) = newest(&rig).await;
+    assert_eq!(state, ApprovalState::Pending);
+    rig.advance(30);
+
+    let canceled = rig.engine.cancel_request(&bot, &asked.request_id).unwrap();
+    assert_eq!(canceled.status, RequestStatus::Canceled);
+    assert_eq!(canceled.status_at, 1_000_030);
+    let items = request_items(&rig, &asked.request_id);
+    assert_eq!(items.len(), 1);
+    assert_eq!((items[0].id, items[0].state), (inbox_id, ApprovalState::Rejected));
+    // The owner decided nothing, so nothing counts against the reply tool.
+    assert_eq!(rejections(&rig).await, 0);
+    assert!(audit_kinds(&rig.engine).await.contains(&"inbound_canceled".to_owned()));
+    // Approving the withdrawn answer is refused, so the caller gets nothing.
+    assert!(rig.engine.approve("kim", inbox_id, None).await.is_err());
+    // A second cancel changes nothing and keeps the first time.
+    rig.advance(30);
+    assert_eq!(rig.engine.cancel_request(&bot, &asked.request_id).unwrap(), canceled);
+    // `get_request` shows the cancel too.
+    assert_eq!(status(&rig, &bot, &asked.request_id).status, RequestStatus::Canceled);
+
+    // Control: the owner's own dismissal does count.
+    let other = rig.engine.ask(&bot, "Salaries?").unwrap();
+    rig.llm.reply(&answer("No."), 10);
+    rig.engine.drain_intake().await;
+    let (inbox_id, _, _) = newest(&rig).await;
+    rig.engine.reject("kim", inbox_id, "no").await.unwrap();
+    assert_eq!(rejections(&rig).await, 1);
+    // A decided request is not canceled: the caller keeps seeing the decision.
+    let declined = rig.engine.cancel_request(&bot, &other.request_id).unwrap();
+    assert_eq!(declined.status, RequestStatus::Declined);
+    // Another caller's request is not found.
+    let stranger = caller(&rig, "stranger");
+    let refused = rig.engine.cancel_request(&stranger, &other.request_id);
+    assert!(matches!(refused, Err(ApiError::NotFound(_))), "{refused:?}");
+}
+
+#[tokio::test]
+async fn a_canceled_question_is_not_handed_to_the_agent() {
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    let asked = rig.engine.send_message(&bot, "When?", "m-1", None).unwrap();
+    rig.engine.cancel_request(&bot, &asked.request_id).unwrap();
+    rig.llm.reply(&answer("Friday."), 10);
+    assert!(rig.engine.drain_intake().await.is_empty());
+    assert!(
+        rig.llm.requests().is_empty(),
+        "the agent never saw the canceled question"
+    );
+    assert!(request_items(&rig, &asked.request_id).is_empty());
+}
+
+#[tokio::test]
+async fn an_answer_approved_after_cancel_is_not_delivered() {
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    let asked = rig.engine.send_message(&bot, "When?", "m-1", None).unwrap();
+    rig.llm.reply(&answer("Friday."), 10);
+    rig.engine.drain_intake().await;
+    let (inbox_id, _, _) = newest(&rig).await;
+    // The owner's approval moved the answer to `approved`, and its run has not started yet.
+    let store = rig.kim_store();
+    assert!(
+        store
+            .move_inbox_state(inbox_id, ApprovalState::Pending, ApprovalState::Approved, 1_000_000)
+            .unwrap()
+    );
+    // The cancel cannot withdraw an approved item.
+    rig.engine.cancel_request(&bot, &asked.request_id).unwrap();
+    assert_eq!(store.inbox_item(inbox_id).unwrap().state, ApprovalState::Approved);
+    // The run checks the cancel: the answer fails and goes nowhere.
+    let interrupted = rig.engine.mark_interrupted();
+    assert!(rig.engine.resume_approved(interrupted).await.is_empty());
+    assert_eq!(store.inbox_item(inbox_id).unwrap().state, ApprovalState::Failed);
+    let kinds = audit_kinds(&rig.engine).await;
+    assert!(kinds.contains(&"inbound_reply_canceled".to_owned()), "{kinds:?}");
+    assert!(!kinds.contains(&"inbound_answered".to_owned()), "{kinds:?}");
+    let state = status(&rig, &bot, &asked.request_id);
+    assert_eq!((state.status, state.answer), (RequestStatus::Canceled, None));
+}
+
+#[tokio::test]
+async fn a_repeated_message_id_counts_once() {
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    let first = rig.engine.send_message(&bot, "When?", "m-1", Some("ctx-1")).unwrap();
+    assert_eq!(first.status, RequestStatus::Working);
+    assert_eq!((first.context_id.as_str(), first.status_at), ("ctx-1", 1_000_000));
+    // A resend returns the first request, also with other text, and stores nothing.
+    rig.advance(5);
+    let again = rig.engine.send_message(&bot, "When??", "m-1", None).unwrap();
+    assert_eq!(again, first);
+    assert_eq!(rig.engine.caller_requests(&bot).unwrap().len(), 1);
+    // Without a context ID, the context is the request ID.
+    let second = rig.engine.send_message(&bot, "Where?", "m-2", None).unwrap();
+    assert_eq!(second.context_id, second.request_id);
+    // Another caller with the same message ID gets its own request.
+    let other = caller(&rig, "other");
+    let theirs = rig.engine.send_message(&other, "When?", "m-1", None).unwrap();
+    assert_ne!(theirs.request_id, first.request_id);
+
+    // The hourly limit counts stored questions only, so resends never use it up.
+    for n in 3..=MAX_ASKS_PER_HOUR {
+        rig.engine.send_message(&bot, "When?", &format!("m-{n}"), None).unwrap();
+    }
+    assert!(matches!(
+        rig.engine.send_message(&bot, "When?", "m-new", None),
+        Err(ApiError::NotAllowed(_))
+    ));
+    // Over the limit, a resend still finds its first request.
+    assert_eq!(rig.engine.send_message(&bot, "When?", "m-1", None).unwrap(), first);
+    let asked = audit_kinds(&rig.engine)
+        .await
+        .into_iter()
+        .filter(|kind| kind == "inbound_asked")
+        .count();
+    assert_eq!(asked as u32, MAX_ASKS_PER_HOUR + 1);
+}
+
+#[tokio::test]
+async fn the_listed_requests_are_the_callers_own_with_the_time_of_the_owners_decision() {
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    let over_mcp = rig.engine.ask(&bot, "When?").unwrap();
+    rig.advance(10);
+    let over_a2a = rig.engine.send_message(&bot, "Where?", "m-1", None).unwrap();
+    let other = caller(&rig, "other");
+    rig.engine.send_message(&other, "Who?", "m-1", None).unwrap();
+    rig.advance(10);
+    // The agent's work changes no time: both still show their arrival.
+    rig.llm.reply(&answer("Friday."), 10).reply(&ignore(), 10);
+    rig.engine.drain_intake().await;
+    let listed = rig.engine.caller_requests(&bot).unwrap();
+    let ids: Vec<&str> = listed.iter().map(|r| r.request_id.as_str()).collect();
+    assert_eq!(ids, [over_a2a.request_id.as_str(), over_mcp.request_id.as_str()]);
+    let found: Vec<(RequestStatus, i64)> = listed.iter().map(|r| (r.status, r.status_at)).collect();
+    let pending = RequestStatus::PendingApproval;
+    assert_eq!(found, [(pending, 1_000_010), (pending, 1_000_000)]);
+    // The owner's approval is the time of the answer.
+    rig.advance(100);
+    let answer_item = request_items(&rig, &over_mcp.request_id)[0].id;
+    rig.engine.approve("kim", answer_item, None).await.unwrap();
+    let answered = rig.engine.caller_request(&bot, &over_mcp.request_id).unwrap();
+    assert_eq!(
+        (answered.status, answered.status_at),
+        (RequestStatus::Answered, 1_000_120)
+    );
+}
+
+/// An LLM that replies only after the test lets it, so the test can act while the agent works.
+struct GatedLlm {
+    reply: String,
+    called: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl LlmClient for GatedLlm {
+    fn complete(&self, _request: CompletionRequest) -> BoxFuture<'_, Result<CompletionResponse, LlmError>> {
+        Box::pin(async move {
+            self.called.notify_one();
+            self.release.notified().await;
+            Ok(CompletionResponse {
+                content: self.reply.clone(),
+                stop: StopReason::End,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 0,
+                },
+            })
+        })
+    }
+}
+
+struct GatedBackends(Arc<GatedLlm>);
+
+impl Backends for GatedBackends {
+    fn build<'a>(&'a self, _profile: &'a str, _config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
+        let llm: Arc<dyn LlmClient> = self.0.clone();
+        Box::pin(async move {
+            Ok(Runtime {
+                llm: Ok(llm),
+                connectors: Default::default(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_cancel_during_the_drain_withdraws_new_items() {
+    // The agent answers in one case and ignores the question in the other. Neither leaves an item open.
+    for reply in [answer("Friday."), ignore()] {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = Arc::new(GatedLlm {
+            reply,
+            called: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let backends = Arc::new(GatedBackends(llm.clone()));
+        let engine = Engine::open(dir.path(), backends, Arc::new(|| 1_000_000)).unwrap();
+        engine.create_profile("kim", config()).await.unwrap();
+        engine.set_profile_config("kim", open(config())).await.unwrap();
+        let (_, token) = engine.app_store().add_caller_token("kim", "bot", 1).unwrap();
+        let bot = engine.app_store().caller(&token).unwrap().unwrap();
+        let asked = engine.send_message(&bot, "When?", "m-1", None).unwrap();
+
+        let cancel = async {
+            // The agent works on the question now.
+            llm.called.notified().await;
+            let canceled = engine.cancel_request(&bot, &asked.request_id).unwrap();
+            llm.release.notify_one();
+            canceled
+        };
+        let (failures, canceled) = tokio::join!(engine.drain_intake(), cancel);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(canceled.status, RequestStatus::Canceled);
+
+        let inbox = engine.snapshot("kim").await.unwrap().inbox;
+        let open_items: Vec<_> = inbox
+            .iter()
+            .filter(|item| matches!(item.state, ApprovalState::Pending | ApprovalState::Draft))
+            .collect();
+        assert!(open_items.is_empty(), "{open_items:?}");
+        let kinds = audit_kinds(&engine).await;
+        assert!(kinds.contains(&"inbound_canceled".to_owned()), "{kinds:?}");
+        let state = engine.caller_request(&bot, &asked.request_id).unwrap();
+        assert_eq!(state.status, RequestStatus::Canceled);
+        // The question is not handed to the agent again.
+        assert!(engine.drain_intake().await.is_empty());
+    }
 }
