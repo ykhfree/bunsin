@@ -980,7 +980,8 @@ bunsind caller-revoke kim 1                        # the next request with it is
   `<listener URL>/agents/<profile>/mcp`, with two tools: `ask {question}` returns
   `{request_id, pending_approval: true}` at once, and `get_request {request_id}` returns
   `{request_id, status, answer?}` with the status `working`, `pending_approval`, `answered`,
-  `declined` or `failed`. The caller sends `Authorization: Bearer <caller token>`.
+  `declined`, `failed` or `canceled` (the caller canceled it over A2A). The caller sends
+  `Authorization: Bearer <caller token>`.
   The caller sees only your decisions: `declined` means that you dismissed the item, `failed`
   that an answer you approved could not be delivered. If the agent gives no answer, you get an
   item to dismiss, and the caller sees `pending_approval` until you do. Otherwise a question
@@ -1026,6 +1027,68 @@ bunsind caller-revoke kim 1                        # the next request with it is
   the identifier, the listeners whose catalog lists it, and why a catalog leaves it out
   (for example a publisher domain that the operator no longer allows), with the warnings.
 - Not built yet: OAuth for callers.
+
+#### Over A2A
+
+The endpoint can also speak A2A v1.0 (the JSON-RPC binding). It is off by default. Turn it on
+with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then serve A2A too.
+
+- **Address:** `POST <listener URL>/agents/<profile>/a2a`. The caller sends the same caller
+  token: `Authorization: Bearer <caller token>`.
+- **Agent Card:** `GET <listener URL>/agents/<profile>/a2a/agent-card.json` (`application/json`,
+  no token needed). It holds the title (or the profile ID), the description, the endpoint URL,
+  the security scheme `callerToken` (HTTP Bearer) and one skill `ask`. The skill's examples are
+  the representative queries of the ARD listing. It never holds a token or the owner's name.
+  There is no `/.well-known/agent-card.json`, because that address allows one agent per domain.
+- **Version:** send the header `A2A-Version: 1.0`, or the query parameter `A2A-Version=1.0`.
+  Only 1.0 is accepted; a patch number such as `1.0.2` does not count. No version means 0.3
+  (A2A §3.6.2), so a call without it gets `-32009`.
+- **SendMessage needs `"configuration": {"returnImmediately": true}`.** A client that does not
+  send it gets `-32004` (UnsupportedOperationError). Without the flag, A2A requires the call to
+  wait until the task ends (§3.2.2), and your approval can take days. So send the flag, then poll
+  `GetTask`:
+
+  ```json
+  {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+    "message": {"role": "ROLE_USER", "messageId": "msg-1", "parts": [{"text": "When do we deploy?"}]},
+    "configuration": {"returnImmediately": true}}}
+  ```
+
+- **The message:** role `ROLE_USER`, a `messageId`, and text parts only (no media type, or
+  `text/*`). The server joins the text parts with line breaks. Another part gets `-32005`, and
+  the server never fetches a `url` part. A `contextId` is optional (1 to 128 visible ASCII
+  characters). Without one, the context is the task ID. The agent does not see the earlier
+  questions of the same context. A message with a `taskId` gets `-32004`: text added to a waiting
+  question would change the question that you approve. The same `messageId` from the same caller
+  returns the first task and counts once.
+- **Task states** show only your decisions, like `get_request`:
+
+  | Request status | Task state | The task holds |
+  |---|---|---|
+  | `working`, `pending_approval` | `TASK_STATE_WORKING` | the fixed text "The owner of this agent approves every answer. Poll GetTask." and the time the question arrived |
+  | `answered` | `TASK_STATE_COMPLETED` | the artifact `answer`: the text you approved, with the AI marker and your edit |
+  | `declined` | `TASK_STATE_REJECTED` | a fixed text and the time of your decision |
+  | `failed` | `TASK_STATE_FAILED` | a fixed text |
+  | `canceled` | `TASK_STATE_CANCELED` | the time of the cancel |
+
+  A task has no history and no text of the agent. Until you decide, its time stays the time the
+  question arrived. The server never uses `INPUT_REQUIRED` or `AUTH_REQUIRED`: both ask the
+  client to act, and your approval is work inside the agent.
+- **Methods:** `SendMessage`, `GetTask`, `ListTasks` and `CancelTask`. `ListTasks` shows only the
+  caller's own tasks, also the questions it asked over MCP (the newest 500), newest status
+  first. It takes `pageSize` (1 to 100, default 50), `pageToken`, `status`, `contextId`,
+  `statusTimestampAfter` and `includeArtifacts`. `SendStreamingMessage`, `SubscribeToTask` and
+  `GetExtendedAgentCard` get `-32004`, the four push notification methods `-32003`, and other
+  methods `-32601`.
+- **CancelTask** withdraws the waiting items of the question from your inbox. This does not count
+  as your rejection. Canceling a canceled task returns the same task. A completed, rejected or
+  failed task gets `-32002`. If you approve the answer at the same moment, the cancel wins, and
+  the server sends no answer.
+- **Limits** are the ones of MCP. `SendMessage` counts like `ask` (20 an hour per caller, 50 open
+  questions). `GetTask`, `ListTasks` and `CancelTask` share the 120 reads a minute of
+  `get_request`. A limit gets `-32000` with the reason `RATE_LIMIT_EXCEEDED`. The token, `Host`,
+  body size and concurrency checks are those of MCP (`401`, `403`, `413`, `503`). A JSON-RPC error
+  comes with HTTP 200. A missing task and another caller's task get the same `-32001`.
 
 ### Work with the agent
 

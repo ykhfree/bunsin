@@ -3,6 +3,7 @@
 //! `POST /agents/{p}/mcp` is a stateless MCP server with two tools: `ask` and `get_request`.
 //! A caller token of profile `p` opens it. `GET /agents/{p}/mcp/server-card` describes it without a token.
 //! A listener serves a profile only if the profile turned the endpoint on for that listener's reach.
+//! The A2A endpoint (`a2a.rs`) is on the same routes and shares the caller check and the limits.
 
 use crate::server::{OuterConfig, Reach};
 use axum::Router;
@@ -46,19 +47,21 @@ pub fn served_on(config: &ProfileConfig, reach: Reach) -> bool {
     config.inbound.served_on(reach.scope())
 }
 
-struct Inbound {
-    engine: Arc<Engine>,
-    listener: OuterConfig,
+/// The state of the inbound endpoints of one listener. MCP and A2A share it, and so share its limits.
+pub(crate) struct Inbound {
+    pub(crate) engine: Arc<Engine>,
+    pub(crate) listener: OuterConfig,
     /// Wakes the task that hands stored questions to the agent.
-    wake: Arc<Notify>,
+    pub(crate) wake: Arc<Notify>,
     running: Arc<Semaphore>,
-    /// The times of each caller's `get_request` calls in the last minute, by caller token ID.
+    /// The times of each caller's reads in the last minute, by caller token ID: `get_request`
+    /// and the A2A methods `GetTask`, `ListTasks` and `CancelTask`.
     reads: Mutex<HashMap<i64, VecDeque<Instant>>>,
 }
 
 impl Inbound {
     /// True if the caller may read once more now. A true answer counts the read.
-    fn may_read(&self, caller: i64) -> bool {
+    pub(crate) fn may_read(&self, caller: i64) -> bool {
         let now = Instant::now();
         let mut reads = self.reads.lock().expect("inbound lock");
         let times = reads.entry(caller).or_default();
@@ -104,14 +107,25 @@ pub fn routes(engine: Arc<Engine>, listener: &OuterConfig, wake: Arc<Notify>) ->
         .route_layer(from_fn_with_state(state.clone(), authenticate))
         .route("/agents/{profile}/mcp/server-card", get(server_card))
         .route(ARD_CATALOG, get(ard_catalog))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(crate::a2a::routes(state))
 }
 
-/// Lets a request through only with a valid caller token of the profile in the path, and only if this
-/// listener serves that profile. Every refusal is the same 401, so a caller learns nothing about profiles.
 async fn authenticate(
     State(state): State<Arc<Inbound>>,
     Path(profile): Path<String>,
+    request: Request,
+    next: Next,
+) -> Response {
+    admit(&state, &profile, served_on, request, next).await
+}
+
+/// Lets a request through only with a valid caller token of the profile in the path, and only if
+/// `served` holds for this listener. Every refusal is the same 401, so a caller learns nothing about profiles.
+pub(crate) async fn admit(
+    state: &Inbound,
+    profile: &str,
+    served: fn(&ProfileConfig, Reach) -> bool,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -125,8 +139,8 @@ async fn authenticate(
         Some(Ok(Some(caller))) if caller.profile == profile => caller,
         _ => return refused(),
     };
-    match state.engine.profile_config(&profile).await {
-        Ok(config) if served_on(&config, state.listener.reach) => {}
+    match state.engine.profile_config(profile).await {
+        Ok(config) if served(&config, state.listener.reach) => {}
         _ => return refused(),
     }
     let Ok(_permit) = state.running.clone().try_acquire_owned() else {
@@ -142,7 +156,28 @@ async fn authenticate(
 
 fn refused() -> Response {
     let body = json!({"error": "a valid caller token of this agent is required"});
-    (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        axum::Json(body),
+    )
+        .into_response()
+}
+
+/// A card that anyone may read: any origin, a cache of five minutes, and an ETag of the body.
+pub(crate) fn card_response(body: String, content_type: &str) -> Response {
+    let etag = format!("\"{}\"", bunsin_core::sha256_hex(body.as_bytes()));
+    let mut response = body.into_response();
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::CONTENT_TYPE, content_type),
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (header::CACHE_CONTROL, "public, max-age=300"),
+        (header::ETAG, &etag),
+    ] {
+        headers.insert(name, HeaderValue::from_str(value).expect("a valid header value"));
+    }
+    response
 }
 
 /// The server card of a profile's endpoint. It holds no token and no owner name.
@@ -170,19 +205,7 @@ async fn server_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Stri
     if let Some(title) = &config.inbound.title {
         card["title"] = json!(title.trim());
     }
-    let body = card.to_string();
-    let etag = format!("\"{}\"", bunsin_core::sha256_hex(body.as_bytes()));
-    let mut response = body.into_response();
-    let headers = response.headers_mut();
-    for (name, value) in [
-        (header::CONTENT_TYPE, CARD_TYPE.to_owned()),
-        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_owned()),
-        (header::CACHE_CONTROL, "public, max-age=300".to_owned()),
-        (header::ETAG, etag),
-    ] {
-        headers.insert(name, HeaderValue::from_str(&value).expect("a valid header value"));
-    }
-    response
+    card_response(card.to_string(), CARD_TYPE)
 }
 
 /// The ARD catalog of this listener: the profiles that it serves, each with the server card on this
@@ -268,7 +291,7 @@ impl ServerHandler for InboundServer {
             tool(
                 "get_request",
                 "Read the state of a question you asked: working, pending_approval, answered (with the answer), \
-                 declined or failed.",
+                 declined, failed or canceled.",
                 json!({"type": "object", "properties": {"request_id": {"type": "string"}}, "required": ["request_id"]}),
             ),
         ]))
