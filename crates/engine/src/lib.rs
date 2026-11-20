@@ -39,7 +39,7 @@ use bunsin_api::{
     ProfileConfig, ProfileSnapshot, ReplayCase, ReplayResult, Resolution, ToolsReport, WebhooksUpdate, WikiPageUpdate,
 };
 use bunsin_core::approval::ApprovalState;
-use bunsin_core::ard::{ARD_SEARCH_TOOL, ArdRegistry};
+use bunsin_core::ard::{ARD_CONNECTOR, ArdRegistry};
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::is_coding_tool;
@@ -387,6 +387,7 @@ impl Engine {
         Self::check_inbound(config)?;
         Self::check_ard(config)?;
         bunsin_core::ard::check_registries(&config.ard_registries).map_err(ApiError::Invalid)?;
+        bunsin_core::ard::check_domains(&config.ard_domains).map_err(ApiError::Invalid)?;
         Self::check_webhooks(config)?;
         for poll in &config.polls {
             poll.check().map_err(ApiError::Invalid)?;
@@ -479,16 +480,16 @@ impl Engine {
             .collect()
     }
 
-    /// The ARD search, if the settings name a registry.
-    fn ard_search_hint(config: &ProfileConfig) -> Option<ToolHint> {
-        (!config.ard_registries.is_empty()).then(|| {
-            let spec = bunsin_core::ard::search_spec(&config.ard_registries);
-            ToolHint {
-                tool_id: ARD_SEARCH_TOOL.to_owned(),
+    /// The ARD tools that the settings offer: the registry tools and `resolve`.
+    fn ard_hints(config: &ProfileConfig) -> Vec<ToolHint> {
+        bunsin_core::ard::tool_specs(&config.ard_registries, &config.ard_domains)
+            .into_iter()
+            .map(|spec| ToolHint {
+                tool_id: format!("{ARD_CONNECTOR}/{}", spec.name),
                 description: spec.description,
                 input_schema: spec.input_schema,
-            }
-        })
+            })
+            .collect()
     }
 
     /// A tool result as text for the prompt and for the disk: filtered, and cut if it is long.
@@ -539,7 +540,7 @@ impl Engine {
         };
         if allow_reads {
             tools.extend(notes::notes_tools());
-            tools.extend(Self::ard_search_hint(config));
+            tools.extend(Self::ard_hints(config));
         }
         let mut counts = RedactionCounts::new();
         let mut request: CompletionRequest = assemble(
@@ -651,9 +652,9 @@ impl Engine {
             let Proposal::ToolCall { tool, args, .. } = &proposal else {
                 return Ok((ready(proposal, reads, pages_read), replies));
             };
-            // The built-in notes tools and the ARD search are handled here. They are not in the permission table.
+            // The built-in notes tools and the ARD tools are handled here. They are not in the permission table.
             let reads_notes = tool == WIKI_READ_TOOL || tool == WIKI_SEARCH_TOOL;
-            let reads_ard = tool == ARD_SEARCH_TOOL && !config.ard_registries.is_empty();
+            let reads_ard = Self::ard_hints(config).iter().any(|hint| hint.tool_id == *tool);
             let is_read = config
                 .policy
                 .rules
@@ -664,7 +665,7 @@ impl Engine {
             if !allowed {
                 return Ok((ready(proposal, reads, pages_read), replies));
             }
-            // The limit counts the reads of the notes and of connectors separately. An ARD search is a
+            // The limit counts the reads of the notes and of connectors separately. An ARD tool is a
             // read of a connector: it leaves the server.
             let same_kind = reads
                 .iter()

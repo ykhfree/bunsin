@@ -2,7 +2,7 @@
 
 pub mod http;
 
-use bunsin_core::ard::ArdRegistry;
+use bunsin_core::ard::{ArdDomain, ArdRegistry};
 use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
 use bunsin_core::coding::CodingConfig;
@@ -66,9 +66,13 @@ pub struct ProfileConfig {
     /// The inbound endpoint where other people's agents ask questions. Off by default.
     #[serde(default)]
     pub inbound: InboundConfig,
-    /// The ARD registries that the agent may search with `bunsin.ard/search`. Empty: no search.
+    /// The ARD registries that the agent may ask with `bunsin.ard/search`, `explore` and `list`.
+    /// Empty: none of these tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ard_registries: Vec<ArdRegistry>,
+    /// The domains whose ARD entries the agent may read with `bunsin.ard/resolve`. Empty: no resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ard_domains: Vec<ArdDomain>,
     /// The webhooks that Slack or Jira Cloud sends events to, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub webhooks: BTreeMap<String, WebhookConfig>,
@@ -96,6 +100,7 @@ impl ProfileConfig {
             coding: None,
             inbound: InboundConfig::default(),
             ard_registries: Vec::new(),
+            ard_domains: Vec::new(),
             webhooks: BTreeMap::new(),
         }
     }

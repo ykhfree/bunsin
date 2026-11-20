@@ -9,6 +9,7 @@
 
 pub mod ard_search;
 pub mod coding;
+pub mod fetch;
 pub mod inbound;
 pub mod keystore;
 pub mod oauth;
@@ -18,7 +19,7 @@ pub mod webhooks;
 
 use bunsin_api::ProfileConfig;
 use bunsin_connectors::{ApiAuth, ApiConnector, McpConnector, TokenAuth};
-use bunsin_core::ard::{ARD_CONNECTOR, ArdRegistry};
+use bunsin_core::ard::{ARD_CONNECTOR, ArdDomain, ArdRegistry};
 use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::settings::{
     ApiAuthMethod, ConnectorKind, ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key,
@@ -297,6 +298,21 @@ impl RealBackends {
         Ok(())
     }
 
+    /// Checks `https://<domain>/` and the catalog address of each ARD domain with the same rules.
+    /// Every save and every build of the tools passes here.
+    fn ard_domains(&self, domains: &[ArdDomain]) -> Result<(), String> {
+        for entry in domains {
+            let domain = entry.domain();
+            self.upstream
+                .check(&format!("the ARD domain `{domain}`"), &format!("https://{domain}/"))?;
+            if let Some(catalog) = entry.catalog() {
+                self.upstream
+                    .check(&format!("the catalog of ARD domain `{domain}`"), catalog)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn llm(&self, profile: &str, section: &Value, secrets: &ProfileSecrets) -> Result<HttpLlmClient, String> {
         let section = self.llm_section(section)?;
         let token = self.token(profile, &section.token_secret, Some(&section.base_url), secrets)?;
@@ -418,12 +434,13 @@ impl RealBackends {
             let connector = self.connector(profile, name, section, secrets, writer).await;
             connectors.insert(name.clone(), connector);
         }
-        if !config.ard_registries.is_empty() {
-            let search = self
+        if !config.ard_registries.is_empty() || !config.ard_domains.is_empty() {
+            let tools = self
                 .ard_registries(&config.ard_registries)
-                .and_then(|()| ard_search::ArdSearch::new(&config.ard_registries))
-                .map(|search| Arc::new(search) as Arc<dyn Connector>);
-            connectors.insert(ARD_CONNECTOR.to_owned(), search);
+                .and_then(|()| self.ard_domains(&config.ard_domains))
+                .and_then(|()| ard_search::ArdTools::new(&config.ard_registries, &config.ard_domains, &self.upstream))
+                .map(|tools| Arc::new(tools) as Arc<dyn Connector>);
+            connectors.insert(ARD_CONNECTOR.to_owned(), tools);
         }
         Ok(Runtime { llm, connectors })
     }
@@ -526,7 +543,8 @@ impl Backends for RealBackends {
                 secret_env_name(profile, &key)?;
             }
         }
-        self.ard_registries(&config.ard_registries)
+        self.ard_registries(&config.ard_registries)?;
+        self.ard_domains(&config.ard_domains)
     }
 }
 

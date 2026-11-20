@@ -23,7 +23,7 @@ Bunsin is in early development. Read this list before you use it.
   send events to a webhook (see [Webhooks](#webhooks)). Both have run only against test servers.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
   tools with the class `read` (for example a search) up to five times, and read up to
-  five pages of its notes, and use the results. A search of your ARD registries counts as a tool read. Facts it keeps go into its notes, which you approve page by page (see
+  five pages of its notes, and use the results. A call of an ARD tool (see [Find agents and tools with ARD](#find-agents-and-tools-with-ard)) counts as a tool read. Facts it keeps go into its notes, which you approve page by page (see
   [Notes](#notes)). The notes fill with what the agent read while it handled events, and
   with reads that you start yourself. The search quality depends on your MCP servers.
 - **The privacy filter works on patterns and on your list of terms.** It finds email
@@ -871,30 +871,90 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 
 Not built yet: a check of a page when you lose access to its source.
 
-### Search ARD registries
+### Find agents and tools with ARD
 
-The agent can look for other agents and tools in ARD registries (Agentic Resource Discovery)
-that you name in the settings:
+The agent can look for other agents and tools with ARD (Agentic Resource Discovery). It asks
+the registries and reads the domains that you name in the settings:
 
 ```json
-"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}]
+"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}],
+"ard_domains": [
+  "acme.com",
+  {"domain": "partner.example", "catalog": "https://agents.partner.example/.well-known/ard.json"}
+]
 ```
 
-- The agent then sees the built-in read tool `bunsin.ard/search {text, registry?}`. It sends
-  `POST <url>/search` with `query.text`, `federation: "none"` and `pageSize: 5` to the named
-  registry, or to the first one. It needs no permission rule, and it counts toward the five
-  reads of an event.
+**Registries.** With a registry, the agent sees three built-in read tools. Each one asks the
+named registry, or the first one.
+
+- `bunsin.ard/search {text, registry?, filter?, context?, page_token?}` sends
+  `POST <url>/search` with `federation: "none"` and `pageSize: 5`. `filter` maps a term path to
+  the values it accepts: at most 10 keys with at most 10 values, each value at most 200
+  characters. `context` maps a prefix to a namespace IRI, for a prefixed filter key such as
+  `okf:taxonomy` (at most 10). `page_token` asks for the next page; each result gives the next
+  token.
+- `bunsin.ard/explore {facets, registry?, text?, filter?, context?}` sends `POST <url>/explore`
+  and gets the counts of the values of 1 to 5 terms, for example which types a registry has.
+  A registry without Explore answers 501, and the agent reads that as an error.
+- `bunsin.ard/list {registry?, type?, publisher?, display_name?, created_after?, updated_after?,
+  order_by?, page_token?}` sends `GET <url>/agents` with `pageSize=5`. Bunsin writes the filter
+  expression of ARD Appendix A, such as `type = 'a,b' AND publisherId = 'acme.com'`. A value with
+  `'` or `,` is refused, because it would change the expression.
 - The search follows no referral: a referral names a registry that the registry chose, not
-  you. A redirect is not followed either.
-- The registry addresses pass the same address rules as the LLM and connector addresses.
-  A name is 1 to 32 of a-z, 0-9 and `-`.
+  you. A registry request does not follow a redirect either.
+
+**Domains.** With a domain, the agent sees `bunsin.ard/resolve {domain}`. `domain` must be one of
+your domains. The agent cannot name another domain or an address, because a read that fetches an
+address you do not control can carry read text out of the server.
+
+- A plain domain is resolved by the ARD rules. Bunsin reads `https://<domain>/.well-known/ard.json`,
+  the `Link` headers and `<link rel="ard">` tags of `https://<domain>/`, and the `Agentmap:` lines
+  of `https://<domain>/robots.txt`. Then it fetches at most 10 of the announced addresses. A JSON
+  answer is a manifest. From a page, Bunsin takes the entries in its JSON-LD blocks.
+- A domain with `catalog` fetches only that address. Use it when another host serves the entries
+  of the domain. For example, a Bunsin server with the listener `agents.acme.com` publishes the
+  entries of `acme.com`: write `{"domain": "acme.com", "catalog": "https://agents.acme.com/.well-known/ard.json"}`.
+- **The binding rule.** Bunsin reads an entry only if the publisher in its identifier
+  (`urn:air:<publisher>:...`) is the domain, in any letter case. The host that served the entry
+  does not count, so a catalog on a CDN works. The cost: an entry for another domain is refused,
+  even a correct one. If you write `agents.acme.com` and the entries name `acme.com`, all of them
+  are refused. Write `acme.com`, or give its catalog in the object form. A parent domain does not
+  count either: without a list of public suffixes, `evil.github.io` could claim
+  `urn:air:github.io:...`. The rule replaces the trust check of ARD §4.5.1 with the domain that TLS
+  confirmed.
+- Bunsin also refuses an entry that breaks a MUST rule of ARD, an entry larger than 64 KiB, and an
+  entry whose `@context` it does not support: a remote context other than the ARD base context,
+  `@vocab`, `@base`, `@import`, `@protected`, or a new definition of a core term.
+- The agent sees at most 20 entries. Each one has its core terms, its `publisher`, its trust
+  identity marked "not verified", and its terms of other namespaces under their full IRI. A
+  publisher's prefix therefore cannot pass as a core term. A refused entry shows only its
+  identifier and the reason. A value longer than 500 characters is cut.
+- Not done: `/.well-known/ai-catalog.json`, the older name that ARD makes optional, and DNS records
+  such as `_entries._agents`, because a record names a host but not the address of an entry
+  source. Bunsin does not verify a trust manifest: ARD defines no procedure for it.
+
+**Addresses and limits.**
+
+- The registry addresses, `https://<domain>/` and each catalog pass the same address rules as the
+  LLM and connector addresses, at every save and every build. A registry name is 1 to 32 of a-z,
+  0-9 and `-`. A domain is a domain name in lower case. The list holds at most 20 domains, each
+  once.
+- The publisher chooses the addresses that a domain announces. So every request and every
+  redirect passes the address rules, with at most 3 redirects. Without `--allow-upstream-host`,
+  Bunsin also drops internal addresses when it looks up a name, and these requests use no proxy.
+  Each request has 10 s and 1 MiB. One `resolve` has 30 s.
+
+**For all four tools.**
+
+- They need no permission rule, and each call counts toward the five reads of an event.
 - The results are text written by others. They pass the privacy filter and reach the LLM as
-  quoted data. The agent gets the identifier, name, type, URL, description, capabilities,
-  score and source of each result; nothing else. The `score` is only text for the LLM: no
-  decision of the server uses it.
+  quoted data. From `search` and `list`, the agent gets the identifier, name, type, URL,
+  description and capabilities of each result, and from `search` also its score and source;
+  nothing else. The `score` is only text for the LLM: no decision of the server uses it.
 - The agent cannot call what it found. You add a found agent or tool as a connector, approve
   its tools and give each a rule.
-- In the window, the **ARD registries** card of the Agent view edits the list.
+- In the window, the **ARD registries** card of the Agent view edits the registries. The window
+  does not edit `ard_domains` yet: use `bunsind config-set`.
 
 ### Delegate coding
 
