@@ -913,6 +913,31 @@ async fn a_crawl_indexes_a_manifest_and_in_page_markup() {
 }
 
 #[tokio::test]
+async fn a_maintenance_page_is_a_failed_read_not_an_empty_catalog() {
+    let manifest = json!({"entries": [crawled_entry("urn:air:acme.test:desk", "Help desk")]});
+    let site = web(vec![
+        ("/ard.json", "application/json", manifest.to_string()),
+        ("/down.html", "text/html", "<html><body>Back soon</body></html>".into()),
+    ])
+    .await;
+    let crawler = Crawler::new(&[
+        format!("acme.test={}/ard.json", site.base),
+        format!("acme.test={}/down.html", site.base),
+    ]);
+    crawler.tick().await;
+    assert_eq!(crawler.identifiers(), ["urn:air:acme.test:desk"]);
+    let down = crawler
+        .seeds()
+        .into_iter()
+        .find(|seed| seed.url.ends_with("/down.html"))
+        .unwrap();
+    // A failed read keeps the seed's entries for seven days; an empty success would remove them.
+    assert_eq!(down.failures, 1);
+    assert_eq!(down.last_ok_at, None);
+    assert_eq!(down.last_error.as_deref(), Some("the page holds no ARD entries"));
+}
+
+#[tokio::test]
 async fn refused_entries_are_reported_by_reason() {
     let mut large = crawled_entry("urn:air:acme.test:large", "Large");
     large["description"] = json!("x".repeat(70 * 1024));

@@ -86,8 +86,9 @@ pub async fn tick(engine: &Engine, fetcher: Option<&Fetcher>, stopped: &tokio::s
     }
 }
 
-/// Reads one seed and hands the outcome to the engine. A read succeeds if one entry source
-/// could be read. Otherwise the first error is the failure: Bunsin text and an HTTP status only.
+/// Reads one seed and hands the outcome to the engine. A read succeeds only if every entry source
+/// could be read, so a source that is down for a while does not remove its entries.
+/// Otherwise the first error is the failure: Bunsin text and an HTTP status only.
 async fn crawl(engine: &Engine, fetcher: &Fetcher, source: i64, text: &str) -> bunsin_api::ApiResult<()> {
     let seed = match parse_seed(text) {
         Ok(seed) => seed,
@@ -97,27 +98,20 @@ async fn crawl(engine: &Engine, fetcher: &Fetcher, source: i64, text: &str) -> b
         Ok(resolution) => resolution,
         Err(timeout) => return engine.crawl_failed(source, &timeout),
     };
+    if resolution.sources.is_empty() {
+        return engine.crawl_failed(source, "the source announced no entry source");
+    }
     let mut found = Vec::new();
-    let mut first_error = None;
-    let mut read_any = false;
-    for source in resolution.sources {
-        match source.result {
+    for read in resolution.sources {
+        match read.result {
             Ok(entries) => {
-                read_any = true;
                 found.extend(entries.accepted.into_iter().map(Ok));
                 found.extend(entries.rejected.into_iter().map(Err));
             }
-            Err(error) => {
-                first_error.get_or_insert(error.to_string());
-            }
+            Err(error) => return engine.crawl_failed(source, &error.to_string()),
         }
     }
-    if read_any {
-        engine.crawl_succeeded(source, found)
-    } else {
-        let error = first_error.unwrap_or_else(|| "the source announced no entry source".into());
-        engine.crawl_failed(source, &error)
-    }
+    engine.crawl_succeeded(source, found)
 }
 
 #[cfg(test)]

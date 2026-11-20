@@ -44,7 +44,8 @@ const REJECTED_TEXT: &str = "The owner of this agent declined the question.";
 const FAILED_TEXT: &str = "The approved answer could not be delivered.";
 /// The output modes that a text answer fits.
 const TEXT_MODES: [&str; 3] = ["text/plain", "text/*", "*/*"];
-const MAX_CONTEXT_ID_CHARS: usize = 128;
+/// The longest messageId and contextId. Both are stored, and a messageId is a key of an index.
+const MAX_ID_CHARS: usize = 128;
 const DEFAULT_PAGE_SIZE: i32 = 50;
 const MAX_PAGE_SIZE: i32 = 100;
 /// The name of the caller token in the security schemes of the card.
@@ -286,8 +287,9 @@ fn send_message(state: &Inbound, caller: &Caller, params: Value) -> Result<Value
     if message.role != Role::User {
         return Err(rpc_error(INVALID_PARAMS, "message.role must be ROLE_USER"));
     }
-    if message.message_id.is_empty() {
-        return Err(rpc_error(INVALID_PARAMS, "message.messageId is required"));
+    if !id_fits(&message.message_id) {
+        let error = format!("message.messageId has 1 to {MAX_ID_CHARS} visible ASCII characters");
+        return Err(rpc_error(INVALID_PARAMS, error));
     }
     let question = message_text(message)?;
     let modes = configuration.and_then(|configuration| configuration.accepted_output_modes.as_deref());
@@ -315,12 +317,11 @@ fn send_message(state: &Inbound, caller: &Caller, params: Value) -> Result<Value
             "a message cannot add to a task; send a new message without taskId",
         ));
     }
-    if let Some(context) = &message.context_id {
-        let fits = (1..=MAX_CONTEXT_ID_CHARS).contains(&context.len()) && context.bytes().all(|b| b.is_ascii_graphic());
-        if !fits {
-            let error = format!("message.contextId has 1 to {MAX_CONTEXT_ID_CHARS} visible ASCII characters");
-            return Err(rpc_error(INVALID_PARAMS, error));
-        }
+    if let Some(context) = &message.context_id
+        && !id_fits(context)
+    {
+        let error = format!("message.contextId has 1 to {MAX_ID_CHARS} visible ASCII characters");
+        return Err(rpc_error(INVALID_PARAMS, error));
     }
     let found = state
         .engine
@@ -328,6 +329,11 @@ fn send_message(state: &Inbound, caller: &Caller, params: Value) -> Result<Value
         .map_err(api_error)?;
     state.wake.notify_one();
     Ok(json!(SendMessageResponse::Task(task(&found))))
+}
+
+/// True for an ID of 1 to `MAX_ID_CHARS` visible ASCII characters.
+fn id_fits(id: &str) -> bool {
+    (1..=MAX_ID_CHARS).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// The question: the text parts, joined by line breaks. A part of another kind is refused, and a

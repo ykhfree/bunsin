@@ -224,7 +224,8 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     seed는 `<domain>`이거나 `<domain>=<URL>`입니다. 앞의 것은 `/.well-known/ard.json`, `rel="ard"` 링크, `Agentmap` 줄로 그 도메인을 해석합니다.
     뒤의 것은 그 catalog 주소 하나만 읽습니다. 어느 쪽이든 URN이 그 도메인을 가리키는 항목만 넣습니다.
     서버는 시작할 때 모든 seed 주소를 접속 대상 규칙(`--allow-upstream-host`)으로 검사합니다. 하나라도 어기거나 같은 seed를 두 번 적으면 시작하지 않습니다.
-  - **일정.** registry는 seed를 하나씩 읽습니다. 성공하면 1시간 뒤에 다시 읽습니다.
+  - **일정.** registry는 seed를 하나씩 읽습니다. seed의 모든 entry source를 읽어야 성공입니다.
+    JSON manifest가 아니고 항목 markup도 없는 페이지(예: 점검 안내 페이지)는 읽기 실패입니다. 성공하면 1시간 뒤에 다시 읽습니다.
     n번 연속 실패하면 1시간 × 2^(n−1)(최대 24시간) 뒤에 다시 읽고, 항목은 그대로 둡니다.
     7일 동안 성공이 없으면 그 seed의 항목을 지우고, 다음 성공이 다시 채웁니다.
   - **리스너마다 보는 것.** 공개 리스너는 공개 항목만 봅니다. 순위와 개수도 그 항목으로만 셉니다.
@@ -1000,7 +1001,7 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
   ```
 
 - **메시지:** role은 `ROLE_USER`, `messageId`가 있어야 하고, text part만 받습니다(media type이 없거나 `text/*`). 서버는 text part들을 줄바꿈으로 잇습니다.
-  다른 part는 `-32005`를 받고, 서버는 `url` part를 가져오지 않습니다. `contextId`는 선택입니다(보이는 ASCII 1~128자). 없으면 context는 task ID입니다.
+  다른 part는 `-32005`를 받고, 서버는 `url` part를 가져오지 않습니다. `messageId`는 필수이고 `contextId`는 선택입니다(둘 다 보이는 ASCII 1~128자). 없으면 context는 task ID입니다.
   agent는 같은 context의 앞 질문을 보지 않습니다. `taskId`가 있는 메시지는 `-32004`를 받습니다. 기다리는 질문에 글을 더하면 소유자가 승인하는 질문이 바뀌기 때문입니다.
   같은 호출자의 같은 `messageId`는 처음 task를 돌려주고 한 번만 셉니다.
 - **task 상태**는 `get_request`처럼 소유자의 결정만 보여 줍니다.

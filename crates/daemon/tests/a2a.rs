@@ -782,6 +782,8 @@ async fn send_message_checks_the_message() {
     let cases: Vec<(Value, i64)> = vec![
         (with(&|p| p["message"]["role"] = json!("ROLE_AGENT")), -32602),
         (with(&|p| p["message"]["messageId"] = json!("")), -32602),
+        (with(&|p| p["message"]["messageId"] = json!("m".repeat(129))), -32602),
+        (with(&|p| p["message"]["messageId"] = json!("with space")), -32602),
         (
             with(&|p| {
                 p["message"]

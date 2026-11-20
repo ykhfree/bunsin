@@ -506,7 +506,7 @@
     `role`이 `ROLE_USER`가 아니거나 `messageId`가 비면 -32602. text part만 읽는다(`mediaType`이 없거나 `text/*`). 다른 part는 -32005이고 `url`은 가져오지 않는다.
     text들은 줄바꿈으로 잇는다. `acceptedOutputModes`에 `text/plain`·`text/*`·`*/*`가 없으면 -32005. push 설정이 있으면 -32003.
     `taskId`가 있으면 이 호출자의 task가 아닐 때 -32001, 맞으면 -32004이다. 진행 중인 질문에 글을 더하면 소유자가 보는 질문이 바뀌기 때문이다.
-    `contextId`(1~128자의 보이는 ASCII, 아니면 -32602)는 저장한다. 없으면 context는 request ID이다. 같은 context의 앞 질문은 agent에게 주지 않는다(§3.4.1의 SHOULD를 따르지 않는다).
+    `messageId`(필수)와 `contextId`(선택)는 1~128자의 보이는 ASCII이고, 아니면 -32602이다. `contextId`는 저장한다. 없으면 context는 request ID이다. 같은 context의 앞 질문은 agent에게 주지 않는다(§3.4.1의 SHOULD를 따르지 않는다).
     나머지는 `ask`와 같다(engine `send_message`): 필터, 한도, intake 깨우기, 감사 `inbound_asked`(`protocol: "a2a"`, MCP는 `"mcp"`). 같은 호출자의 같은 `messageId`는 처음 task를 돌려주고 한도를 다시 세지 않는다(§3.3.1).
   - **Task**는 `request_status`의 출력(core `CallerRequest`)만으로 만든다. `working`과 `pending_approval`은 `TASK_STATE_WORKING`과 고정 문구
     "The owner of this agent approves every answer. Poll GetTask."이고, `answered`는 `COMPLETED`와 artifact `answer`, `declined`는 `REJECTED`, `failed`는 `FAILED`(둘 다 고정 문구), `canceled`는 `CANCELED`이다.
@@ -1172,10 +1172,12 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   2. 때가 된 seed를 하나씩 `Fetcher::resolve`(daemon `fetch.rs`, 해석 30 s, 요청 10 s, 응답 1 MiB, redirect 3번, hop마다 주소 규칙)로 읽는다.
      stop 신호가 오면 다음 seed 앞에서 멈춘다. 한 tick에 한 seed는 한 번만 읽는다.
      tick이 60초를 넘으면 새 seed를 시작하지 않는다. 남은 seed는 다음 tick에 읽으므로, 1단계는 seed가 많아도 늦지 않는다.
-  - 한 해석이 가져온 entry source는 seed 아래에 둔다(자기 행이 없다). 이유: 해석 한 번이 그 source를 모두 한 시간 한도로 가져오고, 결속 domain도 seed의 것이다.
+  - 한 해석이 가져온 entry source는 seed 아래에 둔다(자기 행이 없다). 이유: 해석 한 번이 그 source를 모두 30초 한도 안에서 가져오고, 결속 domain도 seed의 것이다.
     따로 행을 두면 일정과 실패를 두 번 세야 한다.
-  - entry source 하나라도 읽히면 성공이다. 읽힌 source의 항목으로 그 seed의 행을 통째로 바꾸고(`crawl_succeeded`), 1시간 뒤에 다시 읽는다.
-  - 모두 실패하거나 해석이 30초를 넘으면 실패이다(`crawl_failed`). 행은 그대로 두고, n번째 연속 실패 뒤에는 1 h × 2^(n−1)(최대 24 h) 뒤에 다시 읽는다.
+  - 모든 entry source가 읽혀야 성공이다. 그 항목으로 seed의 행을 통째로 바꾸고(`crawl_succeeded`), 1시간 뒤에 다시 읽는다.
+    JSON manifest가 아니고 항목 markup도 없는 페이지는 source 오류 `NoEntries`이다(`{"entries": []}`는 의도한 빈 catalog라서 성공이다).
+    기각: source 하나만 읽혀도 성공. 점검 페이지(200)나 잠깐 내려간 source 하나가 seed의 항목을 바로 지워 7일 보존이 소용없다.
+  - source 하나라도 실패하거나, source가 없거나, 해석이 30초를 넘으면 실패이다(`crawl_failed`). 행은 그대로 두고, n번째 연속 실패 뒤에는 1 h × 2^(n−1)(최대 24 h) 뒤에 다시 읽는다.
     마지막 성공이 7일 전이거나 더 오래되었으면 그 seed의 항목을 지운다. 다음 성공이 다시 채운다.
   - 실패는 stderr가 아니라 `registry-status`의 `failures`와 `last_error`로 보인다.
 - **순위**: core `query_terms` → store `term_hits`(store `lib.rs`. profile 저장소와 registry가 함께 쓴다) → core `rank_scored`.

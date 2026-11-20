@@ -269,8 +269,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     or `<domain>=<URL>`, which reads only that one catalog address. Either way, an entry is kept
     only if its URN names that domain. The server checks every seed address with the upstream
     rules (`--allow-upstream-host`) and does not start if one fails or a seed is given twice.
-  - **Schedule.** The registry reads one seed at a time. It reads a seed again 1 hour after a
-    success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
+  - **Schedule.** The registry reads one seed at a time. A read succeeds only if every entry
+    source of the seed reads. A page that is no JSON manifest and has no entry markup (for example
+    a maintenance page) is a failed read. It reads a seed again 1 hour after a success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
     keeps the entries. A seed without a success for 7 days loses its entries until it is read
     again.
   - **What each listener sees.** The public listener sees only public entries. It ranks and
@@ -1195,8 +1196,8 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
 
 - **The message:** role `ROLE_USER`, a `messageId`, and text parts only (no media type, or
   `text/*`). The server joins the text parts with line breaks. Another part gets `-32005`, and
-  the server never fetches a `url` part. A `contextId` is optional (1 to 128 visible ASCII
-  characters). Without one, the context is the task ID. The agent does not see the earlier
+  the server never fetches a `url` part. A `messageId` is required and a `contextId` is
+  optional, each 1 to 128 visible ASCII characters. Without one, the context is the task ID. The agent does not see the earlier
   questions of the same context. A message with a `taskId` gets `-32004`: text added to a waiting
   question would change the question that you approve. The same `messageId` from the same caller
   returns the first task and counts once.

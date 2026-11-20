@@ -133,6 +133,9 @@ pub enum SourceError {
     Fetch(#[from] FetchError),
     #[error("the JSON body is not an ARD manifest with an `entries` array")]
     NotAManifest,
+    /// A page that is no manifest and holds no entry markup, for example a maintenance page.
+    #[error("the page holds no ARD entries")]
+    NoEntries,
 }
 
 /// The entries of one source.
@@ -306,7 +309,12 @@ fn read_document(body: &[u8], domain: &str) -> Result<Found, SourceError> {
             _ => return Err(SourceError::NotAManifest),
         }
     } else {
-        markup_entries(&read_markup(text).blocks)
+        // A manifest may list no entries on purpose; a page without entry markup is not a source.
+        let entries = markup_entries(&read_markup(text).blocks);
+        if entries.is_empty() {
+            return Err(SourceError::NoEntries);
+        }
+        entries
     };
     let mut found = Found::default();
     for candidate in &candidates {
@@ -602,6 +610,23 @@ mod tests {
         let web = Web::default().page("https://acme.com/.well-known/ard.json", r#"{"agents": []}"#);
         let resolution = run(resolve(&web, &Seed::domain("acme.com").unwrap()));
         assert_eq!(resolution.sources[0].result, Err(SourceError::NotAManifest));
+    }
+
+    #[test]
+    fn a_page_without_entries_is_no_source_but_an_empty_manifest_is() {
+        let catalog = |body: &str| {
+            let web = Web::default().page("https://agents.acme.com/catalog", body);
+            let url = Url::parse("https://agents.acme.com/catalog").unwrap();
+            run(resolve(&web, &Seed::catalog("acme.com", url).unwrap()))
+                .sources
+                .remove(0)
+                .result
+        };
+        // A maintenance page answers 200 but lists nothing: it must not read as an empty catalog.
+        let maintenance = "<html><head><title>Down</title></head><body>Back soon</body></html>";
+        assert_eq!(catalog(maintenance), Err(SourceError::NoEntries));
+        // A manifest says on purpose that it lists nothing.
+        assert_eq!(catalog(r#"{"entries": []}"#), Ok(Found::default()));
     }
 
     #[test]
