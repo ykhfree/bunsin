@@ -21,6 +21,7 @@ use bunsin_store::{IndexedRow, NewEntry, Refusal, RegistryRead, RegistryStore, S
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Mutex;
 
 /// The most entries of one source.
 pub const MAX_SOURCE_ENTRIES: usize = 500;
@@ -48,6 +49,9 @@ pub(crate) struct Registry {
     /// The widest listener scope that serves it: `internal`, or `public` for both listeners.
     scope: InboundScope,
     store: RegistryStore,
+    /// Held while the own catalogs are read and stored. Otherwise the task could store a catalog
+    /// that it read before a save, after the save stored the newer one.
+    refreshing: Mutex<()>,
 }
 
 /// The source name of the catalog of a listener.
@@ -147,7 +151,11 @@ impl Engine {
     pub fn serve_registry(&self, scope: InboundScope) -> ApiResult<()> {
         let store = RegistryStore::open(self.app.root()).map_err(store_error)?;
         self.registry
-            .set(Registry { scope, store })
+            .set(Registry {
+                scope,
+                store,
+                refreshing: Mutex::new(()),
+            })
             .map_err(|_| internal("the registry is already on"))
     }
 
@@ -200,6 +208,7 @@ impl Engine {
         let Some(registry) = self.registry.get() else {
             return Ok(());
         };
+        let _one_at_a_time = registry.refreshing.lock().expect("registry refresh lock");
         for listener in [InboundScope::Internal, InboundScope::Public] {
             if !reaches(registry.scope, listener) {
                 continue;

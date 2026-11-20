@@ -101,7 +101,7 @@ async fn crawl(engine: &Engine, fetcher: &Fetcher, source: i64, text: &str) -> b
 /// The entries of a resolution. It succeeds only if the root page and `robots.txt` could be read
 /// or were absent, and every entry source could be read. So a page or a source that is down for a
 /// while does not remove entries. Otherwise the first error is the failure: Bunsin text and an
-/// HTTP status only.
+/// HTTP status, and for the root page or `robots.txt` its address under the seed's domain.
 fn read_entries(resolution: Resolution) -> Result<Vec<Result<Accepted, Rejected>>, String> {
     if let Some(error) = resolution.discovery_error {
         return Err(error.to_string());

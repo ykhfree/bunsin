@@ -1157,12 +1157,12 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
     `self:internal`은 (on_internal 1, on_public 0), `self:public`은 (0, 1), 내부 seed는 (1, 0), 공개 seed는 (1, 1)이다.
     내부 catalog가 공개 프로필도 내부 주소로 싣기 때문에, `self:public`은 내부 리스너에 보이지 않는다.
   - 읽기에 성공하면 그 source의 행과 거부를 통째로 바꾼다. 같은 identifier는 `first_seen_at`을 유지하고, 항목 JSON이 바뀔 때만 `changed_at`을 옮긴다.
-    `last_error`에는 Bunsin 문구와 HTTP status만 쓴다. seed의 `url` 열은 플래그에 적은 글 그대로이다.
+    `last_error`에는 Bunsin 문구와 HTTP status만 쓴다. 루트 페이지나 `robots.txt`를 읽지 못한 오류는 그 주소(seed domain 아래)도 쓴다. seed의 `url` 열은 플래그에 적은 글 그대로이다.
   - 같은 identifier가 여러 source에 있으면 응답에는 하나만 나온다. self source의 행이 이기고, 다음은 작은 source ID이다.
   - 한 요청은 index의 잠금을 한 번 잡고 모든 읽기(`visible`, `term_hits`, `bodies`)를 한다(store `RegistryStore::read`가 주는 `RegistryRead`).
     이유: 자기 catalog의 갱신은 행을 지우고 새 ID로 다시 넣는다. 읽기 사이에 갱신이 끼면 앞에서 얻은 ID가 사라져 빈 결과나 500이 된다.
     기각: 바뀌지 않은 행의 ID를 유지하는 UPSERT. 빠진 identifier, 7일 만료, seed 정리는 행을 정말 지우므로 같은 문제가 남는다.
-    대가: 요청을 계산하는 동안 crawl과 갱신의 쓰기가 기다린다. 요청의 비용은 아래 필터 한도가 묶는다.
+    대가: 요청을 계산하는 동안 같은 index의 다른 요청(두 리스너 모두), crawl과 갱신의 쓰기, `inbound`를 바꾼 저장의 갱신이 기다린다. 요청의 비용은 아래 필터 한도가 묶는다.
   - 항목 수락: 모든 항목이 `bunsin_ard::accept_entry`(3절)를 지난다. JSON 64 KiB 이하, 지원하는 `@context`, MUST 위반 없음(SHOULD 위반은 받는다),
     URN publisher가 결속 domain과 같음. 그 뒤 engine `index_source`가 identifier 중복, source당 500개, seed 전체 10,000개를 센다.
     자기 catalog의 행은 10,000개에 들지 않고, 자기 catalog는 `index_full`로 거부되지 않는다. 그 수는 서버의 프로필이 정한다.
@@ -1174,6 +1174,8 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
   - `search_text`는 `displayName`, `description`, `representativeQueries`, `capabilities`, `tags`의 글이다.
   - 프로필 저장이 `inbound`를 바꾸면(engine `stamp_inbound`) 자기 catalog를 바로 다시 넣는다. 그래서 리스너에서 내린 프로필이 다음 tick(최대 60초)까지 남지 않는다.
     다시 넣기가 실패해도 저장은 성공이다. registry task가 1분 안에 다시 넣고 그 실패를 stderr에 쓴다.
+    자기 catalog의 읽기와 저장은 한 번에 하나씩 한다(`Registry::refreshing`). 그렇지 않으면 task가 저장 전에 읽은 catalog를 저장의 갱신 뒤에 써서, 내린 프로필이 다음 tick까지 돌아온다.
+    이 순서는 결정적인 테스트가 없다.
 - **seed**(9절 A1): `--ard-registry-source <seed>`(내부 리스너)와 `--ard-registry-public-source <seed>`(두 리스너, `--ard-registry public`일 때만). 둘 다 반복한다.
   - `<seed>`는 `<domain>`이거나 `<domain>=<URL>`이다. 앞의 것은 3절의 domain 해석(ard.json, `Link`·`<link rel="ard">`, robots `Agentmap`, 알린 주소)이다.
     뒤의 것은 그 주소 하나만 가져온다(JSON manifest 또는 HTML 속 JSON-LD). 두 형태 모두 결속 domain은 `<domain>`이다. URL의 host로 결속하는 규칙은 없다.
