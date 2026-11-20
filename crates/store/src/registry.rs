@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS sources (
     url TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL,
     scope TEXT NOT NULL,
-    parent_id INTEGER,
     next_fetch_at INTEGER NOT NULL DEFAULT 0,
     last_ok_at INTEGER,
     failures INTEGER NOT NULL DEFAULT 0,
@@ -67,10 +66,8 @@ INSERT INTO entries_fts (entries_fts) VALUES ('rebuild');
 /// Where the entries of a source come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
-    /// The operator named it.
+    /// The operator named it with `--ard-registry-source` or `--ard-registry-public-source`.
     Seed,
-    /// A seed announced it.
-    Discovered,
     /// The catalog of the server's own listener.
     SelfCatalog,
 }
@@ -79,7 +76,6 @@ impl SourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             SourceKind::Seed => "seed",
-            SourceKind::Discovered => "discovered",
             SourceKind::SelfCatalog => "self",
         }
     }
@@ -87,7 +83,6 @@ impl SourceKind {
     fn parse(text: &str) -> Result<Self> {
         match text {
             "seed" => Ok(SourceKind::Seed),
-            "discovered" => Ok(SourceKind::Discovered),
             "self" => Ok(SourceKind::SelfCatalog),
             other => Err(StoreError::BadState(other.to_owned())),
         }
@@ -164,6 +159,8 @@ pub struct SourceStatus {
     pub scope: InboundScope,
     pub entries: u64,
     pub last_ok_at: Option<i64>,
+    /// When the crawl reads the source next. Unix seconds. A self catalog is read on every tick.
+    pub next_fetch_at: i64,
     pub failures: u32,
     pub last_error: Option<String>,
     /// Each reason of refusal with its count, by reason.
@@ -294,12 +291,71 @@ impl RegistryStore {
     }
 
     /// Records a failed read of `source`. Its entries stay. `error` is Bunsin text and an HTTP status only.
-    pub fn record_failure(&self, source: i64, error: &str) -> Result<()> {
-        self.db().execute(
-            "UPDATE sources SET failures = failures + 1, last_error = ?1 WHERE id = ?2",
+    /// Returns the count of failures since the last success, and the time of that success.
+    pub fn record_failure(&self, source: i64, error: &str) -> Result<(u32, Option<i64>)> {
+        Ok(self.db().query_row(
+            "UPDATE sources SET failures = failures + 1, last_error = ?1 WHERE id = ?2
+             RETURNING failures, last_ok_at",
             (error, source),
-        )?;
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    /// Sets when the crawl reads `source` next.
+    pub fn set_next_fetch(&self, source: i64, at: i64) -> Result<()> {
+        self.db()
+            .execute("UPDATE sources SET next_fetch_at = ?1 WHERE id = ?2", (at, source))?;
         Ok(())
+    }
+
+    /// Removes the entries of `source`. Its refusals and its read times stay.
+    pub fn clear_entries(&self, source: i64) -> Result<()> {
+        self.db()
+            .execute("DELETE FROM entries WHERE source_id = ?1", [source])?;
+        Ok(())
+    }
+
+    /// Makes the seed sources the ones in `seeds`, each a seed text and a scope. A seed that is
+    /// gone, or that changed its scope, loses its row, its entries and its refusals. A new seed is
+    /// due at once.
+    pub fn set_seeds(&self, seeds: &[(String, InboundScope)]) -> Result<()> {
+        let mut db = self.db();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let known: Vec<(i64, String, String)> = tx
+            .prepare("SELECT id, url, scope FROM sources WHERE kind = 'seed'")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, url, scope) in known {
+            let kept = seeds
+                .iter()
+                .any(|(seed, seed_scope)| *seed == url && scope_text(*seed_scope) == scope);
+            if !kept {
+                tx.execute("DELETE FROM entries WHERE source_id = ?1", [id])?;
+                tx.execute("DELETE FROM refusals WHERE source_id = ?1", [id])?;
+                tx.execute("DELETE FROM sources WHERE id = ?1", [id])?;
+            }
+        }
+        for (seed, scope) in seeds {
+            tx.execute(
+                "INSERT OR IGNORE INTO sources (url, kind, scope) VALUES (?1, 'seed', ?2)",
+                (seed, scope_text(*scope)),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The seed source that is due first at `now`: its ID and its seed text. `None` if none is due.
+    pub fn due_seed(&self, now: i64) -> Result<Option<(i64, String)>> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT id, url FROM sources WHERE kind = 'seed' AND next_fetch_at <= ?1
+                 ORDER BY next_fetch_at, id LIMIT 1",
+                [now],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// The rows that the listener of `listener` sees, one per identifier, by identifier.
@@ -379,7 +435,7 @@ impl RegistryStore {
         let db = self.db();
         let mut statement = db.prepare(
             "SELECT s.id, s.url, s.kind, s.scope, s.last_ok_at, s.failures, s.last_error,
-                    (SELECT COUNT(*) FROM entries e WHERE e.source_id = s.id)
+                    (SELECT COUNT(*) FROM entries e WHERE e.source_id = s.id), s.next_fetch_at
              FROM sources s ORDER BY s.id",
         )?;
         let rows = statement
@@ -393,27 +449,31 @@ impl RegistryStore {
                     row.get::<_, u32>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut reasons =
             db.prepare("SELECT reason, COUNT(*) FROM refusals WHERE source_id = ?1 GROUP BY reason ORDER BY reason")?;
         rows.into_iter()
-            .map(|(id, url, kind, scope, last_ok_at, failures, last_error, entries)| {
-                let refusals = reasons
-                    .query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(SourceStatus {
-                    url,
-                    kind: SourceKind::parse(&kind)?,
-                    scope: parse_scope(&scope)?,
-                    entries: entries as u64,
-                    last_ok_at,
-                    failures,
-                    last_error,
-                    refusals,
-                })
-            })
+            .map(
+                |(id, url, kind, scope, last_ok_at, failures, last_error, entries, next_fetch_at)| {
+                    let refusals = reasons
+                        .query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(SourceStatus {
+                        url,
+                        kind: SourceKind::parse(&kind)?,
+                        scope: parse_scope(&scope)?,
+                        entries: entries as u64,
+                        last_ok_at,
+                        next_fetch_at,
+                        failures,
+                        last_error,
+                        refusals,
+                    })
+                },
+            )
             .collect()
     }
 }
@@ -626,8 +686,9 @@ mod tests {
                 50,
             )
             .unwrap();
-        store.record_failure(seed, "HTTP 503").unwrap();
-        store.record_failure(seed, "HTTP 504").unwrap();
+        assert_eq!(store.record_failure(seed, "HTTP 503").unwrap(), (1, Some(50)));
+        assert_eq!(store.record_failure(seed, "HTTP 504").unwrap(), (2, Some(50)));
+        store.set_next_fetch(seed, 7_250).unwrap();
         assert_eq!(store.entries_outside(own).unwrap(), 2);
         assert_eq!(store.entries_outside(seed).unwrap(), 0);
         let status = store.status().unwrap();
@@ -640,6 +701,7 @@ mod tests {
                     scope: InboundScope::Internal,
                     entries: 0,
                     last_ok_at: None,
+                    next_fetch_at: 0,
                     failures: 0,
                     last_error: None,
                     refusals: vec![],
@@ -650,6 +712,7 @@ mod tests {
                     scope: InboundScope::Public,
                     entries: 2,
                     last_ok_at: Some(50),
+                    next_fetch_at: 7_250,
                     failures: 2,
                     last_error: Some("HTTP 504".into()),
                     refusals: vec![("binding".into(), 2), ("invalid".into(), 1)],
@@ -661,6 +724,69 @@ mod tests {
         let after = &store.status().unwrap()[1];
         assert_eq!((after.entries, after.failures, after.last_error.clone()), (0, 0, None));
         assert_eq!(after.refusals, vec![]);
+        // Clearing removes the entries and keeps the source.
+        store
+            .replace(seed, &[entry("urn:air:acme.com:a", "x")], &[], 70)
+            .unwrap();
+        store.clear_entries(seed).unwrap();
+        let after = &store.status().unwrap()[1];
+        assert_eq!((after.entries, after.last_ok_at), (0, Some(70)));
+    }
+
+    #[test]
+    fn the_seeds_follow_the_operator_list_and_the_first_due_comes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RegistryStore::open(dir.path()).unwrap();
+        let seeds = |list: &[(&str, InboundScope)]| -> Vec<(String, InboundScope)> {
+            list.iter().map(|(seed, scope)| ((*seed).to_owned(), *scope)).collect()
+        };
+        store
+            .set_seeds(&seeds(&[
+                ("a.example", InboundScope::Internal),
+                ("b.example", InboundScope::Public),
+            ]))
+            .unwrap();
+        let own = store
+            .source("self:internal", SourceKind::SelfCatalog, InboundScope::Internal)
+            .unwrap();
+        // New seeds are due at once, in ID order. A self catalog is never a due seed.
+        let (a, text) = store.due_seed(0).unwrap().unwrap();
+        assert_eq!(text, "a.example");
+        store.set_next_fetch(a, 100).unwrap();
+        let (b, text) = store.due_seed(0).unwrap().unwrap();
+        assert_eq!(text, "b.example");
+        store.set_next_fetch(b, 50).unwrap();
+        assert_eq!(store.due_seed(10).unwrap(), None);
+        assert_eq!(store.due_seed(60).unwrap(), Some((b, "b.example".to_owned())));
+        assert_eq!(store.due_seed(200).unwrap(), Some((b, "b.example".to_owned())));
+        store.replace(a, &[entry("urn:air:a.example:x", "x")], &[], 1).unwrap();
+        store.replace(b, &[entry("urn:air:b.example:x", "x")], &[], 1).unwrap();
+        store
+            .replace(own, &[entry("urn:air:acme.com:own", "x")], &[], 1)
+            .unwrap();
+
+        // A seed that is gone loses its rows. A seed that changed its scope starts again.
+        store
+            .set_seeds(&seeds(&[
+                ("b.example", InboundScope::Internal),
+                ("c.example", InboundScope::Public),
+            ]))
+            .unwrap();
+        let urls: Vec<(String, u64, i64)> = store
+            .status()
+            .unwrap()
+            .into_iter()
+            .map(|source| (source.url, source.entries, source.next_fetch_at))
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                ("self:internal".to_owned(), 1, 0),
+                ("b.example".to_owned(), 0, 0),
+                ("c.example".to_owned(), 0, 0),
+            ]
+        );
+        assert_eq!(identifiers(&store, InboundScope::Internal), ["urn:air:acme.com:own"]);
     }
 
     #[test]

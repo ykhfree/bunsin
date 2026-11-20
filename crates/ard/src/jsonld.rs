@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-/// The URL of the ARD base context (§4.1).
+/// The URL of the ARD base context (§4.1). An entry SHOULD carry it as its `@context`.
 pub const BASE_CONTEXT_URL: &str = "https://agenticresourcediscovery.org/context/v1";
 
 /// The default namespace of the core terms (§4.1).

@@ -77,7 +77,8 @@ async fn rig(registry: Option<InboundScope>) -> Rig {
     let public = serve_outer(engine.clone(), outer(Reach::Public, PUBLIC_URL), wake)
         .await
         .unwrap();
-    bunsin_daemon::crawl::tick(&engine);
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    bunsin_daemon::crawl::tick(&engine, None, &stopped).await;
     Rig {
         _dir: dir,
         engine,
@@ -589,9 +590,375 @@ fn registry_status_lists_sources_and_counts() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "source\tself:public\tself\tpublic\t2 entries\tlast ok 2025-12-31T23:59:59Z\t0 failures\t-\n\
-         source\tbeta.com\tseed\tinternal\t1 entries\tlast ok 1970-01-01T00:00:00Z\t2 failures\tthe answer is larger than 1 MiB\n\
+        "source\tself:public\tself\tpublic\t2 entries\tlast ok 2025-12-31T23:59:59Z\tnext -\t0 failures\t-\n\
+         source\tbeta.com\tseed\tinternal\t1 entries\tlast ok 1970-01-01T00:00:00Z\tnext 1970-01-01T00:00:00Z\t2 failures\tthe answer is larger than 1 MiB\n\
          refused\tbeta.com\tbinding\t2\n\
          refused\tbeta.com\tinvalid\t1\n"
+    );
+}
+
+// --- The crawl of the operator's seeds ---
+
+#[test]
+fn a_bad_registry_source_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let serve = |options: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"))
+            .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+            .arg(dir.path())
+            .args(options)
+            .env_remove("BUNSIN_DATA_DIR")
+            .env("BUNSIN_KEY_STORE", "file")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{options:?} started");
+        String::from_utf8(output.stderr).unwrap()
+    };
+    for (options, expected) in [
+        (
+            &[
+                "--ard-registry",
+                "internal",
+                "--ard-registry-source",
+                "acme.com=http://cdn.example/ard.json",
+            ][..],
+            "must start with https://",
+        ),
+        (
+            &["--ard-registry", "internal", "--ard-registry-source", "Acme.com"],
+            "`Acme.com`",
+        ),
+        (
+            &["--ard-registry", "internal", "--ard-registry-public-source", "acme.com"],
+            "needs --ard-registry public",
+        ),
+        (&["--ard-registry-source", "acme.com"], "--ard-registry"),
+    ] {
+        let error = serve(options);
+        assert!(error.contains(expected), "{options:?}: {error}");
+    }
+    // The refused starts read no key and wrote no index.
+    assert!(!dir.path().join("master.key").exists());
+    assert!(!dir.path().join("registry.db").exists());
+}
+
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+
+/// A web server on this machine. It answers each path of its pages with a media type and a body.
+/// While `failing` is set, every answer is 503. `asked` counts the requests.
+struct Web {
+    base: String,
+    failing: Arc<AtomicBool>,
+    asked: Arc<AtomicUsize>,
+}
+
+async fn web(pages: Vec<(&'static str, &'static str, String)>) -> Web {
+    let failing = Arc::new(AtomicBool::new(false));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let (fail, count) = (failing.clone(), asked.clone());
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        count.fetch_add(1, Ordering::SeqCst);
+        let found = pages.iter().find(|(path, _, _)| *path == uri.path()).cloned();
+        let failing = fail.load(Ordering::SeqCst);
+        async move {
+            use axum::response::IntoResponse;
+            match found {
+                _ if failing => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                Some((_, media_type, body)) => ([(axum::http::header::CONTENT_TYPE, media_type)], body).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Web { base, failing, asked }
+}
+
+/// A registry on the internal listener that crawls `seeds`, with a clock the test sets.
+struct Crawler {
+    dir: tempfile::TempDir,
+    engine: Engine,
+    clock: Arc<AtomicI64>,
+    fetcher: bunsin_daemon::fetch::Fetcher,
+}
+
+const START: i64 = 1_000_000;
+const HOUR: i64 = 3_600;
+
+impl Crawler {
+    fn new(seeds: &[String]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(AtomicI64::new(START));
+        let time = clock.clone();
+        let engine = Engine::open(
+            dir.path(),
+            Arc::new(Publishers),
+            Arc::new(move || time.load(Ordering::SeqCst)),
+        )
+        .unwrap();
+        // A host under no allowed publisher domain, so the registry lists no entry of its own.
+        engine.add_outer_listener(OuterListener {
+            scope: InboundScope::Internal,
+            url: "https://registry.example.org".into(),
+        });
+        engine.serve_registry(InboundScope::Internal).unwrap();
+        let seeds: Vec<(String, InboundScope)> = seeds
+            .iter()
+            .map(|seed| (seed.clone(), InboundScope::Internal))
+            .collect();
+        // Test servers listen on this machine, so the operator allows its address, as on a real server.
+        let upstream = bunsin_daemon::UpstreamPolicy {
+            allowed_hosts: vec!["127.0.0.1".into()],
+        };
+        bunsin_daemon::crawl::check_seeds(&seeds, &upstream).unwrap();
+        engine.set_registry_seeds(&seeds).unwrap();
+        let fetcher = bunsin_daemon::fetch::Fetcher::new(&upstream).unwrap();
+        Crawler {
+            dir,
+            engine,
+            clock,
+            fetcher,
+        }
+    }
+
+    async fn tick(&self) {
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        bunsin_daemon::crawl::tick(&self.engine, Some(&self.fetcher), &stopped).await;
+    }
+
+    fn identifiers(&self) -> Vec<String> {
+        let request = bunsin_ard::parse_list(Vec::new()).unwrap();
+        let answer = json!(self.engine.registry_list(InboundScope::Internal, &request).unwrap());
+        answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["identifier"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn search(&self, body: Value) -> Value {
+        let request = bunsin_ard::parse_search(body.to_string().as_bytes()).unwrap();
+        json!(self.engine.registry_search(InboundScope::Internal, &request).unwrap())
+    }
+
+    /// The seed sources, as `registry-status` reads them.
+    fn seeds(&self) -> Vec<bunsin_store::SourceStatus> {
+        let store = RegistryStore::open(self.dir.path()).unwrap();
+        let all = store.status().unwrap();
+        all.into_iter()
+            .filter(|source| source.kind == SourceKind::Seed)
+            .collect()
+    }
+}
+
+fn crawled_entry(identifier: &str, name: &str) -> Value {
+    json!({
+        "identifier": identifier,
+        "displayName": name,
+        "type": "application/mcp-server-card+json",
+        "url": "https://agents.acme.test/agents/x/mcp/server-card",
+        "description": format!("{name} answers questions"),
+        "representativeQueries": ["where is my parcel", "who signs refunds"]
+    })
+}
+
+#[tokio::test]
+async fn a_crawl_indexes_a_manifest_and_in_page_markup() {
+    let manifest = json!({"entries": [crawled_entry("urn:air:acme.test:desk", "Help desk")]});
+    let markup = json!({
+        "@context": ["https://agenticresourcediscovery.org/context/v1", {"acme": "https://acme.test/vocab#"}],
+        "identifier": "urn:air:acme.test:payroll",
+        "displayName": "Payroll helper",
+        "type": "application/a2a-agent-card+json",
+        "url": "https://agents.acme.test/payroll.json",
+        "acme:tier": "gold"
+    });
+    let page = format!(
+        r#"<html><head><script type="application/ld+json">{markup}</script></head><body>Payroll</body></html>"#
+    );
+    let site = web(vec![
+        ("/ard.json", "application/json", manifest.to_string()),
+        ("/payroll.html", "text/html", page),
+    ])
+    .await;
+    let crawler = Crawler::new(&[
+        format!("acme.test={}/ard.json", site.base),
+        format!("acme.test={}/payroll.html", site.base),
+    ]);
+    crawler.tick().await;
+    assert_eq!(
+        crawler.identifiers(),
+        ["urn:air:acme.test:desk", "urn:air:acme.test:payroll"]
+    );
+    // The in-page entry is found by its text, and by its namespaced term under the query's own prefix.
+    let found = crawler.search(json!({"query": {"text": "payroll helper"}}));
+    assert_eq!(
+        found["results"][0]["identifier"], "urn:air:acme.test:payroll",
+        "{found}"
+    );
+    assert_eq!(found["results"][0]["source"], "https://registry.example.org");
+    let filtered = |tier: &str| {
+        crawler.search(json!({"query": {
+            "@context": {"t": "https://acme.test/vocab#"}, "text": "payroll helper", "filter": {"t:tier": tier}
+        }}))["results"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!((filtered("gold"), filtered("silver")), (1, 0));
+    // Both seeds were read once and are due again in an hour. A tick before then fetches nothing.
+    let seeds = crawler.seeds();
+    assert_eq!(seeds.len(), 2);
+    for seed in &seeds {
+        assert_eq!(
+            (seed.entries, seed.last_ok_at, seed.next_fetch_at),
+            (1, Some(START), START + HOUR)
+        );
+    }
+    assert_eq!(site.asked.load(Ordering::SeqCst), 2);
+    crawler.clock.store(START + HOUR - 1, Ordering::SeqCst);
+    crawler.tick().await;
+    assert_eq!(site.asked.load(Ordering::SeqCst), 2);
+    crawler.clock.store(START + HOUR, Ordering::SeqCst);
+    crawler.tick().await;
+    assert_eq!(site.asked.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn refused_entries_are_reported_by_reason() {
+    let mut large = crawled_entry("urn:air:acme.test:large", "Large");
+    large["description"] = json!("x".repeat(70 * 1024));
+    let mut invalid = crawled_entry("urn:air:acme.test:nameless", "Nameless");
+    invalid.as_object_mut().unwrap().remove("displayName");
+    let manifest = json!({"entries": [
+        crawled_entry("urn:air:acme.test:desk", "Help desk"),
+        crawled_entry("urn:air:other.test:desk", "Someone else's desk"),
+        invalid,
+        large,
+        crawled_entry("urn:air:acme.test:desk", "The same identifier again"),
+    ]});
+    let site = web(vec![("/ard.json", "application/json", manifest.to_string())]).await;
+    let crawler = Crawler::new(&[format!("acme.test={}/ard.json", site.base)]);
+    crawler.tick().await;
+    assert_eq!(crawler.identifiers(), ["urn:air:acme.test:desk"]);
+    // The operator's command shows the refusals by reason.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"))
+        .args(["registry-status", "--data-dir"])
+        .arg(crawler.dir.path())
+        .env_remove("BUNSIN_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let seed = format!("acme.test={}/ard.json", site.base);
+    for line in [
+        format!("source\t{seed}\tseed\tinternal\t1 entries\t"),
+        format!("refused\t{seed}\tduplicate\t1\n"),
+        format!("refused\t{seed}\tinvalid\t1\n"),
+        format!("refused\t{seed}\tother_publisher\t1\n"),
+        format!("refused\t{seed}\ttoo_large\t1\n"),
+    ] {
+        assert!(text.contains(&line), "{line:?} in {text}");
+    }
+}
+
+#[tokio::test]
+async fn a_failing_source_keeps_its_entries_for_seven_days() {
+    let manifest = json!({"entries": [crawled_entry("urn:air:acme.test:desk", "Help desk")]});
+    let site = web(vec![("/ard.json", "application/json", manifest.to_string())]).await;
+    let crawler = Crawler::new(&[format!("acme.test={}/ard.json", site.base)]);
+    crawler.tick().await;
+    assert_eq!(crawler.identifiers(), ["urn:air:acme.test:desk"]);
+
+    site.failing.store(true, Ordering::SeqCst);
+    // Each tick runs when the seed is due. Record the wait after each failure and the entries kept.
+    let mut seen = Vec::new();
+    for _ in 0..20 {
+        let due = crawler.seeds()[0].next_fetch_at;
+        crawler.clock.store(due, Ordering::SeqCst);
+        crawler.tick().await;
+        let seed = crawler.seeds().remove(0);
+        seen.push(((due - START) / HOUR, (seed.next_fetch_at - due) / HOUR, seed.entries));
+        if seed.entries == 0 {
+            break;
+        }
+    }
+    // (hours since the last success, the wait until the next read, entries).
+    assert_eq!(
+        seen,
+        [
+            (1, 1, 1),
+            (2, 2, 1),
+            (4, 4, 1),
+            (8, 8, 1),
+            (16, 16, 1),
+            (32, 24, 1),
+            (56, 24, 1),
+            (80, 24, 1),
+            (104, 24, 1),
+            (128, 24, 1),
+            (152, 24, 1),
+            // Seven days are 168 hours. The first failure after them removes the entries.
+            (176, 24, 0),
+        ]
+    );
+    let seed = crawler.seeds().remove(0);
+    assert_eq!(seed.failures, 12);
+    assert_eq!(seed.last_error.as_deref(), Some("the server answered status 503"));
+    // A success brings the entries back and ends the waiting.
+    site.failing.store(false, Ordering::SeqCst);
+    crawler.clock.store(seed.next_fetch_at, Ordering::SeqCst);
+    crawler.tick().await;
+    let seed = crawler.seeds().remove(0);
+    assert_eq!((seed.entries, seed.failures), (1, 0));
+    assert_eq!(seed.next_fetch_at, seed.last_ok_at.unwrap() + HOUR);
+}
+
+#[tokio::test]
+async fn a_catalog_seed_binds_its_named_domain_not_the_host() {
+    // Bunsin A publishes an agent under acme.test on a listener of this machine.
+    let dir = tempfile::tempdir().unwrap();
+    let real = bunsin_daemon::RealBackends::new(Arc::new(|_| None), false, bunsin_daemon::UpstreamPolicy::default())
+        .with_ard_publishers(&["acme.test".into()])
+        .unwrap();
+    struct Publisher(bunsin_daemon::RealBackends);
+    impl Backends for Publisher {
+        fn build<'a>(&'a self, _: &'a str, _: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
+            Box::pin(async { Err("not needed".to_owned()) })
+        }
+        fn ard_publishers(&self) -> Vec<String> {
+            self.0.ard_publishers()
+        }
+    }
+    let a = Arc::new(Engine::open(dir.path(), Arc::new(Publisher(real)), Arc::new(|| START)).unwrap());
+    let mut config = ProfileConfig::new("kim");
+    config.inbound = InboundConfig {
+        enabled: true,
+        description: "Questions about parcels".into(),
+        ard: Some(ArdListing {
+            publisher: "acme.test".into(),
+            agent_name: "kim".into(),
+            representative_queries: vec!["where is my parcel".into(), "who signs refunds".into()],
+            ..ArdListing::default()
+        }),
+        ..InboundConfig::default()
+    };
+    a.create_profile("kim", config).await.unwrap();
+    let listener = serve_outer(a, outer(Reach::Internal, "http://127.0.0.1"), Arc::new(Notify::new()))
+        .await
+        .unwrap();
+    let catalog = format!("{}/.well-known/ard.json", listener.url());
+
+    // The registry reads the same catalog for acme.test and for other.test.
+    let crawler = Crawler::new(&[format!("acme.test={catalog}"), format!("other.test={catalog}")]);
+    crawler.tick().await;
+    assert_eq!(crawler.identifiers(), ["urn:air:acme.test:kim"]);
+    let seeds = crawler.seeds();
+    assert_eq!((seeds[0].entries, seeds[0].refusals.clone()), (1, vec![]));
+    assert_eq!(
+        (seeds[1].entries, seeds[1].refusals.clone()),
+        (0, vec![("other_publisher".to_owned(), 1)])
     );
 }

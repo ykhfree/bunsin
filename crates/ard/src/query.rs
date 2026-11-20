@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::jsonld::ARD_NAMESPACE;
+use crate::jsonld::Context;
+use crate::search::{Bucket, FacetResult};
+
 /// The default page size of `/search` (§5.3.2).
 pub const SEARCH_PAGE_SIZE: usize = 10;
 /// The default page size of `/agents` (§5.3.4).
@@ -25,23 +27,6 @@ pub const FACET_LIMIT: usize = 20;
 /// The largest bucket count of a facet. A larger request gets this count.
 pub const MAX_FACET_LIMIT: usize = 100;
 
-/// The terms of the ARD base context (`ard.context.jsonld`) and their names in [`ARD_NAMESPACE`].
-const BASE_TERMS: [(&str, &str); 13] = [
-    ("identifier", "identifier"),
-    ("displayName", "displayName"),
-    ("type", "mediaType"),
-    ("url", "url"),
-    ("data", "data"),
-    ("representativeQueries", "representativeQueries"),
-    ("capabilities", "capabilities"),
-    ("tags", "tags"),
-    ("description", "description"),
-    ("version", "version"),
-    ("updatedAt", "updatedAt"),
-    ("metadata", "metadata"),
-    ("trustManifest", "trustManifest"),
-];
-
 /// The terms whose members a filter key can reach by a literal dot path (§5.3.1).
 const OPAQUE_TERMS: [&str; 3] = ["trustManifest", "metadata", "data"];
 
@@ -54,30 +39,6 @@ fn is_absolute_iri(key: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
         && rest.starts_with("//")
-}
-
-/// The IRI of a top-level key under the ARD base context alone: a base term, an `ard:` compact
-/// IRI, or an absolute IRI. Other keys give `None`.
-///
-/// Phase 1 resolves only these keys. WP3's JSON-LD expansion (`jsonld.rs`) replaces this function
-/// at merge, for entry contexts and for prefixes that `query.@context` binds.
-pub fn base_term_iri(key: &str) -> Option<String> {
-    if let Some((_, name)) = BASE_TERMS.iter().find(|(term, _)| *term == key) {
-        return Some(format!("{ARD_NAMESPACE}{name}"));
-    }
-    if let Some(name) = key.strip_prefix("ard:").filter(|name| !name.is_empty()) {
-        return Some(format!("{ARD_NAMESPACE}{name}"));
-    }
-    is_absolute_iri(key).then(|| key.to_owned())
-}
-
-/// The top-level terms of an entry by their IRI, with their values unchanged. Keys that
-/// [`base_term_iri`] does not resolve are left out.
-pub fn entry_terms(entry: &Map<String, Value>) -> Map<String, Value> {
-    entry
-        .iter()
-        .filter_map(|(key, value)| base_term_iri(key).map(|iri| (iri, value.clone())))
-        .collect()
 }
 
 /// Why a request cannot be answered. The text is for the caller.
@@ -100,27 +61,9 @@ pub enum FilterKey {
     Path { term: String, path: Vec<String> },
 }
 
-/// The names that an object of `query.@context` defines. Strings in it name remote contexts.
-fn context_names(context: Option<&Value>) -> Result<BTreeSet<String>, QueryError> {
-    let mut names = BTreeSet::new();
-    let mut add = |value: &Value| match value {
-        Value::String(_) => Ok(()),
-        Value::Object(map) => {
-            names.extend(map.keys().filter(|key| !key.starts_with('@')).cloned());
-            Ok(())
-        }
-        _ => invalid("`query.@context` must be a string, an object, or an array of them"),
-    };
-    match context {
-        None => {}
-        Some(Value::Array(items)) => items.iter().try_for_each(&mut add)?,
-        Some(other) => add(other)?,
-    }
-    Ok(names)
-}
-
-/// Resolves a filter key or a facet field. `bound` holds the names that `query.@context` defines.
-fn resolve_key(key: &str, bound: &BTreeSet<String>) -> Result<FilterKey, QueryError> {
+/// Resolves a filter key or a facet field through the query's effective context: the base
+/// context and `query.@context` (§5.3.1).
+fn resolve_key(key: &str, context: &Context) -> Result<FilterKey, QueryError> {
     if key == "publisher" {
         return Ok(FilterKey::Publisher);
     }
@@ -135,24 +78,24 @@ fn resolve_key(key: &str, bound: &BTreeSet<String>) -> Result<FilterKey, QueryEr
                 "`{key}`: a dot path must start with trustManifest., metadata. or data."
             ));
         }
-        let term = base_term_iri(head).expect("the opaque terms are base terms");
-        return Ok(FilterKey::Path { term, path });
+        return Ok(FilterKey::Path {
+            term: context.expand_key(head),
+            path,
+        });
     }
-    let prefix = key.split_once(':').map_or(key, |(prefix, _)| prefix);
-    if bound.contains(prefix) {
-        return invalid(format!(
-            "`{key}`: terms and prefixes that query.@context binds are not supported yet"
-        ));
+    let iri = context.expand_key(key);
+    if iri.starts_with('@') {
+        return invalid(format!("`{key}` is a JSON-LD keyword, not a term"));
     }
-    if let Some(iri) = base_term_iri(key) {
-        return Ok(FilterKey::Term(iri));
-    }
-    if key.contains(':') {
+    // A compact IRI whose prefix nothing binds stays as it was written.
+    if let Some((prefix, _)) = key.split_once(':')
+        && iri == key
+    {
         return invalid(format!(
             "`{key}` uses the prefix `{prefix}`, which query.@context does not bind"
         ));
     }
-    invalid(format!("`{key}` is not a term of the ARD base context"))
+    Ok(FilterKey::Term(iri))
 }
 
 /// The values of one value: a string, a number or a boolean as text, each element of an array.
@@ -232,12 +175,13 @@ impl QueryModel {
         })
     }
 
-    /// The same text for the same query, whatever the order of the filter keys. A page token holds its digest.
+    /// The same text for the same query, whatever the order of the filter keys. A page token holds
+    /// its digest. It holds the resolved keys, so another `@context` makes another text.
     pub fn canonical(&self) -> String {
-        let filter: Vec<(&str, &[String])> = self
+        let filter: Vec<(String, &[String])> = self
             .filter
             .iter()
-            .map(|constraint| (constraint.key_text.as_str(), constraint.values.as_slice()))
+            .map(|constraint| (format!("{:?}", constraint.key), constraint.values.as_slice()))
             .collect();
         serde_json::to_string(&(&self.text, filter)).expect("strings always serialize")
     }
@@ -255,12 +199,14 @@ struct RawQuery {
 }
 
 impl RawQuery {
-    /// The query, and the names that its `@context` defines.
-    fn parse(self) -> Result<(QueryModel, BTreeSet<String>), QueryError> {
-        let bound = context_names(self.context.as_ref())?;
+    /// The query, and its effective context.
+    fn parse(self) -> Result<(QueryModel, Context), QueryError> {
+        let context = Context::base()
+            .with(self.context.as_ref())
+            .map_err(|e| QueryError(format!("`query.@context`: {e}")))?;
         let mut filter = Vec::new();
         for (key_text, value) in self.filter.unwrap_or_default() {
-            let key = resolve_key(&key_text, &bound)?;
+            let key = resolve_key(&key_text, &context)?;
             let values = match value {
                 Value::String(text) => vec![text],
                 Value::Array(items) if !items.is_empty() => items
@@ -283,7 +229,7 @@ impl RawQuery {
             text: self.text,
             filter,
         };
-        Ok((query, bound))
+        Ok((query, context))
     }
 }
 
@@ -388,9 +334,9 @@ pub struct ExploreQuery {
 /// Reads the body of `POST /explore`.
 pub fn parse_explore(bytes: &[u8]) -> Result<ExploreQuery, QueryError> {
     let raw: RawExplore = body(bytes, "explore")?;
-    let (query, bound) = match raw.query {
+    let (query, context) = match raw.query {
         Some(query) => query.parse()?,
-        None => (QueryModel::default(), BTreeSet::new()),
+        None => (QueryModel::default(), Context::base().clone()),
     };
     let count = raw.result_type.facets.len();
     if !(1..=MAX_FACETS).contains(&count) {
@@ -412,7 +358,7 @@ pub fn parse_explore(bytes: &[u8]) -> Result<ExploreQuery, QueryError> {
             Some(_) => return invalid("a facet `minCount` must not be negative"),
         };
         facets.push(Facet {
-            key: resolve_key(&facet.field, &bound)?,
+            key: resolve_key(&facet.field, &context)?,
             field: facet.field,
             limit,
             min_count,
@@ -421,26 +367,11 @@ pub fn parse_explore(bytes: &[u8]) -> Result<ExploreQuery, QueryError> {
     Ok(ExploreQuery { query, facets })
 }
 
-/// One bucket of a facet (schema `ExploreFacetBucket`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Bucket {
-    pub value: String,
-    pub count: u64,
-}
-
-/// The answer for one facet (schema `ExploreFacetResult`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FacetAnswer {
-    pub buckets: Vec<Bucket>,
-    /// The sum of the counts of the buckets beyond `limit`. Absent if no bucket was cut.
-    #[serde(rename = "otherCount", skip_serializing_if = "Option::is_none")]
-    pub other_count: Option<u64>,
-}
-
 impl Facet {
     /// Counts the entries of each value at the key. An entry counts once per value. Buckets below
-    /// `min_count` go; the rest are ordered by count, then value, and cut at `limit`.
-    pub fn count<'a>(&self, entries: impl IntoIterator<Item = (&'a Map<String, Value>, &'a str)>) -> FacetAnswer {
+    /// `min_count` go; the rest are ordered by count, then value, and cut at `limit`. `otherCount`
+    /// is the sum of the counts of the cut buckets, and absent if no bucket was cut.
+    pub fn count<'a>(&self, entries: impl IntoIterator<Item = (&'a Map<String, Value>, &'a str)>) -> FacetResult {
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         for (terms, publisher) in entries {
             let values: BTreeSet<String> = values_at(&self.key, terms, publisher).into_iter().collect();
@@ -448,16 +379,21 @@ impl Facet {
                 *counts.entry(value).or_default() += 1;
             }
         }
-        let mut buckets: Vec<Bucket> = counts
+        let mut counted: Vec<(String, u64)> = counts
             .into_iter()
             .filter(|(_, count)| *count >= self.min_count)
-            .map(|(value, count)| Bucket { value, count })
             .collect();
-        buckets.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
-        let other: u64 = buckets.iter().skip(self.limit).map(|bucket| bucket.count).sum();
-        buckets.truncate(self.limit);
-        FacetAnswer {
-            buckets,
+        counted.sort_by(|(a_value, a), (b_value, b)| b.cmp(a).then_with(|| a_value.cmp(b_value)));
+        let other: u64 = counted.iter().skip(self.limit).map(|(_, count)| count).sum();
+        counted.truncate(self.limit);
+        FacetResult {
+            buckets: counted
+                .into_iter()
+                .map(|(value, count)| Bucket {
+                    value,
+                    count: Some(count),
+                })
+                .collect(),
             other_count: (other > 0).then_some(other),
         }
     }
@@ -469,15 +405,6 @@ pub struct SearchAnswer {
     pub results: Vec<Map<String, Value>>,
     #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
-}
-
-/// The answer of `POST /explore` (schema `ExploreResponse`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ExploreAnswer {
-    /// Always `facets`.
-    #[serde(rename = "resultType")]
-    pub result_type: &'static str,
-    pub facets: BTreeMap<String, FacetAnswer>,
 }
 
 /// The answer of `GET /agents` (schema `ListResponse`).
@@ -655,7 +582,13 @@ pub fn parse_list(pairs: impl IntoIterator<Item = (String, String)>) -> Result<L
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jsonld::{ARD_NAMESPACE, expand_terms};
     use serde_json::json;
+
+    /// The terms of an entry, as the index stores them.
+    fn terms_of(entry: Value) -> Map<String, Value> {
+        expand_terms(entry.as_object().unwrap()).unwrap()
+    }
 
     fn search(body: Value) -> Result<SearchQuery, QueryError> {
         parse_search(body.to_string().as_bytes())
@@ -735,17 +668,17 @@ mod tests {
             let text = refused(json!({"query": {"text": "x", "filter": {key: "v"}}}));
             assert!(text.contains("dot path"), "{key}: {text}");
         }
-        assert!(refused(json!({"query": {"text": "x", "filter": {"serviceTier": "v"}}})).contains("not a term"));
-        // Phase 1: a prefix or term that query.@context binds is refused until WP3's expansion is merged.
+        assert!(refused(json!({"query": {"text": "x", "filter": {"id": "v"}}})).contains("keyword"));
+        // A context that the expansion does not support is a request error.
         for context in [
-            json!({"okf": "https://openknowledgeformat.org/ns#"}),
-            json!(["https://agenticresourcediscovery.org/context/v1", {"okf": {"@id": "https://openknowledgeformat.org/ns#"}}]),
+            json!(5),
+            json!("https://schema.org"),
+            json!({"type": "https://schema.org/type"}),
+            json!({"@vocab": "https://evil.example/"}),
         ] {
-            let text =
-                refused(json!({"query": {"@context": context, "text": "x", "filter": {"okf:taxonomy": "us-gaap"}}}));
-            assert!(text.contains("not supported yet"), "{text}");
+            let text = refused(json!({"query": {"@context": context.clone(), "text": "x"}}));
+            assert!(text.contains("query.@context"), "{context}: {text}");
         }
-        assert!(refused(json!({"query": {"@context": 5, "text": "x"}})).contains("@context"));
         // Other request rules.
         assert!(refused(json!({"query": {"filter": {}}})).contains("text"));
         assert!(refused(json!({"query": {"text": "x"}, "federation": "upstream"})).contains("unknown variant"));
@@ -778,30 +711,41 @@ mod tests {
     }
 
     #[test]
-    fn the_base_context_gives_core_terms_ard_names_and_absolute_iris() {
-        assert_eq!(base_term_iri("type"), Some(ns("mediaType")));
-        assert_eq!(base_term_iri("displayName"), Some(ns("displayName")));
-        assert_eq!(base_term_iri("ard:serviceTier"), Some(ns("serviceTier")));
+    fn a_query_prefix_matches_an_entry_that_bound_the_same_iri_under_another_prefix() {
+        // The entry binds the namespace as `openknowledge`, the query as `okf` (§5.3.1).
+        let terms = terms_of(json!({
+            "@context": ["https://agenticresourcediscovery.org/context/v1", {"openknowledge": "https://openknowledgeformat.org/ns#"}],
+            "openknowledge:taxonomy": ["us-gaap", "ifrs"],
+            "serviceTier": "gold"
+        }));
+        let matches = |context: Value, filter: Value| {
+            search(json!({"query": {"@context": context, "text": "x", "filter": filter}}))
+                .unwrap()
+                .query
+                .matches(&terms, "acme.com")
+        };
+        let okf = json!({"okf": "https://openknowledgeformat.org/ns#"});
+        assert!(matches(okf.clone(), json!({"okf:taxonomy": "ifrs"})));
+        assert!(!matches(okf.clone(), json!({"okf:taxonomy": "gaap"})));
+        // The same IRI written out, and a prefix bound to another namespace.
+        assert!(matches(
+            json!([]),
+            json!({"https://openknowledgeformat.org/ns#taxonomy": "us-gaap"})
+        ));
+        assert!(!matches(
+            json!({"okf": "https://other.example/ns#"}),
+            json!({"okf:taxonomy": "ifrs"})
+        ));
+        // A facet field resolves the same way.
+        let found = explore(json!({"query": {"@context": okf}, "resultType": {"facets": [{"field": "okf:taxonomy"}]}}))
+            .unwrap();
         assert_eq!(
-            base_term_iri("https://acme.com/vocab#tier"),
-            Some("https://acme.com/vocab#tier".into())
+            found.facets[0].key,
+            FilterKey::Term("https://openknowledgeformat.org/ns#taxonomy".into())
         );
-        for other in [
-            "acme:tier",
-            "serviceTier",
-            "ard:",
-            "id",
-            "@context",
-            "urn:air:acme.com:x",
-        ] {
-            assert_eq!(base_term_iri(other), None, "{other}");
-        }
-        let terms = entry_terms(
-            json!({"@context": "https://agenticresourcediscovery.org/context/v1", "type": "a/b", "acme:x": 1, "tags": ["t"]})
-                .as_object()
-                .unwrap(),
-        );
-        assert_eq!(Value::Object(terms), json!({ns("mediaType"): "a/b", ns("tags"): ["t"]}));
+        // A plain name falls into the default namespace, as the entry's own key did.
+        assert!(matches(json!([]), json!({"serviceTier": "gold"})));
+        assert!(matches(json!([]), json!({"ard:serviceTier": "gold"})));
     }
 
     #[test]
@@ -814,7 +758,7 @@ mod tests {
             "trustManifest": {"identity": "spiffe://acme.com/x", "attestations": [{"type": "SOC2-Type2"}, {"type": "HIPAA"}]},
             "metadata": {"location": {"city": "Seoul"}}
         });
-        let terms = entry_terms(entry.as_object().unwrap());
+        let terms = terms_of(entry);
         let matches = |filter: Value| {
             search(json!({"query": {"text": "x", "filter": filter}}))
                 .unwrap()
@@ -860,29 +804,29 @@ mod tests {
             (json!({}), "beta.com"),
         ]
         .into_iter()
-        .map(|(entry, publisher)| (entry_terms(entry.as_object().unwrap()), publisher))
+        .map(|(entry, publisher)| (terms_of(entry), publisher))
         .collect();
         let facet = |field: &str, limit: usize, min_count: u64| Facet {
             field: field.into(),
-            key: resolve_key(field, &BTreeSet::new()).unwrap(),
+            key: resolve_key(field, Context::base()).unwrap(),
             limit,
             min_count,
         };
         let count = |facet: Facet| facet.count(rows.iter().map(|(terms, publisher)| (terms, *publisher)));
         let bucket = |value: &str, count: u64| Bucket {
             value: value.into(),
-            count,
+            count: Some(count),
         };
         assert_eq!(
             count(facet("tags", 20, 1)),
-            FacetAnswer {
+            FacetResult {
                 buckets: vec![bucket("a", 2), bucket("b", 2), bucket("c", 1), bucket("d", 1)],
                 other_count: None,
             }
         );
         assert_eq!(
             count(facet("tags", 1, 1)),
-            FacetAnswer {
+            FacetResult {
                 buckets: vec![bucket("a", 2)],
                 other_count: Some(4),
             }
@@ -890,7 +834,7 @@ mod tests {
         // A bucket below `minCount` is not cut: it is not there, so it adds nothing to `otherCount`.
         assert_eq!(
             count(facet("tags", 1, 2)),
-            FacetAnswer {
+            FacetResult {
                 buckets: vec![bucket("a", 2)],
                 other_count: Some(2),
             }

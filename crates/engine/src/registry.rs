@@ -11,8 +11,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bunsin_api::{ApiError, ApiResult};
 use bunsin_ard::{
-    ArdEntry, ExploreAnswer, ExploreQuery, Level, ListAnswer, ListClause, ListField, ListQuery, MAX_OFFSET, QueryModel,
-    REGISTRY_TYPES, SearchAnswer, SearchQuery, entry_terms, urn_publisher, validate,
+    Accepted, ArdEntry, ExploreQuery, ExploreResponse, ListAnswer, ListClause, ListField, ListQuery, MAX_OFFSET,
+    QueryModel, REGISTRY_TYPES, RejectReason, Rejected, SearchAnswer, SearchQuery, accept_entry, urn_publisher,
 };
 use bunsin_core::inbound::{InboundScope, reaches};
 use bunsin_core::search::{query_terms, rank_scored};
@@ -22,12 +22,16 @@ use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
-/// The largest entry that the index stores, in bytes of JSON.
-pub const MAX_ENTRY_BYTES: usize = 64 * 1024;
 /// The most entries of one source.
 pub const MAX_SOURCE_ENTRIES: usize = 500;
 /// The most entries of the whole index.
 pub const MAX_ENTRIES: usize = 10_000;
+/// How long after a successful read the crawl reads a seed again, in seconds.
+pub const REFETCH_AFTER: i64 = 3_600;
+/// The longest wait after failed reads, in seconds.
+pub const MAX_RETRY_WAIT: i64 = 24 * 3_600;
+/// How long a seed keeps its entries without a successful read, in seconds.
+pub const EXPIRE_AFTER: i64 = 7 * 24 * 3_600;
 
 /// The terms whose text the full-text index holds.
 const SEARCHED_TERMS: [&str; 5] = [
@@ -58,6 +62,16 @@ fn host_of(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let host = rest.split(['/', ':', '?', '#']).next()?;
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The short fixed word of a refusal. The operator's status counts refusals by it.
+fn reason_word(reason: &RejectReason) -> &'static str {
+    match reason {
+        RejectReason::TooLarge => "too_large",
+        RejectReason::NotAnObject | RejectReason::Malformed(_) | RejectReason::Invalid(_) => "invalid",
+        RejectReason::UnsupportedContext(_) => "unsupported_context",
+        RejectReason::OtherPublisher { .. } => "other_publisher",
+    }
 }
 
 /// The text of the searched terms of an entry, one value a line.
@@ -166,7 +180,7 @@ impl Engine {
     pub(crate) fn registry_entry(&self, listener: &OuterListener) -> Option<ArdEntry> {
         let domain = self.registry_publisher(listener.scope)?;
         Some(ArdEntry {
-            context: Some(Value::from(bunsin_ard::BASE_CONTEXT)),
+            context: Some(Value::from(bunsin_ard::BASE_CONTEXT_URL)),
             identifier: format!("urn:air:{domain}:registry:bunsin"),
             display_name: "Bunsin ARD registry".into(),
             media_type: REGISTRY_TYPES[0].into(),
@@ -190,32 +204,79 @@ impl Engine {
                 .store
                 .source(self_source(listener), SourceKind::SelfCatalog, listener)
                 .map_err(store_error)?;
-            let entries = self
-                .ard_catalog(listener)
-                .manifest
-                .entries
-                .iter()
-                .map(|entry| serde_json::to_value(entry).map_err(internal))
-                .collect::<ApiResult<Vec<Value>>>()?;
-            self.index_source(registry, source, &entries)?;
+            let mut found = Vec::new();
+            for entry in self.ard_catalog(listener).manifest.entries {
+                let raw = serde_json::to_value(&entry).map_err(internal)?;
+                // The operator's `--ard-publisher-domain` list already chose the publisher, so an
+                // entry binds to its own publisher. The other acceptance rules still apply.
+                let publisher = urn_publisher(&entry.identifier).unwrap_or_default();
+                found.push(accept_entry(&raw, publisher));
+            }
+            self.index_source(registry, source, found)?;
         }
         Ok(())
     }
 
-    /// Stores the entries of one source in place of its earlier ones. An entry that breaks a MUST
-    /// rule, is too large, or passes a limit is refused with a short reason. The caller checked
-    /// the binding of the publisher domain, if the source needs one.
-    fn index_source(&self, registry: &Registry, source: i64, entries: &[Value]) -> ApiResult<()> {
+    /// Makes the operator's seeds the crawled sources: each a seed text, `<domain>` or
+    /// `<domain>=<URL>`, and the scope of its flag. A seed that is gone loses its entries.
+    pub fn set_registry_seeds(&self, seeds: &[(String, InboundScope)]) -> ApiResult<()> {
+        let registry = self.registry.get().ok_or_else(|| internal("the registry is off"))?;
+        registry.store.set_seeds(seeds).map_err(store_error)
+    }
+
+    /// The seed that the crawl reads next, if one is due now: its source ID and its seed text.
+    pub fn due_registry_seed(&self) -> ApiResult<Option<(i64, String)>> {
+        let Some(registry) = self.registry.get() else {
+            return Ok(None);
+        };
+        registry.store.due_seed(self.now()).map_err(store_error)
+    }
+
+    /// Stores what a read of a seed found, in place of its earlier entries, and reads it again in [`REFETCH_AFTER`].
+    pub fn crawl_succeeded(&self, source: i64, found: Vec<Result<Accepted, Rejected>>) -> ApiResult<()> {
+        let registry = self.registry.get().ok_or_else(|| internal("the registry is off"))?;
+        self.index_source(registry, source, found)?;
+        registry
+            .store
+            .set_next_fetch(source, self.now() + REFETCH_AFTER)
+            .map_err(store_error)
+    }
+
+    /// Records a failed read of a seed. Its entries stay, unless its last success is
+    /// [`EXPIRE_AFTER`] ago or more. The n-th failure in a row waits `REFETCH_AFTER × 2^(n−1)`,
+    /// at most [`MAX_RETRY_WAIT`].
+    pub fn crawl_failed(&self, source: i64, error: &str) -> ApiResult<()> {
+        let registry = self.registry.get().ok_or_else(|| internal("the registry is off"))?;
+        let now = self.now();
+        let (failures, last_ok_at) = registry.store.record_failure(source, error).map_err(store_error)?;
+        if last_ok_at.is_some_and(|at| now - at >= EXPIRE_AFTER) {
+            registry.store.clear_entries(source).map_err(store_error)?;
+        }
+        let wait = REFETCH_AFTER
+            .saturating_mul(1 << failures.saturating_sub(1).min(16))
+            .min(MAX_RETRY_WAIT);
+        registry.store.set_next_fetch(source, now + wait).map_err(store_error)
+    }
+
+    /// Stores the entries of one source in place of its earlier ones. `found` holds the outcome of
+    /// `accept_entry` for each entry. A refused entry, a repeated identifier, or an entry past a
+    /// limit is stored as a refusal with a short reason.
+    fn index_source(&self, registry: &Registry, source: i64, found: Vec<Result<Accepted, Rejected>>) -> ApiResult<()> {
         let room = MAX_ENTRIES.saturating_sub(registry.store.entries_outside(source).map_err(store_error)?);
         let mut stored: Vec<NewEntry> = Vec::new();
         let mut refused: Vec<Refusal> = Vec::new();
-        for value in entries {
-            let identifier = value["identifier"].as_str().unwrap_or_default().to_owned();
-            let checked = match (serde_json::from_value::<ArdEntry>(value.clone()), value.as_object()) {
-                _ if value.to_string().len() > MAX_ENTRY_BYTES => Err("too_large"),
-                (Ok(entry), Some(map)) if validate(&entry).iter().all(|v| v.level() != Level::Must) => Ok((entry, map)),
-                _ => Err("invalid"),
+        for outcome in found {
+            let accepted = match outcome {
+                Ok(accepted) => accepted,
+                Err(rejected) => {
+                    refused.push(Refusal {
+                        identifier: rejected.identifier.unwrap_or_default(),
+                        reason: reason_word(&rejected.reason).into(),
+                    });
+                    continue;
+                }
             };
+            let identifier = accepted.entry.identifier.clone();
             let limit = if stored.iter().any(|known| known.identifier == identifier) {
                 Some("duplicate")
             } else if stored.len() >= MAX_SOURCE_ENTRIES {
@@ -225,23 +286,23 @@ impl Engine {
             } else {
                 None
             };
-            match (checked, limit) {
-                (Ok((entry, map)), None) => stored.push(NewEntry {
-                    publisher: urn_publisher(&entry.identifier)
-                        .unwrap_or_default()
-                        .to_ascii_lowercase(),
-                    identifier,
-                    display_name: entry.display_name,
-                    media_type: entry.media_type,
-                    terms: entry_terms(map),
-                    search_text: search_text(map),
-                    entry: value.clone(),
-                }),
-                (Err(reason), _) | (Ok(_), Some(reason)) => refused.push(Refusal {
+            if let Some(reason) = limit {
+                refused.push(Refusal {
                     identifier,
                     reason: reason.into(),
-                }),
+                });
+                continue;
             }
+            let entry = serde_json::to_value(&accepted.entry).map_err(internal)?;
+            stored.push(NewEntry {
+                publisher: accepted.publisher.to_ascii_lowercase(),
+                display_name: accepted.entry.display_name,
+                media_type: accepted.entry.media_type,
+                search_text: search_text(entry.as_object().expect("an entry serializes to an object")),
+                terms: accepted.terms,
+                entry,
+                identifier,
+            });
         }
         registry
             .store
@@ -320,7 +381,7 @@ impl Engine {
     }
 
     /// `POST /explore` on the listener of `listener` (§5.3.3). The facets cover the whole matched set.
-    pub fn registry_explore(&self, listener: InboundScope, request: &ExploreQuery) -> ApiResult<ExploreAnswer> {
+    pub fn registry_explore(&self, listener: InboundScope, request: &ExploreQuery) -> ApiResult<ExploreResponse> {
         let registry = self.registry_for(listener)?;
         let matched = self.matched(registry, listener, &request.query)?;
         let facets = request
@@ -331,8 +392,8 @@ impl Engine {
                 (facet.field.clone(), facet.count(rows))
             })
             .collect();
-        Ok(ExploreAnswer {
-            result_type: "facets",
+        Ok(ExploreResponse {
+            result_type: "facets".into(),
             facets,
         })
     }

@@ -215,8 +215,15 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **ARD registry.** `--ard-registry internal`은 내부 리스너를, `--ard-registry public`은 두 리스너를 ARD registry로 만듭니다.
   이 옵션이 없으면 registry 경로가 없습니다(404). registry 리스너는 루트에서 `POST /search`, `POST /explore`, `GET /agents`에 답합니다.
   그래서 base URL은 그 리스너의 `--*-url`입니다. registry에는 token이 필요 없습니다.
-  - **넣는 것.** 지금은 이 서버 자신의 catalog만 넣습니다. 60초마다 `<data dir>/registry.db`의 내용을 바꿉니다.
-    다른 도메인의 crawl은 phase 2이고, 아직 없습니다.
+  - **넣는 것.** 이 서버 자신의 catalog(60초마다)와, seed로 적은 도메인의 항목을 넣습니다. 모두 `<data dir>/registry.db`에 있습니다.
+  - **seed.** `--ard-registry-source <seed>`는 내부 리스너용 도메인을, `--ard-registry-public-source <seed>`는 두 리스너용 도메인을 더합니다
+    (`--ard-registry public`일 때만). 여러 번 줄 수 있고, seed는 200개까지입니다.
+    seed는 `<domain>`이거나 `<domain>=<URL>`입니다. 앞의 것은 `/.well-known/ard.json`, `rel="ard"` 링크, `Agentmap` 줄로 그 도메인을 해석합니다.
+    뒤의 것은 그 catalog 주소 하나만 읽습니다. 어느 쪽이든 URN이 그 도메인을 가리키는 항목만 넣습니다.
+    서버는 시작할 때 모든 seed 주소를 접속 대상 규칙(`--allow-upstream-host`)으로 검사하고, 하나라도 어기면 시작하지 않습니다.
+  - **일정.** registry는 seed를 하나씩 읽습니다. 성공하면 1시간 뒤에 다시 읽습니다.
+    n번 연속 실패하면 1시간 × 2^(n−1)(최대 24시간) 뒤에 다시 읽고, 항목은 그대로 둡니다.
+    7일 동안 성공이 없으면 그 seed의 항목을 지우고, 다음 성공이 다시 채웁니다.
   - **리스너마다 보는 것.** 공개 리스너는 공개 항목만 봅니다. 순위와 개수도 그 항목으로만 셉니다.
     그래서 공개 리스너의 답은 내부 항목에 대해 아무것도 알려 주지 않습니다.
   - **한도.** 리스너마다 1분에 600 요청까지 답하고, 넘으면 429입니다. 요청 본문은 64 KiB까지입니다.
@@ -228,7 +235,7 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   - **DNS.** 서버는 시작할 때 그런 리스너마다 stderr에 한 줄을 씁니다(예: `_search._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.`).
     이 줄을 DNS zone에 넣으십시오. 서버는 DNS 레코드를 쓰지 않습니다.
   - **상태.** `bunsind registry-status`는 이 컴퓨터의 `registry.db`를 읽습니다. 서버가 도는 동안에도 됩니다.
-    source마다 항목 수, 마지막 성공, 실패 수, 마지막 오류, 거부한 항목의 이유별 개수를 보입니다.
+    source마다 항목 수, 마지막 성공, 다음 읽기, 실패 수, 마지막 오류, 거부한 항목의 이유별 개수(예: `other_publisher`, `too_large`)를 보입니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
 ## agent 설정 (프로필 소유자)

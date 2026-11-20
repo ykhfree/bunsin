@@ -3,7 +3,7 @@
 //! Bunsin takes three ARD roles (PLAN 4.6). It is a Publisher: it lists agent profiles in
 //! `/.well-known/ard.json`. It is a Consumer: an agent searches the registries in its profile.
 //! It is a Registry if the server operator turns it on: it indexes the server's own catalogs and
-//! answers `/search`, `/explore` and `/agents` (§5.3). Crawling other sources is phase 2, not yet.
+//! answers `/search`, `/explore` and `/agents` (§5.3). It also crawls the domains that the operator names.
 //!
 //! The source is the ARD specification text, version [`SPEC_VERSION`], and its schema files
 //! `ard-entry.schema.json` and `ard.openapi.yaml`. Comments cite the sections as `§n`.
@@ -26,13 +26,13 @@ mod search;
 
 pub use catalog::{Catalog, PublishedProfile, Refused, Scope, catalog, dns_record};
 pub use entry::{
-    A2A_AGENT_CARD_TYPE, AgentListing, ArdEntry, ArdManifest, BASE_CONTEXT, Built, Level, MCP_SERVER_CARD_TYPE,
-    Protocol, TrustManifest, Violation, build_entry, urn_publisher, validate,
+    A2A_AGENT_CARD_TYPE, AgentListing, ArdEntry, ArdManifest, Built, Level, MCP_SERVER_CARD_TYPE, Protocol,
+    TrustManifest, Violation, build_entry, urn_publisher, validate,
 };
 pub use query::{
-    Constraint, ExploreAnswer, ExploreQuery, Facet, FacetAnswer, FilterKey, LIST_PAGE_SIZE, ListAnswer, ListClause,
-    ListField, ListQuery, MAX_OFFSET, MAX_PAGE_SIZE, QueryError, QueryModel, SEARCH_PAGE_SIZE, SearchAnswer,
-    SearchQuery, base_term_iri, entry_terms, parse_explore, parse_list, parse_list_filter, parse_search, values_at,
+    Constraint, ExploreQuery, Facet, FilterKey, LIST_PAGE_SIZE, ListAnswer, ListClause, ListField, ListQuery,
+    MAX_OFFSET, MAX_PAGE_SIZE, QueryError, QueryModel, SEARCH_PAGE_SIZE, SearchAnswer, SearchQuery, parse_explore,
+    parse_list, parse_list_filter, parse_search, values_at,
 };
 pub use search::{
     DeclineReason, Declined, ErrorCode, Failed, Federated, Federation, MAX_ERROR_MESSAGE_BYTES, MAX_RESPONSE_BYTES,

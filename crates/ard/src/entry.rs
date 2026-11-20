@@ -1,6 +1,7 @@
 //! The ARD entry (§4), the `ard.json` manifest (§5.1), the builder for one Bunsin agent profile,
 //! and the validation of the entry rules.
 
+use crate::jsonld::BASE_CONTEXT_URL;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
@@ -10,8 +11,6 @@ use std::fmt;
 pub const MCP_SERVER_CARD_TYPE: &str = "application/mcp-server-card+json";
 /// The media type of an A2A Agent Card (§3.3).
 pub const A2A_AGENT_CARD_TYPE: &str = "application/a2a-agent-card+json";
-/// The ARD base context (§4.1). An entry SHOULD carry it as its `@context`.
-pub const BASE_CONTEXT: &str = "https://agenticresourcediscovery.org/context/v1";
 
 /// The protocol of the card that an entry points at. A profile has an MCP entry, and an A2A entry
 /// if the owner turned A2A on.
@@ -231,7 +230,7 @@ pub fn build_entry(listing: &AgentListing) -> Result<Built, Vec<Violation>> {
         }
     }
     let entry = ArdEntry {
-        context: Some(Value::from(BASE_CONTEXT)),
+        context: Some(Value::from(BASE_CONTEXT_URL)),
         identifier,
         display_name,
         media_type: listing.protocol.media_type().to_owned(),
@@ -468,7 +467,7 @@ mod tests {
         let built = build_entry(&input).unwrap();
         assert_eq!(built.warnings, vec![]);
         let entry = serde_json::to_value(&built.entry).unwrap();
-        assert_eq!(entry["@context"], BASE_CONTEXT);
+        assert_eq!(entry["@context"], BASE_CONTEXT_URL);
         assert_eq!(entry["tags"], json!(["payments", "refunds"]));
         assert_eq!(entry["version"], "0.1.0");
         assert_eq!(entry["updatedAt"], "2026-11-20T08:15:00Z");

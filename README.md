@@ -256,9 +256,19 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   and `--ard-registry public` makes both listeners one. Without the flag the registry routes
   do not exist (404). A registry listener answers `POST /search`, `POST /explore` and
   `GET /agents` at its root, so its base URL is its `--*-url`. The registry needs no token.
-  - **What it indexes.** For now, only this server's own catalogs. Every 60 seconds it
-    replaces them in `<data dir>/registry.db`. Crawling other domains is phase 2 and does not
-    exist yet.
+  - **What it indexes.** This server's own catalogs, every 60 seconds, and the domains that you
+    name as seeds. All of it is in `<data dir>/registry.db`.
+  - **Seeds.** `--ard-registry-source <seed>` adds a domain for the internal listener, and
+    `--ard-registry-public-source <seed>` one for both listeners (only with
+    `--ard-registry public`). Repeat them, at most 200 seeds. A seed is `<domain>`, which the
+    registry resolves through `/.well-known/ard.json`, `rel="ard"` links and `Agentmap` lines,
+    or `<domain>=<URL>`, which reads only that one catalog address. Either way, an entry is kept
+    only if its URN names that domain. The server checks every seed address with the upstream
+    rules (`--allow-upstream-host`) and does not start if one fails.
+  - **Schedule.** The registry reads one seed at a time. It reads a seed again 1 hour after a
+    success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
+    keeps the entries. A seed without a success for 7 days loses its entries until it is read
+    again.
   - **What each listener sees.** The public listener sees only public entries. It ranks and
     counts only those entries, so its answers say nothing about internal entries.
   - **Limits.** Each listener answers 600 requests a minute; more get 429. A request body is
@@ -273,8 +283,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     example `_search._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.` Add it to your DNS
     zone. The server does not write DNS records.
   - **Status.** `bunsind registry-status` reads `registry.db` on this machine, also while the
-    server runs. For each source it shows the entry count, the last successful read, the
-    failures, the last error, and the refused entries by reason.
+    server runs. For each source it shows the entry count, the last successful read, the next
+    read, the failures, the last error, and the refused entries by reason, such as
+    `other_publisher` or `too_large`.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 

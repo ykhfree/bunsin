@@ -1142,6 +1142,17 @@ async fn bind(router: Router, listen: SocketAddr, tls: Option<(PathBuf, PathBuf)
 ///
 /// A profile that fails at step 1 or 3 is written to stderr and does not stop the start.
 pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterConfig>) -> Result<Started, ServeError> {
+    start_with_fetcher(engine, config, outer, None).await
+}
+
+/// Like [`start`]. The registry task reads the registry's seeds with `fetcher`. Without it, the
+/// registry indexes only the server's own catalogs.
+pub async fn start_with_fetcher(
+    engine: Arc<Engine>,
+    config: ServeConfig,
+    outer: Vec<OuterConfig>,
+    fetcher: Option<crate::fetch::Fetcher>,
+) -> Result<Started, ServeError> {
     check_listeners(&config, &outer)?;
     // The inbound endpoints wake the intake task when a question arrives.
     let wake = Arc::new(Notify::new());
@@ -1163,7 +1174,7 @@ pub async fn start(engine: Arc<Engine>, config: ServeConfig, outer: Vec<OuterCon
     Ok(Started {
         control,
         outer: listeners,
-        poller: Poller::start_with(engine, wake),
+        poller: Poller::start_crawling(engine, wake, fetcher),
     })
 }
 
@@ -1187,6 +1198,11 @@ impl Poller {
 
     /// Like `start`. A signal on `wake` makes the intake task run at once instead of at its next tick.
     pub fn start_with(engine: Arc<Engine>, wake: Arc<Notify>) -> Self {
+        Self::start_crawling(engine, wake, None)
+    }
+
+    /// Like `start_with`. The registry task reads the registry's seeds with `fetcher`.
+    pub fn start_crawling(engine: Arc<Engine>, wake: Arc<Notify>, fetcher: Option<crate::fetch::Fetcher>) -> Self {
         let (stop, mut stopped) = tokio::sync::watch::channel(false);
         let mut intake_stopped = stopped.clone();
         let drainer = engine.clone();
@@ -1196,7 +1212,7 @@ impl Poller {
             let mut registry_stopped = stopped.clone();
             tokio::spawn(async move {
                 loop {
-                    crate::crawl::tick(&indexer);
+                    crate::crawl::tick(&indexer, fetcher.as_ref(), &registry_stopped).await;
                     tokio::select! {
                         _ = tokio::time::sleep(crate::crawl::CRAWL_TICK) => {}
                         _ = registry_stopped.changed() => break,
