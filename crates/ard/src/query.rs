@@ -549,7 +549,11 @@ pub fn parse_list_filter(text: &str) -> Result<Vec<ListClause>, QueryError> {
         let (field, after) = rest.split_at(field_end);
         let after = after.trim_start();
         let operator = after.chars().next().ok_or_else(wrong)?;
-        let after = after[1..].trim_start().strip_prefix('\'').ok_or_else(wrong)?;
+        // The operator may be any character, so the slice steps over its UTF-8 length.
+        let after = after[operator.len_utf8()..]
+            .trim_start()
+            .strip_prefix('\'')
+            .ok_or_else(wrong)?;
         let close = after.find('\'').ok_or_else(wrong)?;
         let values: Vec<String> = after[..close].split(',').map(|v| v.trim().to_owned()).collect();
         if values.iter().any(String::is_empty) {
@@ -941,6 +945,8 @@ mod tests {
             "type = 'a,'",                            // an empty value
             "type = 'a",                              // an open quote
             "(type = 'a')",                           // no grouping
+            "type ≥ 'a'",                             // an operator of more than one byte
+            "é",                                      // a field of more than one byte, and nothing else
         ] {
             assert!(parse_list_filter(wrong).is_err(), "{wrong}");
         }

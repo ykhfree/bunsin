@@ -378,6 +378,8 @@ async fn requests_that_break_a_rule_get_400_and_every_answer_allows_any_origin()
         vec![("orderBy", "score")],
         vec![("pageToken", "made-up")],
         vec![("limit", "5")],
+        vec![("filter", "é")],
+        vec![("filter", "type ≥ '배포'")],
     ] {
         let (status, answer) = body(agents(&rig.public, &pairs).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{pairs:?}");
@@ -457,6 +459,65 @@ async fn a_started_server_indexes_its_catalogs_at_once_and_stops_the_task() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn the_serve_flag_turns_the_registry_on_and_prints_its_dns_record() {
+    use std::io::{BufRead, BufReader, Read};
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"))
+        .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(dir.path())
+        .args([
+            "--internal-listen",
+            "127.0.0.1:0",
+            "--internal-url",
+            "https://agents.acme.com",
+        ])
+        .args(["--ard-publisher-domain", "acme.com", "--ard-registry", "internal"])
+        .env_remove("BUNSIN_DATA_DIR")
+        .env_remove("BUNSIN_MASTER_KEY_FILE")
+        // No test may touch the real Keychain.
+        .env("BUNSIN_KEY_STORE", "file")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let control = lines.next().unwrap().unwrap();
+    assert!(control.starts_with("listening on "), "{control}");
+    let internal = lines.next().unwrap().unwrap();
+    let address = internal.strip_prefix("internal listener on ").unwrap().to_owned();
+    let mut total = json!(0);
+    for _ in 0..100 {
+        let answer: Value = reqwest::get(format!("{address}/agents"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        total = answer["total"].clone();
+        if total == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // The first tick indexed the registry's own entry.
+    assert_eq!(total, 1);
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "_search._agents.acme.com. 3600 IN SVCB 1 agents.acme.com. ; the registry of the internal listener\n"
+        ),
+        "{stderr}"
+    );
 }
 
 fn entry(identifier: &str) -> NewEntry {
