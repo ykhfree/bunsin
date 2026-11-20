@@ -35,8 +35,8 @@ Bunsin is in early development. Read this list before you use it.
 - **OAuth for MCP servers is turned on in the settings file only.** The window and the
   command line then sign in (see [LLM endpoint and connectors](#llm-endpoint-and-connectors)).
 - **Tested only against local test servers.** No test runs against a real LLM endpoint,
-  a real MCP server, a real OAuth provider, a real ARD registry, or the real Slack, Jira or
-  Confluence API. No test runs a real coding CLI (Claude Code, Codex); the coding tests use
+  a real MCP server, a real OAuth provider, a real ARD registry or publisher, a real A2A client,
+  or the real Slack, Jira or Confluence API. No test runs a real coding CLI (Claude Code, Codex); the coding tests use
   `/bin/sh` and temporary git repositories.
 - **The desktop window is tested headlessly.** Tests drive the views without a screen, and the
   pictures in `docs/screens` are drawn offscreen. Nobody has opened the real window and used it.
@@ -46,6 +46,10 @@ Bunsin is in early development. Read this list before you use it.
 - **Not built yet:** OAuth for callers of the inbound endpoint (they use caller tokens), the LLM
   usage in the window (`bunsind llm-usage` only), a command-line setup wizard, turning OAuth for
   MCP servers on outside the settings file, and a check of a note page when you lose access to its source.
+  From ARD: DNS lookups of `_entries._agents`, the old `ai-catalog.json` path, following registry
+  referrals (federation stays `none`), full JSON-LD processing (only top-level keys are expanded),
+  signature checks of a trust manifest, and search as an MCP tool or A2A skill (§5.3.5).
+  From A2A: streaming, push notifications, the extended Agent Card, and follow-up messages in a task.
 - **The server operator can read profile data.** Profiles are isolated from each other,
   not from a person with access to the server's files.
 

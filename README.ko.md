@@ -30,7 +30,7 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
 - **구성 마법사는 창에만 있습니다.** 마법사는 다른 화면과 같은 호출을 쓰고, 자기 상태를 저장하지 않습니다.
   명령줄에는 마법사가 없습니다. [agent 설정](#agent-설정-프로필-소유자)에 같은 순서의 명령이 있습니다.
 - **MCP 서버용 OAuth는 설정 파일로만 켭니다.** 켠 뒤의 로그인은 창과 명령줄에서 합니다([LLM endpoint와 커넥터](#llm-endpoint와-커넥터) 참고).
-- **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 OAuth 제공자, 실제 ARD registry, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
+- **로컬 테스트 서버로만 시험했습니다.** 실제 LLM endpoint, 실제 MCP 서버, 실제 OAuth 제공자, 실제 ARD registry나 게시자, 실제 A2A client, 실제 Slack·Jira·Confluence API로 실행하는 테스트는 없습니다.
   실제 코딩 CLI(Claude Code, Codex)를 실행하는 테스트도 없습니다. 코딩 테스트는 `/bin/sh`와 임시 git 저장소를 씁니다.
 - **데스크톱 창은 헤드리스로만 시험했습니다.** 테스트는 화면 없이 각 화면을 조작하고, `docs/screens`의 그림은 화면 밖에서 그립니다.
   실제 창을 열어 써 본 적은 없습니다. Keychain 저장 코드는 테스트가 없습니다. `Bunsin.app`은 서명하지 않았습니다.
@@ -38,6 +38,9 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
   Linux 컴퓨터에서 서버를 실행하거나 systemd unit을 시작해 본 적은 없습니다.
 - **아직 만들지 않은 것:** 인바운드 호출자의 OAuth(호출자는 호출자 token을 씁니다), 창의 LLM 사용량 화면(`bunsind llm-usage`만 있습니다),
   명령줄 구성 마법사, 설정 파일 밖에서 MCP 서버용 OAuth를 켜는 방법, 출처의 열람 권한을 잃었을 때 notes 페이지를 다시 확인하는 기능.
+  ARD에서는 `_entries._agents` DNS 조회, 옛 `ai-catalog.json` 경로, registry referral 따라가기(federation은 `none`),
+  JSON-LD 전체 처리(최상위 키만 전개합니다), trustManifest 서명 검사, MCP 도구나 A2A skill로 내는 검색(§5.3.5).
+  A2A에서는 streaming, push 알림, 확장 Agent Card, task 안의 후속 메시지.
 - **서버 운영자는 프로필 데이터를 읽을 수 있습니다.** 프로필은 서로에게서 격리되어 있지만,
   서버 파일에 접근할 수 있는 사람에게서는 격리되어 있지 않습니다.
 
