@@ -498,14 +498,14 @@
     ④ 버전: `A2A-Version` 헤더, 없으면 같은 이름의 query parameter(§3.6.1). Major.Minor만 보고 `1.0`만 받는다. 빈 값은 0.3이다(§3.6.2). 그 밖은 -32009, ErrorInfo `supportedVersions: "1.0"`.
     ⑤ 분기. JSON-RPC 오류도 HTTP 200이다. 오류의 `data`는 `google.rpc.ErrorInfo` 하나이다(§9.5).
   - 메서드: `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`. `SendStreamingMessage`, `SubscribeToTask`, `GetExtendedAgentCard`는 -32004, push 설정 넷은 -32003, 모르는 메서드는 -32601(§3.3.4).
-  - **SendMessage**: `configuration.returnImmediately: true`가 아니면 -32004(설계 D2). §3.2.2는 이 값이 없으면 끝 상태까지 기다리라고 하고, 승인은 며칠 걸린다.
+  - **SendMessage**: `configuration.returnImmediately: true`가 아니면 -32004이다. §3.2.2는 이 값이 없으면 끝 상태까지 기다리라고 하고, 승인은 며칠 걸린다.
     이 규칙은 `a2a.rs`의 함수 `refuse_blocking`과 상수 `BLOCKING_REFUSED`에만 있다.
     `role`이 `ROLE_USER`가 아니거나 `messageId`가 비면 -32602. text part만 읽는다(`mediaType`이 없거나 `text/*`). 다른 part는 -32005이고 `url`은 가져오지 않는다.
     text들은 줄바꿈으로 잇는다. `acceptedOutputModes`에 `text/plain`·`text/*`·`*/*`가 없으면 -32005. push 설정이 있으면 -32003.
     `taskId`가 있으면 이 호출자의 task가 아닐 때 -32001, 맞으면 -32004이다. 진행 중인 질문에 글을 더하면 소유자가 보는 질문이 바뀌기 때문이다.
     `contextId`(1~128자의 보이는 ASCII, 아니면 -32602)는 저장한다. 없으면 context는 request ID이다. 같은 context의 앞 질문은 agent에게 주지 않는다(§3.4.1의 SHOULD를 따르지 않는다).
     나머지는 `ask`와 같다(engine `send_message`): 필터, 한도, intake 깨우기, 감사 `inbound_asked`(`protocol: "a2a"`, MCP는 `"mcp"`). 같은 호출자의 같은 `messageId`는 처음 task를 돌려주고 한도를 다시 세지 않는다(§3.3.1).
-  - **Task**는 `request_status`의 출력(engine `CallerRequest`)만으로 만든다(설계 D1). `working`과 `pending_approval`은 `TASK_STATE_WORKING`과 고정 문구
+  - **Task**는 `request_status`의 출력(core `CallerRequest`)만으로 만든다. `working`과 `pending_approval`은 `TASK_STATE_WORKING`과 고정 문구
     "The owner of this agent approves every answer. Poll GetTask."이고, `answered`는 `COMPLETED`와 artifact `answer`, `declined`는 `REJECTED`, `failed`는 `FAILED`(둘 다 고정 문구), `canceled`는 `CANCELED`이다.
     `INPUT_REQUIRED`와 `AUTH_REQUIRED`는 쓰지 않는다: 두 상태는 클라이언트에게 행동을 넘기지만(§4.1.3, §7.6), 소유자 승인은 agent 안의 일이다.
     `history`는 돌려주지 않는다(저장된 질문은 필터를 거친 글이라 소유자의 필터를 드러낸다). agent가 쓴 글과 agent가 끝낸 시각은 어디에도 없다. 상태 시각은 요청 상태의 결정 시각, 없으면 도착 시각이다.

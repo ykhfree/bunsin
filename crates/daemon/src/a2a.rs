@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 /// The only A2A version (Major.Minor) that the endpoint speaks.
 const VERSION: &str = "1.0";
-/// The rule of design D2: a SendMessage must carry `configuration.returnImmediately: true`.
+/// A SendMessage must carry `configuration.returnImmediately: true` (ARCHITECTURE 7, "A2A endpoint").
 /// A2A §3.2.2 makes any other SendMessage wait for a final state, and the owner may decide days later.
 const BLOCKING_REFUSED: &str = "send configuration.returnImmediately: true and poll GetTask";
 /// The fixed text of a task that waits for the owner.
@@ -131,8 +131,8 @@ async fn agent_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Strin
     card_response(body, "application/json")
 }
 
-/// One JSON-RPC call. The middleware let the caller in; the checks here follow in the order of the design.
-/// A JSON-RPC error is an HTTP 200 answer.
+/// One JSON-RPC call. The middleware let the caller in. Then come the host, the body, the
+/// envelope, the version and the method, in this order. A JSON-RPC error is an HTTP 200 answer.
 async fn rpc(State(state): State<Arc<Inbound>>, request: Request) -> Response {
     if !host_allowed(&state.listener, request.headers()) {
         return (StatusCode::FORBIDDEN, "Forbidden: Host header is not allowed").into_response();
@@ -259,7 +259,7 @@ fn dispatch(state: &Inbound, caller: &Caller, method: &str, params: Value) -> Re
     }
 }
 
-/// The rule of design D2, the only place that reads `returnImmediately`.
+/// The rule of `BLOCKING_REFUSED`. It is the only place that reads `returnImmediately`.
 fn refuse_blocking(configuration: Option<&SendMessageConfiguration>) -> Result<(), JsonRpcError> {
     match configuration.and_then(|configuration| configuration.return_immediately) {
         Some(true) => Ok(()),
@@ -417,7 +417,7 @@ fn parse_cursor(token: &str) -> Result<(i64, String), JsonRpcError> {
 
 fn task_state(status: RequestStatus) -> TaskState {
     match status {
-        // The owner's approval is work inside the agent, not input that the client must give (design D1).
+        // The owner's approval is work inside the agent, not input that the client must give (§4.1.3).
         RequestStatus::Working | RequestStatus::PendingApproval => TaskState::Working,
         RequestStatus::Answered => TaskState::Completed,
         RequestStatus::Declined => TaskState::Rejected,

@@ -967,9 +967,9 @@ async fn the_card_is_served_only_where_a2a_is_served() {
     rig.change("kim", |config| {
         config.inbound.ard = Some(ArdListing {
             publisher: "acme.com".into(),
-            namespace: None,
             agent_name: "kim".into(),
             representative_queries: vec!["When do we deploy?".into(), "Who reviews a release?".into()],
+            ..ArdListing::default()
         });
     })
     .await;
