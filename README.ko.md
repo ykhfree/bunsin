@@ -4,7 +4,8 @@
 
 Bunsin은 페르소나 AI agent를 실행하는 서버와 관리 도구입니다. agent 하나는 한 사람의 업무 원칙을 가지고,
 MCP 서버나 각 서비스의 REST API를 통해 Slack, Jira, Confluence에서 그 사람을 대신해 일합니다.
-서버 하나가 서로 격리된 여러 agent 프로필을 담습니다.
+서버 하나가 서로 격리된 여러 agent 프로필을 담을 수 있습니다.
+다른 agent가 주소만으로 내 agent를 찾게 하려면 agent마다 서버를 하나씩 띄웁니다([agent마다 서버 하나 운영하기](#agent마다-서버-하나-운영하기) 참고).
 
 LLM은 제안만 합니다. 무엇을 실행할지는 하네스가 결정합니다.
 
@@ -254,6 +255,46 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   - **상태.** `bunsind registry-status`는 이 컴퓨터의 `registry.db`를 읽습니다. 서버가 도는 동안에도 됩니다.
     source마다 항목 수, 마지막 성공, 다음 읽기, 실패 수, 마지막 오류, 거부한 항목의 이유별 개수(예: `other_publisher`, `too_large`)를 보입니다.
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
+
+### agent마다 서버 하나 운영하기
+
+표준 A2A client는 `<주소>/.well-known/agent-card.json`에서 agent를 찾고, 주소 하나에는 card가 하나만 들어갑니다.
+그래서 다른 agent가 주소만으로 내 agent를 하나하나 찾게 하려면, agent마다 `bunsind serve`를 하나씩 띄웁니다.
+그러면 서버마다 데이터, 키, 한도도 따로 가집니다.
+
+서버마다 다음을 따로 둡니다.
+
+- **data dir**(`--data-dir` 또는 `BUNSIN_DATA_DIR`): 그 agent의 프로필 하나를 담습니다.
+- **제어 주소**(`--listen`)와 접속 token
+- **호출자용 리스너 주소:** 가능하면 TLS 프록시 뒤의 자기 host 이름을 씁니다. 예: `https://kim.agents.acme.com`
+- **`--a2a-root-profile`:** 그 agent의 프로필을 지정합니다.
+
+```sh
+# Kim의 agent
+export BUNSIN_DATA_DIR=/var/lib/bunsin-kim
+bunsind profile-add kim --owner "Kim"
+bunsind token-add kim --label "Kim's laptop"
+bunsind serve --listen 127.0.0.1:8787 \
+  --internal-listen 127.0.0.1:9001 --internal-url https://kim.agents.acme.com \
+  --ard-publisher-domain acme.com --a2a-root-profile kim
+
+# Lee의 agent: 다른 data dir, 다른 포트, 다른 host 이름
+export BUNSIN_DATA_DIR=/var/lib/bunsin-lee
+bunsind profile-add lee --owner "Lee"
+bunsind token-add lee --label "Lee's laptop"
+bunsind serve --listen 127.0.0.1:8788 \
+  --internal-listen 127.0.0.1:9002 --internal-url https://lee.agents.acme.com \
+  --ard-publisher-domain acme.com --a2a-root-profile lee
+```
+
+- **소유자.** 소유자는 창이나 명령줄(`BUNSIN_SERVER`, `BUNSIN_TOKEN`)을 자기 agent의 서버에 연결합니다.
+- **키.** 키는 data dir에 속합니다. data dir 안의 `master.key`이거나, macOS에서는 data dir의 `keychain-id` 파일이 가리키는 Keychain 항목입니다. 서버마다 따로입니다.
+- **ARD.** 서버마다 자기 agent의 catalog를 자기 주소에 게시합니다. 서버끼리는 서로를 보지 못하므로 agent마다 `agent_name`을 다르게 둡니다(identifier는 유일해야 합니다).
+  한곳에서 모두 검색하려면, 서버 하나를 `--ard-registry`로 띄우고 나머지를 seed로 적습니다.
+  예: `--ard-registry-source acme.com=https://lee.agents.acme.com/.well-known/ard.json`
+- **systemd.** 배포용 unit(`packaging/linux/bunsind.service`)은 `/etc/bunsin/bunsind.env`와 `/var/lib/bunsin`으로 서버 하나를 실행합니다.
+  두 번째 agent는 unit을 새 이름(예: `bunsind-lee.service`)으로 복사하고, `EnvironmentFile`, `StateDirectory`, `WorkingDirectory`와 환경 파일의 data dir을 바꿉니다.
+- 서버 하나에 프로필을 여러 개 둘 수도 있습니다. 그러면 주소로는 `--a2a-root-profile`의 프로필만 찾히고, 나머지는 ARD나 card의 전체 주소로 찾습니다.
 
 ## agent 설정 (프로필 소유자)
 
@@ -1048,6 +1089,8 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
   같은 `messageId`로 다시 보내면 `GetTask`처럼 task를 돌려주기 때문입니다. 한도를 넘으면 `-32000`과 이유 `RATE_LIMIT_EXCEEDED`를 받습니다.
   token, `Host`, 본문 크기, 동시 요청 검사는 MCP와 같습니다(`401`, `403`, `413`, `503`). JSON-RPC 오류는 HTTP 200으로 옵니다.
   없는 task와 다른 호출자의 task는 같은 `-32001`을 받습니다.
+- **거부된 token**은 HTTP `401`과 `WWW-Authenticate: Bearer`, 그리고 JSON-RPC 오류 본문을 받습니다: `id`는 null, 코드 `-32000`, 이유 `UNAUTHENTICATED`.
+  A2A는 이 경우의 코드를 정하지 않습니다(§3.3.2). token, 프로필, 리스너의 모든 거부가 이 같은 답입니다.
 
 ### agent와 일하기
 

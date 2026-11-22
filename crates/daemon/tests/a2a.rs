@@ -925,13 +925,21 @@ async fn the_endpoint_takes_only_a_caller_token_of_its_profile_and_its_own_host(
         let response = status(listener, profile, token).await;
         assert_eq!(response.status(), 401, "{profile} {token}");
         assert_eq!(response.headers()["www-authenticate"], "Bearer");
-        let error: Value = response.json().await.unwrap();
+        // Every refusal is the same JSON-RPC error, so a client reads it and learns nothing more.
+        let reply: Value = response.json().await.unwrap();
         assert_eq!(
-            error,
-            json!({"error": "a valid caller token of this agent is required"})
+            (&reply["jsonrpc"], &reply["id"]),
+            (&json!("2.0"), &Value::Null),
+            "{reply}"
         );
+        let (code, text) = rpc_error(&reply);
+        assert_eq!(
+            (code, text.as_str()),
+            (-32000, "a valid caller token of this agent is required")
+        );
+        assert_eq!(reply["error"]["data"][0]["reason"], "UNAUTHENTICATED");
     }
-    // The MCP endpoint refuses with the same answer.
+    // The MCP endpoint refuses with the same status, in its own body.
     let mcp = reqwest::Client::new()
         .post(format!("{}/agents/kim/mcp", rig.internal.url()))
         .bearer_auth("bsc_guess")
@@ -940,6 +948,10 @@ async fn the_endpoint_takes_only_a_caller_token_of_its_profile_and_its_own_host(
         .unwrap();
     assert_eq!(mcp.status(), 401);
     assert_eq!(mcp.headers()["www-authenticate"], "Bearer");
+    assert_eq!(
+        mcp.json::<Value>().await.unwrap(),
+        json!({"error": "a valid caller token of this agent is required"})
+    );
 
     let mut kim = A2a::new(&rig.internal, "kim", &kim_token);
     kim.host = Some("evil.example".into());

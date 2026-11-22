@@ -4,7 +4,8 @@
 
 Bunsin hosts persona AI agents. Each agent holds one person's work principles and
 acts for that person in Slack, Jira and Confluence through MCP servers or their REST APIs.
-One server holds several isolated agent profiles.
+One server can hold several isolated agent profiles. To let other agents find an agent by its
+address alone, run one server per agent (see [Run one agent per server](#run-one-agent-per-server)).
 
 The LLM only proposes. The harness decides what runs:
 
@@ -284,8 +285,8 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     may publish only through `rel="ard"` links or `Agentmap` lines. A domain with no source at all
     is a failed read. If `https://<domain>/` or its `robots.txt` answers another error (no answer,
     a 5xx, a 403, a body over 1 MiB), the sources that it announces are unknown, so the read
-    fails too. It reads a seed again 1 hour after a success. After the n-th failure in a row it waits 1 hour × 2^(n−1), at most 24 hours, and
-    keeps the entries. A seed without a success for 7 days loses its entries until it is read
+    fails too. It reads a seed again 1 hour after a success. After the n-th failure in a row it
+    waits 1 hour × 2^(n−1), at most 24 hours, and keeps the entries. A seed without a success for 7 days loses its entries until it is read
     again.
   - **What each listener sees.** The public listener sees only public entries. It ranks and
     counts only those entries, so its answers say nothing about internal entries.
@@ -294,8 +295,8 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     key; more get 400. A page has at most 100 results, and a page token reaches at most the
     1,000th result. The seeds hold at most 10,000 entries together, and 500 for one seed. The
     server's own catalogs do not count against the 10,000. A result shows no `score` or `source`
-    of a crawled entry's own; `/search` adds the registry's. Every `federation` mode searches only this index, and no answer has
-    `referrals`.
+    of a crawled entry's own; `/search` adds the registry's. Every `federation` mode searches
+    only this index, and no answer has `referrals`.
   - **Its own entry.** A registry listener lists the registry in its `ard.json` as
     `urn:air:<domain>:registry:bunsin`. `<domain>` is the longest `--ard-publisher-domain`
     that is the listener host or ends it, for example `acme.com` for `agents.acme.com`.
@@ -309,6 +310,53 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     `other_publisher` or `too_large`.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
+
+### Run one agent per server
+
+A stock A2A client finds an agent at `<address>/.well-known/agent-card.json`, and one address
+holds one card. So, to let other agents find each of your agents by its address alone, run one
+`bunsind serve` per agent. Each server then also keeps its own data, key and limits.
+
+Each server needs its own:
+
+- **data directory** (`--data-dir` or `BUNSIN_DATA_DIR`), with the one profile of that agent;
+- **control address** (`--listen`) and access tokens;
+- **listener address** for callers, best a host name of its own such as
+  `https://kim.agents.acme.com` behind your TLS proxy;
+- **`--a2a-root-profile`** that names the profile of that agent.
+
+```sh
+# Kim's agent
+export BUNSIN_DATA_DIR=/var/lib/bunsin-kim
+bunsind profile-add kim --owner "Kim"
+bunsind token-add kim --label "Kim's laptop"
+bunsind serve --listen 127.0.0.1:8787 \
+  --internal-listen 127.0.0.1:9001 --internal-url https://kim.agents.acme.com \
+  --ard-publisher-domain acme.com --a2a-root-profile kim
+
+# Lee's agent: another data directory, other ports, another host name
+export BUNSIN_DATA_DIR=/var/lib/bunsin-lee
+bunsind profile-add lee --owner "Lee"
+bunsind token-add lee --label "Lee's laptop"
+bunsind serve --listen 127.0.0.1:8788 \
+  --internal-listen 127.0.0.1:9002 --internal-url https://lee.agents.acme.com \
+  --ard-publisher-domain acme.com --a2a-root-profile lee
+```
+
+- **Owners.** Each owner connects the window or the command line (`BUNSIN_SERVER`,
+  `BUNSIN_TOKEN`) to the server of their agent.
+- **The key.** The key belongs to the data directory: `master.key` in it, or, on macOS, a
+  Keychain item named by its `keychain-id` file. Each server has its own.
+- **ARD.** Each server publishes the catalog of its own agent at its own address. Two servers do
+  not see each other, so give each agent its own `agent_name` (the identifier must be unique). To
+  search all of them in one place, run one server with `--ard-registry` and name the others as
+  seeds, for example `--ard-registry-source acme.com=https://lee.agents.acme.com/.well-known/ard.json`.
+- **systemd.** The packaged unit (`packaging/linux/bunsind.service`) runs one server with
+  `/etc/bunsin/bunsind.env` and `/var/lib/bunsin`. For a second agent, copy it under a new name,
+  for example `bunsind-lee.service`, and change its `EnvironmentFile`, `StateDirectory`,
+  `WorkingDirectory` and the data directory in its environment file.
+- One server can still hold several profiles. Then only the profile of `--a2a-root-profile` is
+  found at the address; the others are found through ARD or by the full card address.
 
 ## Set up an agent (profile owner)
 
@@ -1253,9 +1301,13 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
   the server sends no answer.
 - **Limits** are the ones of MCP. `SendMessage` counts like `ask` (20 an hour per caller, 50 open
   questions). `SendMessage`, `GetTask`, `ListTasks` and `CancelTask` share the 120 reads a minute
-  of `get_request`: a repeated `messageId` returns the task, like `GetTask`. A limit gets `-32000` with the reason `RATE_LIMIT_EXCEEDED`. The token, `Host`,
-  body size and concurrency checks are those of MCP (`401`, `403`, `413`, `503`). A JSON-RPC error
-  comes with HTTP 200. A missing task and another caller's task get the same `-32001`.
+  of `get_request`: a repeated `messageId` returns the task, like `GetTask`. A limit gets `-32000`
+  with the reason `RATE_LIMIT_EXCEEDED`. The token, `Host`, body size and concurrency checks are
+  those of MCP (`401`, `403`, `413`, `503`). A JSON-RPC error comes with HTTP 200. A missing task
+  and another caller's task get the same `-32001`.
+- **A refused token** gets HTTP `401` with `WWW-Authenticate: Bearer` and a JSON-RPC error body:
+  `id` null, code `-32000`, reason `UNAUTHENTICATED`. A2A names no code for this (§3.3.2). Every
+  refusal of the token, the profile or the listener is this same answer.
 
 ### Work with the agent
 

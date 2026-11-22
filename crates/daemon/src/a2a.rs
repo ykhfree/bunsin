@@ -5,7 +5,7 @@
 //! A task is a caller's request. Its state comes only from `request_status`, so the caller sees the
 //! owner's decisions and never the agent's work.
 
-use crate::inbound::{Inbound, MAX_BODY_BYTES, MAX_READS_PER_MINUTE, admit, card_response};
+use crate::inbound::{Inbound, MAX_BODY_BYTES, MAX_READS_PER_MINUTE, REFUSAL, admit, card_response};
 use crate::server::{OuterConfig, Reach};
 use a2a::error_code::{
     CONTENT_TYPE_NOT_SUPPORTED, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
@@ -76,7 +76,17 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Response {
-    admit(&state, &profile, a2a_served_on, request, next).await
+    admit(&state, &profile, a2a_served_on, refusal, request, next).await
+}
+
+/// The 401 body of the A2A endpoint: a JSON-RPC error, so that a client reads it as one. The
+/// request is not read yet, so its ID is null. A2A names no code for this (§3.3.2, "JSON-RPC custom
+/// error"), so it is the server error -32000 with the reason `UNAUTHENTICATED`, like the limits.
+fn refusal() -> Value {
+    json!(JsonRpcResponse::error(
+        JsonRpcId::Null,
+        error_with(-32000, REFUSAL.to_owned(), "UNAUTHENTICATED", None)
+    ))
 }
 
 /// The Agent Card of a profile at its own address.

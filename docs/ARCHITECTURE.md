@@ -507,6 +507,8 @@
   - 자료형은 `a2a-lf =0.4.2`(a2aproject/a2a-rs)이고, JSON-RPC 분기는 axum으로 직접 한다. 기각: `a2a-server-lf`(자기 task 저장소와 실행 모델), jsonrpsee(자체 서버 스택).
     `a2a::Task`는 `contextId`를 요구하지만 A2A §4.1.1에서는 선택이다. endpoint는 task를 쓰기만 하고 언제나 context를 넣으므로 crate 자료형을 그대로 쓴다.
   - 검사 순서: ① MCP와 같은 미들웨어(`inbound::admit`): `{p}`의 호출자 token, `a2a_served_on`, 리스너당 동시 64. 어긋나면 MCP와 같은 401(`WWW-Authenticate: Bearer`).
+    본문은 JSON-RPC 오류이다(`id` null, -32000, ErrorInfo `UNAUTHENTICATED`). `admit`이 엔드포인트마다 본문 함수를 받는다(MCP는 `{"error": ..}`).
+    이유: `a2a-client-lf` 0.2.9는 401 본문도 JSON-RPC 응답으로 읽는다. 옛 본문은 "응답 파싱 실패(-32603)"로 보였다(2026-11-22 확인). A2A는 인증 실패의 코드를 정하지 않는다(§3.3.2 "JSON-RPC custom error").
     ② `Host`가 리스너 host가 아니면 403, 본문 64 KiB 초과는 413. rmcp가 MCP에서 하는 일을 직접 한다.
     ③ JSON이 아니면 -32700. 요청 객체 하나(`jsonrpc: "2.0"`, `id`, `method`)가 아니면 -32600(batch와 notification 포함).
     ④ 버전: `A2A-Version` 헤더, 없으면 같은 이름의 query parameter(§3.6.1). Major.Minor만 보고 `1.0`만 받는다. 빈 값은 0.3이다(§3.6.2). 그 밖은 -32009, ErrorInfo `supportedVersions: "1.0"`.

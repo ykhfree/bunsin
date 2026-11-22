@@ -119,7 +119,7 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Response {
-    admit(&state, &profile, served_on, request, next).await
+    admit(&state, &profile, served_on, mcp_refusal, request, next).await
 }
 
 /// Lets a request through only with a valid caller token of the profile in the path, and only if
@@ -128,6 +128,7 @@ pub(crate) async fn admit(
     state: &Inbound,
     profile: &str,
     served: fn(&ProfileConfig, Reach) -> bool,
+    refusal: fn() -> Value,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -139,11 +140,11 @@ pub(crate) async fn admit(
         .map(str::to_owned);
     let caller = match token.map(|token| state.engine.app_store().caller(&token)) {
         Some(Ok(Some(caller))) if caller.profile == profile => caller,
-        _ => return refused(),
+        _ => return refused(refusal()),
     };
     match state.engine.profile_config(profile).await {
         Ok(config) if served(&config, state.listener.reach) => {}
-        _ => return refused(),
+        _ => return refused(refusal()),
     }
     let Ok(_permit) = state.running.clone().try_acquire_owned() else {
         return (
@@ -156,8 +157,17 @@ pub(crate) async fn admit(
     next.run(request).await
 }
 
-fn refused() -> Response {
-    let body = json!({"error": "a valid caller token of this agent is required"});
+/// The text of every refusal of a caller.
+pub(crate) const REFUSAL: &str = "a valid caller token of this agent is required";
+
+/// The 401 body of the MCP endpoint.
+fn mcp_refusal() -> Value {
+    json!({"error": REFUSAL})
+}
+
+/// The same 401 for every refusal, with the body of the endpoint's protocol, so that a caller
+/// learns nothing about profiles.
+fn refused(body: Value) -> Response {
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer")],
