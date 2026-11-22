@@ -274,6 +274,11 @@ impl Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with_root(None).await
+}
+
+/// A rig whose listeners serve the root Agent Card of `root`, as `--a2a-root-profile` does.
+async fn rig_with_root(root: Option<&str>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let llm = Arc::new(FakeLlm::new());
     let clock = Arc::new(AtomicI64::new(START));
@@ -290,6 +295,7 @@ async fn rig() -> Rig {
         listen: "127.0.0.1:0".parse().unwrap(),
         url: url.parse().unwrap(),
         tls: None,
+        a2a_root_profile: root.map(str::to_owned),
     };
     let internal = serve_outer(
         engine.clone(),
@@ -963,6 +969,88 @@ async fn the_endpoint_takes_only_a_caller_token_of_its_profile_and_its_own_host(
     assert!(mcp.is_ok());
 }
 
+async fn get_card(url: String, etag: Option<&str>) -> reqwest::Response {
+    let mut request = reqwest::Client::new().get(url);
+    if let Some(etag) = etag {
+        request = request.header("if-none-match", etag);
+    }
+    request.send().await.unwrap()
+}
+
+#[tokio::test]
+async fn the_root_card_is_the_named_profiles_card_where_its_a2a_is_served() {
+    let rig = rig_with_root(Some("kim")).await;
+    let root = |listener: &Running| format!("{}/.well-known/agent-card.json", listener.url());
+    let own = format!("{}/agents/kim/a2a/agent-card.json", rig.internal.url());
+    let at_root = get_card(root(&rig.internal), None).await;
+    assert_eq!(at_root.status(), 200);
+    let headers = at_root.headers().clone();
+    let at_own = get_card(own, None).await;
+    // The same card, so a client that resolves the root and one that reads the ARD url agree.
+    assert_eq!(headers["etag"], at_own.headers()["etag"]);
+    for name in ["content-type", "access-control-allow-origin", "cache-control"] {
+        assert_eq!(headers[name], at_own.headers()[name], "{name}");
+    }
+    let card: Value = at_root.json().await.unwrap();
+    assert_eq!(card, at_own.json::<Value>().await.unwrap());
+    // The card names the address that callers use (the listener's configured URL).
+    assert_eq!(card["supportedInterfaces"][0]["url"], "http://127.0.0.1/agents/kim/a2a");
+    // Kim's endpoint is internal, so the public listener has no root card.
+    assert_eq!(get_card(root(&rig.public), None).await.status(), 404);
+    rig.change("kim", |config| {
+        config.inbound.scope = bunsin_core::inbound::InboundScope::Public
+    })
+    .await;
+    assert_eq!(get_card(root(&rig.public), None).await.status(), 200);
+    // With A2A off, the root card goes away on both listeners; the MCP endpoint stays.
+    rig.change("kim", |config| config.inbound.a2a = false).await;
+    for listener in [&rig.internal, &rig.public] {
+        assert_eq!(get_card(root(listener), None).await.status(), 404);
+    }
+}
+
+#[tokio::test]
+async fn no_root_card_without_a_named_profile_or_for_a_profile_without_a2a() {
+    let rig = rig().await;
+    let url = format!("{}/.well-known/agent-card.json", rig.internal.url());
+    assert_eq!(get_card(url, None).await.status(), 404);
+    // Lee serves MCP only.
+    let lee = rig_with_root(Some("lee")).await;
+    let url = format!("{}/.well-known/agent-card.json", lee.internal.url());
+    assert_eq!(get_card(url, None).await.status(), 404);
+}
+
+#[tokio::test]
+async fn a_card_with_the_etag_the_client_holds_is_not_sent_again() {
+    let rig = rig_with_root(Some("kim")).await;
+    let root = format!("{}/.well-known/agent-card.json", rig.internal.url());
+    let etag = get_card(root.clone(), None).await.headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let unchanged = get_card(root.clone(), Some(&etag)).await;
+    assert_eq!(unchanged.status(), 304);
+    assert_eq!(unchanged.headers()["etag"], etag.as_str());
+    assert!(unchanged.bytes().await.unwrap().is_empty());
+    // A list with the tag, and a weak form of it, match too.
+    assert_eq!(
+        get_card(root.clone(), Some(&format!("\"x\", W/{etag}"))).await.status(),
+        304
+    );
+    // A changed card has a new tag, so the old one gets the full card.
+    rig.change("kim", |config| {
+        config.inbound.description = "Questions about releases.".into()
+    })
+    .await;
+    let changed = get_card(root, Some(&etag)).await;
+    assert_eq!(changed.status(), 200);
+    assert_ne!(changed.headers()["etag"], etag.as_str());
+    // The MCP server card shares the rule.
+    let server_card = format!("{}/agents/kim/mcp/server-card", rig.internal.url());
+    let tag = get_card(server_card.clone(), None).await.headers()["etag"].clone();
+    assert_eq!(get_card(server_card, Some(tag.to_str().unwrap())).await.status(), 304);
+}
+
 #[tokio::test]
 async fn the_card_is_served_only_where_a2a_is_served() {
     let rig = rig().await;
@@ -1110,4 +1198,88 @@ async fn a2a_and_mcp_share_the_read_limit() {
     // The limit is per caller.
     let other = rig.kim_client();
     other.result("ListTasks", json!({})).await;
+}
+
+/// `bunsind serve` with the data directory `dir` and `options`.
+fn serve_command(dir: &std::path::Path, options: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"));
+    command
+        .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(dir)
+        .args(options)
+        .env_remove("BUNSIN_DATA_DIR")
+        .env("BUNSIN_KEY_STORE", "file");
+    command
+}
+
+#[test]
+fn a_root_profile_that_does_not_exist_stops_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let refused = |options: &[&str]| {
+        let output = serve_command(dir.path(), options).output().unwrap();
+        assert!(!output.status.success(), "{options:?} started");
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let with_listener = |root| {
+        [
+            "--internal-listen",
+            "127.0.0.1:0",
+            "--internal-url",
+            "http://127.0.0.1",
+            "--a2a-root-profile",
+            root,
+        ]
+    };
+    // Without a listener for callers the flag has no address to serve.
+    assert!(refused(&["--a2a-root-profile", "kim"]).contains("needs a listener for callers"));
+    // A data directory without profiles: the start creates nothing.
+    assert!(refused(&with_listener("kim")).contains("--a2a-root-profile names `kim`"));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    // With kim only, another name is refused before the key is read.
+    let added = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"))
+        .args(["profile-add", "kim", "--owner", "Kim", "--data-dir"])
+        .arg(dir.path())
+        .env_remove("BUNSIN_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    assert!(refused(&with_listener("lee")).contains("no such profile"));
+    assert!(!dir.path().join("master.key").exists());
+}
+
+#[test]
+fn the_start_says_where_the_root_card_is_served() {
+    use std::io::BufRead;
+    let dir = tempfile::tempdir().unwrap();
+    let added = std::process::Command::new(env!("CARGO_BIN_EXE_bunsind"))
+        .args(["profile-add", "kim", "--owner", "Kim", "--data-dir"])
+        .arg(dir.path())
+        .env_remove("BUNSIN_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let options = [
+        "--internal-listen",
+        "127.0.0.1:0",
+        "--internal-url",
+        "http://127.0.0.1",
+        "--a2a-root-profile",
+        "kim",
+    ];
+    let mut child = serve_command(dir.path(), &options)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let line = stderr
+        .lines()
+        .map_while(Result::ok)
+        .find(|line| line.contains("root Agent Card"));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // A new profile has its A2A endpoint off, so the line says why the address is 404.
+    let line = line.expect("a line about the root card");
+    assert!(line.contains("http://127.0.0.1/.well-known/agent-card.json"), "{line}");
+    assert!(line.contains("does not serve it now"), "{line}");
 }

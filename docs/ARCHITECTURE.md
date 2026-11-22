@@ -492,7 +492,18 @@
 - 인바운드 질문에서 나온 notes 변경은 자동 반영하지 않는다(channel outside, source 검사 둘 다).
 - **A2A endpoint**(daemon `a2a.rs`, A2A v1.0 JSON-RPC binding): `POST /agents/{p}/a2a`, `GET /agents/{p}/a2a/agent-card.json`.
   - 설정 `inbound.a2a`(기본 false). `InboundConfig::a2a_served_on(L) = a2a && served_on(L)`이다. 새 공개 표면은 소유자가 켠다.
-    `/.well-known/agent-card.json`은 domain당 agent 하나를 전제하므로 두지 않는다. 발견은 ARD 항목과 직접 설정이다(A2A §8.2).
+    발견은 ARD 항목, 직접 설정, 그리고 운영자가 고른 프로필 하나의 루트 card이다(A2A §8.2).
+  - **루트 card** `GET /.well-known/agent-card.json`: 운영자 플래그 `--a2a-root-profile <p>`가 고른 프로필의 card이다(`OuterConfig.a2a_root_profile`, 두 리스너에 같은 값).
+    본문과 헤더는 `/agents/{p}/a2a/agent-card.json`과 같다(같은 함수 `card_of`). `a2a_served_on`이 아니거나 플래그가 없으면 404이다.
+    - 이유: 표준 해석기(예: `a2a-client-lf` 0.2.9 `AgentCardResolver`)는 `{base}/.well-known/agent-card.json`만 읽는다. 그 주소에는 card가 하나뿐이다.
+      그래서 운영은 프로세스마다 agent 하나(data dir과 origin을 따로)로 하고, 멀티 프로필 코드는 그대로 둔다(2026-11-22 결정).
+    - 기각: 프로필이 하나뿐이면 자동으로 루트 card를 내기. 프로필이 하나 더 생기면 card가 조용히 사라진다.
+      기각: 프로필마다 `/agents/{p}/a2a/.well-known/agent-card.json`. 스펙의 well-known은 origin 기준이라 비공식 관례가 된다.
+    - 시작 검사: 플래그는 호출자용 리스너가 있어야 하고, 프로필이 data dir에 있어야 한다. 주소 검사 뒤, 키를 읽기 전에 운영자 명령과 같은 `AppStore`로 본다.
+      data dir에 `app.db`가 없으면 아무것도 만들지 않고 거부한다. 시작한 뒤에는 리스너마다 card를 제공하는지 stderr에 한 줄씩 쓴다(설정은 나중에 바뀔 수 있다).
+    - 루트 card는 ARD 등록이 없어도 프로필 ID를 보인다. 운영자의 선택이다.
+  - **card 캐시**(A2A §8.6): 모든 card 응답(MCP server card, Agent Card, 루트 card)은 `Cache-Control: public, max-age=300`과 본문 SHA-256의 `ETag`를 낸다.
+    `If-None-Match`가 그 ETag(약한 형태 `W/`와 목록 포함)나 `*`이면 본문 없이 304이다(`card_response`).
   - 자료형은 `a2a-lf =0.4.2`(a2aproject/a2a-rs)이고, JSON-RPC 분기는 axum으로 직접 한다. 기각: `a2a-server-lf`(자기 task 저장소와 실행 모델), jsonrpsee(자체 서버 스택).
     `a2a::Task`는 `contextId`를 요구하지만 A2A §4.1.1에서는 선택이다. endpoint는 task를 쓰기만 하고 언제나 context를 넣으므로 crate 자료형을 그대로 쓴다.
   - 검사 순서: ① MCP와 같은 미들웨어(`inbound::admit`): `{p}`의 호출자 token, `a2a_served_on`, 리스너당 동시 64. 어긋나면 MCP와 같은 401(`WWW-Authenticate: Bearer`).
@@ -1115,7 +1126,7 @@ Bunsin은 다른 사람이 쓴 글을 혼자 읽으므로 아래 규칙을 더�
 | MCP 커넥터의 OAuth(설정, 발견, 등록, PKCE, 봉인, 갱신, 다시 로그인 상태, CLI, 창의 loopback 로그인) | 구현, 테스트 있음(core, 엔진, 서버, CLI, 창). 로컬 stub 인가 서버로만 테스트. 설정 파일로만 켠다. |
 | 구성 마법사(창의 Setup 화면, 일곱 단계, 기존 호출만 사용) | 구현, headless 창 테스트만. 명령줄 마법사는 없고 README에 명령 순서가 있다. |
 | 인바운드 요청(설정, intake, 한도, 답 도구, 요청 상태, 호출자 token, 내부·공개 리스너, MCP endpoint, server card) | 구현, 테스트 있음(core, store, 엔진, 서버, CLI, 창). MCP client는 `McpConnector`(rmcp)로 실제 TCP에서 테스트했다. 다른 MCP client로는 해 보지 않았다. |
-| A2A v1.0 endpoint(JSON-RPC, Agent Card, 버전 검사, SendMessage·GetTask·ListTasks·CancelTask, 취소, messageId 중복 제거, MCP와 같은 한도) | 구현, 테스트 있음(core, store, 엔진, 서버). 서버 테스트는 실제 TCP에서 직접 만든 JSON-RPC 요청을 보낸다. 스펙 예의 왕복과 v1.0.0 JSON schema 검사를 통과한다. 다른 A2A client로는 해 보지 않았다. |
+| A2A v1.0 endpoint(JSON-RPC, Agent Card, 운영자가 고른 루트 card와 304, 버전 검사, SendMessage·GetTask·ListTasks·CancelTask, 취소, messageId 중복 제거, MCP와 같은 한도) | 구현, 테스트 있음(core, store, 엔진, 서버). 서버 테스트는 실제 TCP에서 직접 만든 JSON-RPC 요청을 보낸다. 스펙 예의 왕복과 v1.0.0 JSON schema 검사를 통과한다. 다른 A2A client로는 해 보지 않았다. |
 | ARD 게시(설정, 운영자 도메인 목록, 리스너별 catalog, A2A 항목, `@context`·`capabilities`·`tags`·`version`·`updatedAt`, trustManifest와 §4.5.1 결속, robots.txt Agentmap, rel="ard" `Link` 헤더, DNS 레코드 글, 소유자의 상태 조회) | 구현, 테스트 있음(core, ard, 엔진, 서버, CLI, 창). 게시 본문과 trustManifest는 스펙 JSON 스키마 검사를 통과한다. trustManifest의 서명은 검증하지 않는다. 공식 conformance 도구의 manifest 모드를 통과했다(7절). |
 | ARD 도구(search·explore·list·resolve 내장 읽기 도구, referral 없음, domain 해석과 결속 규칙, JSON-LD 최소 전개, 제3자 주소 fetcher, 주소 규칙, 읽기 한도) | 구현, 테스트 있음(core, ard, 서버, 창의 registry 목록 편집). 로컬 stub registry와 stub catalog로만 테스트. 도메인만 적은 해석은 서버 테스트가 loopback으로 닿지 못해(https 443) ard의 메모리 web으로만 테스트. 창에는 `ard_domains` 편집이 없다. |
 | ARD registry(운영자 플래그, `registry.db`, 자기 catalog 수집, seed crawl과 일정, JSON-LD 전개로 맞추는 필터, 순위와 score, Search·Explore·List, 리스너 경계, 자기 소개 항목, SVCB 줄, `registry-status`) | 구현, 테스트 있음(core, store, ard, 엔진, 서버, CLI). 응답 본문은 OpenAPI 응답 스키마의 사본으로 검사한다. crawl은 loopback의 catalog 주소 seed로만 테스트했다. 도메인만 적은 seed의 해석은 ard의 메모리 web으로만 테스트했다. 공식 conformance 도구의 registry 모드를 통과했다(7절). |

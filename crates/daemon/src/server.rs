@@ -922,6 +922,9 @@ pub struct OuterConfig {
     pub url: Url,
     /// PEM certificate chain and private key. Required unless `listen` is a loopback address.
     pub tls: Option<(PathBuf, PathBuf)>,
+    /// The profile whose A2A Agent Card the listener serves at `/.well-known/agent-card.json`.
+    /// `None`: that address is 404.
+    pub a2a_root_profile: Option<String>,
 }
 
 impl OuterConfig {

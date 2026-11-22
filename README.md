@@ -256,6 +256,14 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   domains that profiles may publish their endpoint under. Without it, no profile is published,
   and the server refuses settings with `inbound.ard`. A listener for callers serves the ARD
   catalog `/.well-known/ard.json` of the profiles it serves.
+- **A2A root card.** `--a2a-root-profile kim` serves the A2A Agent Card of `kim` at
+  `/.well-known/agent-card.json` on the listeners for callers. A stock A2A card resolver then finds
+  the agent from the listener address alone (A2A §8.2). That address holds one card, so run one
+  agent per server process for this: each process with its own data directory and its own address,
+  for example `https://kim.agents.acme.com`. The card is served only where the profile's A2A
+  endpoint is served; elsewhere the address is 404. At start, `bunsind` says on stderr whether each
+  listener serves it. The flag needs a listener for callers and a profile in the data directory.
+  The card shows the profile ID to anyone who reaches the listener, also without an ARD listing.
 - **ARD registry.** `--ard-registry internal` makes the internal listener an ARD registry,
   and `--ard-registry public` makes both listeners one. Without the flag the registry routes
   do not exist (404). A registry listener answers `POST /search`, `POST /explore` and
@@ -1195,7 +1203,10 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
   no token needed). It holds the title (or the profile ID), the description, the endpoint URL,
   the security scheme `callerToken` (HTTP Bearer) and one skill `ask`. The skill's examples are
   the representative queries of the ARD listing. It never holds a token or the owner's name.
-  There is no `/.well-known/agent-card.json`, because that address allows one agent per domain.
+  `/.well-known/agent-card.json` holds the card only when the operator names this profile with
+  `--a2a-root-profile` (one agent per server process). Without it, find the card through the ARD
+  entry's `url` or the address the owner gives you, and pass the card to your client. A card answer
+  has an `ETag`; the same tag in `If-None-Match` gets `304 Not Modified`.
 - **Version:** send the header `A2A-Version: 1.0`, or the query parameter `A2A-Version=1.0`.
   Only 1.0 is accepted; a patch number such as `1.0.2` does not count. No version means 0.3
   (A2A §3.6.2), so a call without it gets `-32009`.

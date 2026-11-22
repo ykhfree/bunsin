@@ -56,12 +56,16 @@ pub fn a2a_served_on(config: &ProfileConfig, reach: Reach) -> bool {
     config.inbound.a2a_served_on(reach.scope())
 }
 
+/// The well-known address of an Agent Card (A2A §8.2).
+pub const ROOT_CARD_PATH: &str = "/.well-known/agent-card.json";
+
 /// The A2A routes of one outer listener. `state` is the one that the MCP routes of the listener use.
 pub(crate) fn routes(state: Arc<Inbound>) -> Router {
     Router::new()
         .route("/agents/{profile}/a2a", post(rpc))
         .route_layer(from_fn_with_state(state.clone(), authenticate))
         .route("/agents/{profile}/a2a/agent-card.json", get(agent_card))
+        .route(ROOT_CARD_PATH, get(root_card))
         .with_state(state)
 }
 
@@ -75,9 +79,24 @@ async fn authenticate(
     admit(&state, &profile, a2a_served_on, request, next).await
 }
 
-/// The Agent Card of a profile (A2A §4.4.1). It holds no token and no owner name.
-async fn agent_card(State(state): State<Arc<Inbound>>, Path(profile): Path<String>) -> Response {
-    let config = match state.engine.profile_config(&profile).await {
+/// The Agent Card of a profile at its own address.
+async fn agent_card(State(state): State<Arc<Inbound>>, Path(profile): Path<String>, request: HeaderMap) -> Response {
+    card_of(&state, &profile, &request).await
+}
+
+/// The Agent Card at the well-known address of the listener (A2A §8.2): the card of the profile that the
+/// operator named with `--a2a-root-profile`. A stock card resolver finds it from the listener address alone.
+async fn root_card(State(state): State<Arc<Inbound>>, request: HeaderMap) -> Response {
+    match state.listener.a2a_root_profile.clone() {
+        Some(profile) => card_of(&state, &profile, &request).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// The Agent Card of a profile (A2A §4.4.1), or 404 where its A2A endpoint is not served.
+/// It holds no token and no owner name.
+async fn card_of(state: &Inbound, profile: &str, request: &HeaderMap) -> Response {
+    let config = match state.engine.profile_config(profile).await {
         Ok(config) if a2a_served_on(&config, state.listener.reach) => config,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -112,11 +131,11 @@ async fn agent_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Strin
         bearer_format: None,
     });
     let card = AgentCard {
-        name: inbound.title.as_deref().map_or(profile.as_str(), str::trim).to_owned(),
+        name: inbound.title.as_deref().map_or(profile, str::trim).to_owned(),
         description: inbound.description.trim().to_owned(),
         version: env!("CARGO_PKG_VERSION").into(),
         supported_interfaces: vec![AgentInterface::new(
-            state.listener.url_of(&inbound_a2a_path(&profile)),
+            state.listener.url_of(&inbound_a2a_path(profile)),
             a2a::TRANSPORT_PROTOCOL_JSONRPC,
         )],
         capabilities: AgentCapabilities {
@@ -136,7 +155,7 @@ async fn agent_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Strin
         signatures: None,
     };
     let body = serde_json::to_string(&card).expect("a card is JSON");
-    card_response(body, "application/json")
+    card_response(body, "application/json", request)
 }
 
 /// One JSON-RPC call. The middleware let the caller in. Then come the host, the body, the

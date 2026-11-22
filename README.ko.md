@@ -215,6 +215,12 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **ARD 게시.** `--ard-publisher-domain acme.com`(여러 번 줄 수 있음)은 프로필이 endpoint를 게시할 수 있는 도메인을 정합니다.
   이 옵션이 없으면 어떤 프로필도 게시되지 않고, 서버는 `inbound.ard`가 있는 설정을 거부합니다.
   호출자용 리스너는 자기가 제공하는 프로필의 ARD catalog `/.well-known/ard.json`을 제공합니다.
+- **A2A 루트 card.** `--a2a-root-profile kim`은 호출자용 리스너의 `/.well-known/agent-card.json`에 `kim`의 A2A Agent Card를 둡니다.
+  그러면 표준 A2A card 해석기가 리스너 주소만으로 agent를 찾습니다(A2A §8.2).
+  그 주소에는 card가 하나만 들어가므로, 이때는 서버 프로세스마다 agent 하나를 운영합니다.
+  프로세스마다 data dir과 주소를 따로 둡니다(예: `https://kim.agents.acme.com`).
+  card는 그 프로필의 A2A endpoint를 제공하는 리스너에서만 나오고, 다른 곳에서는 404입니다. `bunsind`는 시작할 때 리스너마다 card를 제공하는지 stderr에 씁니다.
+  이 옵션은 호출자용 리스너와 data dir 안의 프로필이 필요합니다. card는 ARD 등록이 없어도 리스너에 닿는 누구에게나 프로필 ID를 보여 줍니다.
 - **ARD registry.** `--ard-registry internal`은 내부 리스너를, `--ard-registry public`은 두 리스너를 ARD registry로 만듭니다.
   이 옵션이 없으면 registry 경로가 없습니다(404). registry 리스너는 루트에서 `POST /search`, `POST /explore`, `GET /agents`에 답합니다.
   그래서 base URL은 그 리스너의 `--*-url`입니다. registry에는 token이 필요 없습니다.
@@ -1001,7 +1007,9 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
 - **Agent Card:** `GET <리스너 URL>/agents/<프로필>/a2a/agent-card.json`(`application/json`, token 불필요).
   제목(없으면 프로필 ID), 설명, endpoint URL, 보안 방식 `callerToken`(HTTP Bearer), skill `ask` 하나를 담습니다.
   skill의 예는 ARD 항목의 대표 질문입니다. token과 소유자 이름은 담지 않습니다.
-  `/.well-known/agent-card.json`은 두지 않습니다. 그 주소는 domain마다 agent 하나만 허용하기 때문입니다.
+  `/.well-known/agent-card.json`은 운영자가 `--a2a-root-profile`로 이 프로필을 지정했을 때만 card를 담습니다(서버 프로세스마다 agent 하나).
+  지정하지 않았으면 ARD 항목의 `url`이나 소유자가 알려 준 주소로 card를 받아 client에 넘깁니다.
+  card 응답에는 `ETag`가 있고, 같은 값을 `If-None-Match`로 보내면 `304 Not Modified`를 받습니다.
 - **버전:** 헤더 `A2A-Version: 1.0` 또는 query parameter `A2A-Version=1.0`을 보냅니다. 1.0만 받습니다. `1.0.2` 같은 patch 번호는 보지 않습니다.
   버전이 없으면 0.3으로 봅니다(A2A §3.6.2). 그래서 버전 없는 호출은 `-32009`를 받습니다.
 - **SendMessage에는 `"configuration": {"returnImmediately": true}`가 필요합니다.** 이 값을 보내지 않는 client는 `-32004`(UnsupportedOperationError)를 받습니다.

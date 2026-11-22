@@ -1307,6 +1307,7 @@ async fn the_notes_are_preloaded_over_http() {
 
 fn outer(reach: Reach, listen: &str, url: &str) -> OuterConfig {
     OuterConfig {
+        a2a_root_profile: None,
         reach,
         listen: listen.parse().unwrap(),
         url: url.parse().unwrap(),

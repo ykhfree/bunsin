@@ -80,6 +80,7 @@ fn open(dir: &Path, llm: Arc<FakeLlm>, slack: Arc<FakeConnector>) -> Arc<Engine>
 
 async fn listen(engine: &Arc<Engine>) -> (Running, Running) {
     let outer = |reach, url: &str| OuterConfig {
+        a2a_root_profile: None,
         reach,
         listen: "127.0.0.1:0".parse().unwrap(),
         url: url.parse().unwrap(),

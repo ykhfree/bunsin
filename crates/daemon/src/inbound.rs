@@ -9,7 +9,7 @@
 use crate::server::{OuterConfig, Reach};
 use axum::Router;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -167,9 +167,22 @@ fn refused() -> Response {
 }
 
 /// A card that anyone may read: any origin, a cache of five minutes, and an ETag of the body.
-pub(crate) fn card_response(body: String, content_type: &str) -> Response {
+/// The same ETag in `If-None-Match` gets 304 (RFC 9110 §13.1.2).
+pub(crate) fn card_response(body: String, content_type: &str, request: &HeaderMap) -> Response {
     let etag = format!("\"{}\"", bunsin_core::sha256_hex(body.as_bytes()));
-    let mut response = body.into_response();
+    // A client that holds this card asks with its ETag (A2A §8.6.2). It gets 304 without the body.
+    let unchanged = request
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|tag| tag.trim().trim_start_matches("W/"))
+        .any(|tag| tag == etag || tag == "*");
+    let mut response = if unchanged {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        body.into_response()
+    };
     let headers = response.headers_mut();
     for (name, value) in [
         (header::CONTENT_TYPE, content_type),
@@ -183,7 +196,7 @@ pub(crate) fn card_response(body: String, content_type: &str) -> Response {
 }
 
 /// The server card of a profile's endpoint. It holds no token and no owner name.
-async fn server_card(State(state): State<Arc<Inbound>>, Path(profile): Path<String>) -> Response {
+async fn server_card(State(state): State<Arc<Inbound>>, Path(profile): Path<String>, request: HeaderMap) -> Response {
     let config = match state.engine.profile_config(&profile).await {
         Ok(config) if served_on(&config, state.listener.reach) => config,
         _ => return StatusCode::NOT_FOUND.into_response(),
@@ -207,7 +220,7 @@ async fn server_card(State(state): State<Arc<Inbound>>, Path(profile): Path<Stri
     if let Some(title) = &config.inbound.title {
         card["title"] = json!(title.trim());
     }
-    card_response(card.to_string(), CARD_TYPE)
+    card_response(card.to_string(), CARD_TYPE, &request)
 }
 
 /// The ARD catalog of this listener: the profiles that it serves, each with the server card on this

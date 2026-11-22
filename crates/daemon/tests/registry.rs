@@ -29,6 +29,7 @@ impl Backends for Publishers {
 
 fn outer(reach: Reach, url: &str) -> OuterConfig {
     OuterConfig {
+        a2a_root_profile: None,
         reach,
         listen: "127.0.0.1:0".parse().unwrap(),
         url: url.parse().unwrap(),

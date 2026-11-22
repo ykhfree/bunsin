@@ -172,6 +172,12 @@ enum Command {
         /// Like --ard-registry-source, for both listeners. Needs --ard-registry public.
         #[arg(long = "ard-registry-public-source", requires = "ard_registry")]
         ard_registry_public_sources: Vec<String>,
+        /// Serve the A2A Agent Card of this profile at /.well-known/agent-card.json on the listeners for
+        /// callers, so that a stock A2A card resolver finds it from the listener address alone. The card
+        /// is served only where the profile's A2A endpoint is served. Use it when this server runs one
+        /// agent. The card shows the profile ID to anyone who reaches the listener.
+        #[arg(long = "a2a-root-profile")]
+        a2a_root_profile: Option<String>,
         /// Let profiles start coding jobs: a coding agent CLI changes a repository on a new branch,
         /// after the profile owner approves each job. The CLI runs as the user of this server, with its
         /// own permission settings. Needs --coding-repo-root.
@@ -968,7 +974,50 @@ fn outer_config(
         listen,
         url,
         tls,
+        a2a_root_profile: None,
     }))
+}
+
+/// Refuses a root profile that the data directory does not hold. It reads the profiles like the
+/// operator commands do, and creates nothing when the data directory has no profiles yet.
+fn check_root_profile(data_dir: &std::path::Path, profile: &str) -> Result<(), String> {
+    let missing = || format!("--a2a-root-profile names `{profile}`, but this data directory has no such profile");
+    if !data_dir.join("app.db").exists() {
+        return Err(missing());
+    }
+    let profiles = AppStore::open(data_dir)
+        .and_then(|store| store.list_profiles())
+        .map_err(|e| e.to_string())?;
+    if profiles.iter().any(|known| known.id == profile) {
+        Ok(())
+    } else {
+        Err(missing())
+    }
+}
+
+/// Says on stderr where the root Agent Card is served now, so that a 404 there has a visible reason.
+/// The owner can turn A2A on or off later; the card follows the settings at each request.
+async fn report_root_card(engine: &Engine, profile: &str, outer: &[OuterConfig]) {
+    let config = engine.profile_config(profile).await.ok();
+    for listener in outer {
+        let served = config
+            .as_ref()
+            .is_some_and(|config| bunsin_daemon::a2a::a2a_served_on(config, listener.reach));
+        let state = if served {
+            "serves it".to_owned()
+        } else {
+            format!(
+                "does not serve it now: the profile's A2A endpoint is off, or its scope does not reach the {} listener",
+                listener.reach.word()
+            )
+        };
+        eprintln!(
+            "root Agent Card of `{profile}` at {}{}: the {} listener {state}",
+            listener.url.as_str().trim_end_matches('/'),
+            bunsin_daemon::a2a::ROOT_CARD_PATH,
+            listener.reach.word()
+        );
+    }
 }
 
 /// The ARD registry that `serve` turns on.
@@ -989,8 +1038,12 @@ async fn run_server(
     accept_new_key: bool,
     registry: Option<RegistryArgs>,
 ) -> Result<(), String> {
-    // A start that is refused for its addresses must not read or move the key.
+    // A start that is refused for its addresses or its root profile must not read or move the key.
     check_listeners(&config, &outer).map_err(|e| e.to_string())?;
+    let root_profile = outer.iter().find_map(|listener| listener.a2a_root_profile.clone());
+    if let Some(profile) = &root_profile {
+        check_root_profile(&local.data_dir, profile)?;
+    }
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
     let source = key_source(&store, &local.data_dir)?;
@@ -1008,6 +1061,9 @@ async fn run_server(
         fetcher = Some(bunsin_daemon::fetch::Fetcher::new(&registry.upstream)?);
     }
     let engine = Arc::new(engine);
+    if let Some(profile) = &root_profile {
+        report_root_card(&engine, profile, &outer).await;
+    }
     let reaches: Vec<Reach> = outer.iter().map(|listener| listener.reach).collect();
     let started = start_with_fetcher(engine, config, outer, fetcher)
         .await
@@ -1046,6 +1102,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             ard_registry,
             ard_registry_sources,
             ard_registry_public_sources,
+            a2a_root_profile,
             allow_coding,
             coding_repo_root,
             coding_programs,
@@ -1084,7 +1141,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 listen,
                 tls: tls_cert.zip(tls_key),
             };
-            let outer = outer.configs()?;
+            let mut outer = outer.configs()?;
+            if a2a_root_profile.is_some() && outer.is_empty() {
+                return Err(
+                    "--a2a-root-profile needs a listener for callers: --internal-listen or --public-listen".into(),
+                );
+            }
+            for listener in &mut outer {
+                listener.a2a_root_profile = a2a_root_profile.clone();
+            }
             let registry = match ard_registry.as_deref() {
                 None => None,
                 Some(scope) => {
