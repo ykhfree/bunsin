@@ -17,9 +17,12 @@ use gpui_kit::{
 
 const HELP: &str = "Matching text is removed before the agent sees it. \
     The filter finds patterns, such as email addresses and phone numbers. \
-    It does not find names or postal addresses. \
+    It does not find names or postal addresses by itself: add them as terms. \
     Custom patterns use the syntax of the Rust regex crate.";
+const TERMS_HELP: &str = "A term is removed wherever it is in the text, in upper or lower case. \
+    \"Kim\" also removes the start of \"Kimball\". The terms are stored in the profile settings on the server.";
 const UNADDED: &str = "Add the pattern or clear the fields first";
+const UNADDED_TERM: &str = "Add the term or clear its field first";
 
 /// The settings the user edits, and the server's settings they were made from.
 struct Draft {
@@ -36,6 +39,7 @@ pub struct PrivacyForm {
     saves_seen: u64,
     label: Entity<InputState>,
     pattern: Entity<InputState>,
+    term: Entity<InputState>,
     /// The window's own message about the last Add or Save.
     message: Option<&'static str>,
     /// True after the server refused a save because its settings changed since the form loaded them.
@@ -49,6 +53,7 @@ impl PrivacyForm {
             saves_seen: 0,
             label: cx.new(|cx| InputState::new(window, cx).placeholder("Label, for example project")),
             pattern: cx.new(|cx| InputState::new(window, cx).placeholder(r"Pattern, for example PRJ-\d{4}")),
+            term: cx.new(|cx| InputState::new(window, cx).placeholder("A name or an address")),
             message: None,
             conflict: false,
         }
@@ -90,7 +95,7 @@ impl PrivacyForm {
     }
 
     fn clear_fields(&self, window: &mut Window, cx: &mut App) {
-        for input in [&self.label, &self.pattern] {
+        for input in [&self.label, &self.pattern, &self.term] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
     }
@@ -111,11 +116,33 @@ impl PrivacyForm {
         self.clear_fields(window, cx);
     }
 
+    /// Adds the typed term to the draft. The server checks its length on Save.
+    fn add_term(&mut self, window: &mut Window, cx: &mut App) {
+        let term = self.term.read(cx).value().trim().to_owned();
+        let Some(draft) = &mut self.draft else {
+            return;
+        };
+        if term.is_empty() {
+            self.message = Some("Enter a term.");
+            return;
+        }
+        draft.value.terms.push(term);
+        self.message = None;
+        self.term.update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
     /// Sets the message if the Add fields hold text. A save would not store that text.
     fn save_check(&mut self, cx: &App) {
         let label = self.label.read(cx).value();
         let pattern = self.pattern.read(cx).value();
-        self.message = (!label.trim().is_empty() || !pattern.is_empty()).then_some(UNADDED);
+        let term = self.term.read(cx).value();
+        self.message = if !label.trim().is_empty() || !pattern.is_empty() {
+            Some(UNADDED)
+        } else if !term.trim().is_empty() {
+            Some(UNADDED_TERM)
+        } else {
+            None
+        };
     }
 }
 
@@ -206,6 +233,31 @@ impl Shell {
                 )
         });
 
+        let term_rows = draft.terms.iter().enumerate().map(|(i, term)| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(labelled(format!("term-{i}"), term.clone())),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("remove-term-{i}")))
+                        .small()
+                        .ghost()
+                        .label("Remove")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(draft) = &mut this.privacy.draft {
+                                draft.value.terms.remove(i);
+                                cx.notify();
+                            }
+                        })),
+                )
+        });
+
         // "Saved" describes the form only while it equals the server's settings
         // and no message says that something was not done.
         let changed = draft != server;
@@ -263,6 +315,34 @@ impl Shell {
                     .label("Add the pattern")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.privacy.add(window, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(labelled_as(
+                "term-count",
+                format!("Terms: {}", draft.terms.len()),
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(match draft.terms.len() {
+                        0 => "Names and addresses: none".to_owned(),
+                        count => format!("Names and addresses: {count}"),
+                    }),
+            ))
+            .child(labelled_as("terms-help", TERMS_HELP, quiet(TERMS_HELP, cx)))
+            .children(term_rows)
+            .child(field(
+                "Term",
+                Input::new(&form.term).id("new-term").aria_label("Term"),
+                cx,
+            ))
+            .child(
+                Button::new("add-term")
+                    .self_start()
+                    .outline()
+                    .label("Add the term")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.privacy.add_term(window, cx);
                         cx.notify();
                     })),
             )

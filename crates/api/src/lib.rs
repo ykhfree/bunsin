@@ -2,16 +2,26 @@
 
 pub mod http;
 
+use bunsin_core::ard::{ArdDomain, ArdRegistry};
+use bunsin_core::autonomy::AutonomyThresholds;
+use bunsin_core::candidates::{PrincipleCandidate, PrincipleSource};
+use bunsin_core::coding::CodingConfig;
+use bunsin_core::eval::{CaseScore, EvalConfig, EvalPass, EvalResult, EvalRun, EvalSummary, Expect, ReplayCaseRecord};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::{InboundConfig, InboundScope};
+use bunsin_core::lint::LintFinding;
 use bunsin_core::policy::{DenyReason, Policy, ToolRule};
 use bunsin_core::poll::PollConfig;
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::privacy::PrivacyConfig;
 use bunsin_core::proposal::Proposal;
-use bunsin_core::records::{ArtifactMeta, AuditEntry, InboxItem, ProfileInfo};
-use bunsin_core::settings::{McpConfig, Wire};
+use bunsin_core::records::{
+    ArtifactMeta, AuditEntry, CallerToken, CorrectionRecord, DecisionCounts, InboxItem, LlmUsage, ProfileInfo,
+};
+use bunsin_core::settings::{ApiConfig, ConnectorKind, OAuthConfig, Wire};
 use bunsin_core::tool::{PinDiff, PinSet, ToolSpec};
-use bunsin_core::wiki::{WikiPage, WikiSummary, WikiText};
+use bunsin_core::webhook::WebhookConfig;
+use bunsin_core::wiki::{NotesConfig, WikiPage, WikiSummary, WikiText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -41,6 +51,31 @@ pub struct ProfileConfig {
     /// The searches the server repeats to find new events.
     #[serde(default)]
     pub polls: Vec<PollConfig>,
+    /// When the window suggests that a tool run without asking. `None`: it suggests nothing.
+    #[serde(default)]
+    pub autonomy: Option<AutonomyThresholds>,
+    /// The owner's pass mark for replay evaluation.
+    #[serde(default)]
+    pub eval: EvalConfig,
+    /// The checks of the agent's notes. Everything is off by default.
+    #[serde(default)]
+    pub notes: NotesConfig,
+    /// Coding delegation. `None`: the agent cannot start a coding job.
+    #[serde(default)]
+    pub coding: Option<CodingConfig>,
+    /// The inbound endpoint where other people's agents ask questions. Off by default.
+    #[serde(default)]
+    pub inbound: InboundConfig,
+    /// The ARD registries that the agent may ask with `bunsin.ard/search`, `explore` and `list`.
+    /// Empty: none of these tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ard_registries: Vec<ArdRegistry>,
+    /// The domains whose ARD entries the agent may read with `bunsin.ard/resolve`. Empty: no resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ard_domains: Vec<ArdDomain>,
+    /// The webhooks that Slack or Jira Cloud sends events to, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub webhooks: BTreeMap<String, WebhookConfig>,
 }
 
 impl ProfileConfig {
@@ -59,6 +94,14 @@ impl ProfileConfig {
             connectors: BTreeMap::new(),
             privacy: PrivacyConfig::default(),
             polls: Vec::new(),
+            autonomy: None,
+            eval: EvalConfig::default(),
+            notes: NotesConfig::default(),
+            coding: None,
+            inbound: InboundConfig::default(),
+            ard_registries: Vec::new(),
+            ard_domains: Vec::new(),
+            webhooks: BTreeMap::new(),
         }
     }
 }
@@ -84,8 +127,18 @@ pub enum Outcome {
     Executed {
         inbox_id: i64,
     },
+    /// A coding job started on the server. Its result comes later as a draft in the inbox.
+    Started {
+        inbox_id: i64,
+    },
     /// The tool call ran and failed.
     ExecutionFailed {
+        inbox_id: i64,
+        error: String,
+    },
+    /// The tool call got no answer, for example at its time limit. It may have reached its tool.
+    /// The item is `unknown`, and only the owner resolves it with `resolve_unknown`.
+    ExecutionUnknown {
         inbox_id: i64,
         error: String,
     },
@@ -96,6 +149,19 @@ pub enum Outcome {
     Failed {
         error: String,
     },
+}
+
+/// How the owner resolves a tool call whose outcome is unknown: a stop cut it, or it got no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// The call reached its tool. The item becomes `executed`.
+    Done,
+    /// The item becomes `failed`, and a copy of the call runs now as a new item.
+    /// If the first call reached its tool, the tool gets the call twice.
+    Retry,
+    /// The item becomes `failed`. Nothing runs.
+    Drop,
 }
 
 /// The user's change to a pending tool call.
@@ -166,6 +232,30 @@ pub struct Permissions {
     pub tools: BTreeMap<String, Vec<ToolSpec>>,
     /// The rules by tool ID: `<connector>/<tool>`. A tool without a rule cannot be used.
     pub rules: BTreeMap<String, ToolRule>,
+    /// The text that the server adds at each place of outgoing text that a rule names.
+    #[serde(default)]
+    pub ai_marker: String,
+}
+
+/// The decisions about the calls of each write or delete tool, with the holds and the suggestions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Autonomy {
+    /// The owner's thresholds. `None`: no tool is suggested, and the counts cover all days.
+    pub thresholds: Option<AutonomyThresholds>,
+    /// By tool ID: every write or delete rule, and every held tool.
+    pub tools: Vec<ToolAutonomy>,
+}
+
+/// The decisions about one tool's calls since its last hold, within the days of the thresholds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAutonomy {
+    pub tool: String,
+    pub counts: DecisionCounts,
+    /// True while the owner's hold keeps the tool at approval, whatever its step says.
+    pub held: bool,
+    /// True if the counts meet the thresholds and the owner could raise the step to `autonomous`.
+    /// Only the owner raises it, with `set_permissions`.
+    pub suggested: bool,
 }
 
 /// A new permission table, with the table the caller loaded before it changed it.
@@ -175,6 +265,87 @@ pub struct PermissionsUpdate {
     pub rules: BTreeMap<String, ToolRule>,
     #[serde(default)]
     pub expected: Expected<BTreeMap<String, ToolRule>>,
+}
+
+/// The owner's new principles, with the list the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrinciplesUpdate {
+    /// Every principle, in the order of the prompt. A principle that is not in here is removed.
+    pub principles: Vec<String>,
+    #[serde(default)]
+    pub expected: Expected<Vec<String>>,
+}
+
+/// New autonomy thresholds, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomyThresholdsUpdate {
+    /// `None` turns the suggestions off.
+    pub thresholds: Option<AutonomyThresholds>,
+    #[serde(default)]
+    pub expected: Expected<Option<AutonomyThresholds>>,
+}
+
+/// The owner's adoption of a principle candidate: one text appended to the principles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdoptPrinciple {
+    pub id: i64,
+    /// The owner's edit of the candidate's text. `None` adopts the text as it is.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The principles the caller loaded. The adoption is refused if the server holds others.
+    #[serde(default)]
+    pub expected: Expected<Vec<String>>,
+}
+
+/// New polls, with the list the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PollsUpdate {
+    /// Every poll. A poll that is not in here is removed.
+    pub polls: Vec<PollConfig>,
+    #[serde(default)]
+    pub expected: Expected<Vec<PollConfig>>,
+}
+
+/// New settings of the inbound endpoint and its ARD listing, with the ones the caller loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundUpdate {
+    pub inbound: InboundConfig,
+    #[serde(default)]
+    pub expected: Expected<InboundConfig>,
+}
+
+/// New ARD registries, with the list the caller loaded before it changed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArdRegistriesUpdate {
+    /// Every registry. A registry that is not in here is removed.
+    pub registries: Vec<ArdRegistry>,
+    #[serde(default)]
+    pub expected: Expected<Vec<ArdRegistry>>,
+}
+
+/// New webhooks, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhooksUpdate {
+    /// Every webhook by name. A webhook that is not in here is removed with its signing secret.
+    pub webhooks: BTreeMap<String, WebhookConfig>,
+    #[serde(default)]
+    pub expected: Expected<BTreeMap<String, WebhookConfig>>,
+}
+
+/// New settings of the notes, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotesSettingsUpdate {
+    pub notes: NotesConfig,
+    #[serde(default)]
+    pub expected: Expected<NotesConfig>,
+}
+
+/// New evaluation settings, with the ones the caller loaded before it changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvalSettingsUpdate {
+    pub eval: EvalConfig,
+    #[serde(default)]
+    pub expected: Expected<EvalConfig>,
 }
 
 /// New privacy settings, with what the caller loaded before it changed them.
@@ -226,7 +397,9 @@ pub struct LlmConnection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorConnection {
-    pub mcp: McpConfig,
+    /// The MCP server or the REST API. In JSON it is the key `mcp` or `api`.
+    #[serde(flatten)]
+    pub kind: ConnectorKind,
     pub token: TokenSource,
     /// The header that carries the token as it is. `None`: `Authorization: Bearer <token>`.
     #[serde(default)]
@@ -238,6 +411,32 @@ pub struct ConnectorConnection {
     /// a variable, but only the window gives it a value.
     #[serde(default)]
     pub secret_env_missing: Vec<String>,
+    /// The OAuth sign-in of the connector. `None`: it does not sign in with OAuth.
+    #[serde(default)]
+    pub oauth: Option<OAuthConnection>,
+}
+
+/// The OAuth settings of a connector and whether the server holds credentials for its address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthConnection {
+    pub config: OAuthConfig,
+    pub state: OAuthState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthState {
+    /// The server holds sealed credentials for the connector's present address.
+    SignedIn,
+    /// The owner never signed in, the address moved to another origin, or the authorization
+    /// server refused the refresh token.
+    SignInNeeded,
+}
+
+/// The start of an OAuth sign-in: the page the owner opens in a browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStarted {
+    pub authorization_url: String,
 }
 
 /// What to do with the value of one secret environment variable when a command is saved.
@@ -312,6 +511,97 @@ pub struct CommandConnectorUpdate {
     pub expected: Expected<Option<ConnectorConnection>>,
 }
 
+/// A connector that calls the REST API of Slack, Jira Cloud or Confluence Cloud with a fixed set of tools.
+/// The token is bound to the origin of `api.base_url`, like the token of an MCP address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiConnectorUpdate {
+    pub api: ApiConfig,
+    pub token: TokenChange,
+    /// The connector the caller loaded, or `None` for a new connector.
+    #[serde(default)]
+    pub expected: Expected<Option<ConnectorConnection>>,
+}
+
+/// Where the inbound endpoint of a profile is served, and its ARD listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundStatus {
+    pub enabled: bool,
+    pub scope: InboundScope,
+    /// One for each listener for callers that serves the endpoint now.
+    pub endpoints: Vec<InboundEndpoint>,
+    /// One for each entry of the listing: the MCP entry, and the A2A entry if A2A is on.
+    /// Empty if the settings have no `inbound.ard`.
+    #[serde(default)]
+    pub ard: Vec<ArdStatus>,
+    /// The webhooks of the settings.
+    #[serde(default)]
+    pub webhooks: Vec<WebhookStatus>,
+    /// The DNS text for the owner to publish: an SVCB record for each listener whose catalog lists an
+    /// entry of this profile (ARD §5.1), or a `;` comment that says why a listener has none.
+    #[serde(default)]
+    pub dns_records: Vec<String>,
+}
+
+/// Where Slack or Jira sends the events of one webhook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookStatus {
+    pub name: String,
+    pub connector: String,
+    /// One for each listener for callers that takes its deliveries now.
+    pub urls: Vec<String>,
+    /// False until the owner stores the signing secret. Without it every delivery is refused.
+    pub secret_stored: bool,
+}
+
+/// The addresses of the endpoint on one listener for callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundEndpoint {
+    pub listener: InboundScope,
+    pub mcp_url: String,
+    pub card_url: String,
+    /// The `/.well-known/ard.json` of this listener.
+    pub catalog_url: String,
+    /// The A2A endpoint, if this listener serves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a_url: Option<String>,
+    /// The A2A Agent Card, if this listener serves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_card_url: Option<String>,
+}
+
+/// What the ARD catalogs do with one entry of the listing of a profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArdStatus {
+    /// `urn:air:...`, if the listing makes one.
+    pub identifier: Option<String>,
+    /// The `type` of the entry, for example `application/a2a-agent-card+json`.
+    #[serde(default)]
+    pub media_type: String,
+    /// The listeners whose catalog lists the entry.
+    pub listed_on: Vec<InboundScope>,
+    /// Why the catalogs leave the entry out. Empty if a catalog lists it.
+    pub refused: Vec<String>,
+    /// Rules that the entry should follow and does not. The entry is listed anyway.
+    pub warnings: Vec<String>,
+}
+
+/// A new caller token. The server shows the token this once and keeps only its hash.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewCallerToken {
+    pub id: i64,
+    pub token: String,
+}
+
+impl std::fmt::Debug for NewCallerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token value is left out on purpose.
+        f.debug_struct("NewCallerToken")
+            .field("id", &self.id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// What one test request to the LLM endpoint did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmTest {
@@ -330,6 +620,15 @@ pub struct WikiPageUpdate {
     /// `None` saves without a check.
     #[serde(default)]
     pub expected_revision: Option<u64>,
+}
+
+/// One call of a tool that reads, whose result the agent turns into page changes of its notes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreloadNotes {
+    /// `<connector>/<tool>`. It needs a `read` rule.
+    pub tool: String,
+    #[serde(default)]
+    pub args: Map<String, Value>,
 }
 
 /// The tools a connector lists now, compared with the approved ones.
@@ -354,6 +653,9 @@ pub struct ReplayCase {
     pub event: InboundEvent,
     /// What the person really answered. The agent never sees it.
     pub actual_reply: String,
+    /// What the owner expects the agent to do. The default is a reply.
+    #[serde(default)]
+    pub expect: Expect,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,6 +663,24 @@ pub struct ReplayResult {
     pub proposal: Option<Proposal>,
     pub error: Option<String>,
     pub actual_reply: String,
+    /// The score of the proposal, computed without an LLM. `None` if there is no proposal.
+    #[serde(default)]
+    pub score: Option<CaseScore>,
+}
+
+/// The newest evaluation run, with its results and rates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalReport {
+    /// `None` if no run was started.
+    pub run: Option<EvalRun>,
+    /// The cases the run has not replayed yet. 0 when it is done.
+    pub remaining: u32,
+    pub results: Vec<EvalResult>,
+    pub summary: EvalSummary,
+    /// The owner's pass mark, from the settings.
+    pub pass: Option<EvalPass>,
+    /// Whether the finished run meets the pass mark. `None` while it runs or without a mark.
+    pub passed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -387,7 +707,7 @@ pub enum ApiError {
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// What a profile owner can do. Profiles and access tokens are created on the
-/// server by its operator, so they are not part of this interface.
+/// server by its operator, so they are not part of this interface. Caller tokens are.
 pub trait EngineApi: Send + Sync {
     /// The profiles the caller may use.
     fn list_profiles(&self) -> BoxFuture<'_, ApiResult<Vec<ProfileInfo>>>;
@@ -428,11 +748,43 @@ pub trait EngineApi: Send + Sync {
         name: &'a str,
         update: CommandConnectorUpdate,
     ) -> BoxFuture<'a, ApiResult<()>>;
+    /// Saves a REST API connector and its token in one step. Check it with `connector_tools`.
+    fn set_api_connector<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        update: ApiConnectorUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>>;
     /// Removes a connector and its stored token.
     fn remove_connector<'a>(&'a self, profile: &'a str, name: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// Starts an OAuth sign-in of a connector. `redirect_uri` must be a loopback address
+    /// (`http://127.0.0.1:<port>/...`), where the browser goes after the sign-in. The server
+    /// keeps the sign-in for 10 minutes.
+    fn start_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, ApiResult<OAuthStarted>>;
+    /// Ends a sign-in with the address the browser went to after it. The server checks the state,
+    /// gets the tokens and seals them. The next use of the connector connects with them.
+    fn finish_connector_oauth<'a>(
+        &'a self,
+        profile: &'a str,
+        connector: &'a str,
+        callback_url: String,
+    ) -> BoxFuture<'a, ApiResult<()>>;
     /// The agent's notes: one line per page.
+    /// The stored corrections, also the retired ones. Newest first, at most 200.
+    fn corrections<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CorrectionRecord>>>;
+    /// Retires a correction: it stays stored, but no prompt gets it. A retired correction cannot be retired again.
+    fn retire_correction<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
     fn wiki_index<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
     fn wiki_page<'a>(&'a self, profile: &'a str, slug: &'a str) -> BoxFuture<'a, ApiResult<WikiPage>>;
+    /// The index entries of every page that matches the words of `query`, best first. The ranking is the
+    /// one of the agent's tool `bunsin.wiki/search`, without its limit of 10 pages.
+    /// A query without a word of 3 or more characters or of 2 Hangul syllables is invalid.
+    fn wiki_search<'a>(&'a self, profile: &'a str, query: &'a str) -> BoxFuture<'a, ApiResult<Vec<WikiSummary>>>;
     /// Stores the owner's text for a page. The owner's text replaces the agent's. The sources of the page stay.
     fn set_wiki_page<'a>(
         &'a self,
@@ -448,9 +800,115 @@ pub trait EngineApi: Send + Sync {
     fn permissions<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Permissions>>;
     /// Replaces the permission table.
     fn set_permissions<'a>(&'a self, profile: &'a str, update: PermissionsUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The owner's principles, in the order of the prompt.
+    fn principles<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<String>>>;
+    /// Replaces the principles. Each must have 1 to 1,000 characters; at most 50 are allowed.
+    fn set_principles<'a>(&'a self, profile: &'a str, update: PrinciplesUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The searches the server repeats to find new events.
+    fn polls<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PollConfig>>>;
+    /// Replaces the polls. The tool of each poll needs a `read` rule and must be in the approved list.
+    fn set_polls<'a>(&'a self, profile: &'a str, update: PollsUpdate) -> BoxFuture<'a, ApiResult<()>>;
     /// Runs poll number `index` of the settings once, without handling its events.
     fn test_poll<'a>(&'a self, profile: &'a str, index: usize) -> BoxFuture<'a, ApiResult<PollPreview>>;
     /// Sends one request to the saved LLM endpoint and says whether the reply has the form the agent needs.
     /// The request holds no data of the profile. It costs tokens at the endpoint.
     fn test_llm<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<LlmTest>>;
+    /// The LLM calls of the last 90 days, added up by UTC day and purpose. Newest day first.
+    fn llm_usage<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LlmUsage>>>;
+    /// Resolves an `unknown` item. A retry approves a copy of the call with a new inbox ID and
+    /// returns the outcome of that run. The approval checks the policy; if it refuses, the copy
+    /// stays pending. Done and drop return `None`.
+    fn resolve_unknown<'a>(
+        &'a self,
+        profile: &'a str,
+        inbox_id: i64,
+        resolution: Resolution,
+    ) -> BoxFuture<'a, ApiResult<Option<Outcome>>>;
+    /// The decisions about each write or delete tool's calls, its hold and whether it is suggested.
+    fn autonomy<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Autonomy>>;
+    /// Reports a problem with a call that ran without the owner. It holds the tool at approval.
+    /// Only an autonomous tool call that is `executed` or `failed` can be reported, and only once.
+    fn report_autonomous<'a>(&'a self, profile: &'a str, inbox_id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Clears the hold of a tool. Its calls then follow its step again.
+    fn clear_autonomy_hold<'a>(&'a self, profile: &'a str, tool: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+    /// The owner's thresholds for a suggestion of `autonomous`. `None`: nothing is suggested.
+    fn autonomy_thresholds<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Option<AutonomyThresholds>>>;
+    /// Replaces only the thresholds. They pass the same check as in the settings file.
+    fn set_autonomy_thresholds<'a>(
+        &'a self,
+        profile: &'a str,
+        update: AutonomyThresholdsUpdate,
+    ) -> BoxFuture<'a, ApiResult<()>>;
+    /// Stores replay cases after the privacy filter. Returns their IDs, in the order of `cases`.
+    fn add_replay_cases<'a>(&'a self, profile: &'a str, cases: Vec<ReplayCase>) -> BoxFuture<'a, ApiResult<Vec<i64>>>;
+    /// The stored replay cases, oldest first, at most 200.
+    fn replay_cases<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ReplayCaseRecord>>>;
+    /// Deletes a replay case. The results of earlier runs stay.
+    fn delete_replay_case<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Starts an evaluation run of every stored case and returns its ID. The server replays a few
+    /// cases at a time in the background, also while the kill switch is on: a replay sends nothing.
+    /// Refused while a run is running or if there is no case.
+    fn start_eval<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<i64>>;
+    /// The newest evaluation run and its results.
+    fn eval_report<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalReport>>;
+    /// Asks the LLM for principles in the owner's texts of `source`, which it reads as quoted data after
+    /// the privacy filter. Stores and returns the candidates that pass the checks. None becomes a principle.
+    fn extract_principles<'a>(
+        &'a self,
+        profile: &'a str,
+        source: PrincipleSource,
+    ) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>>;
+    /// Every candidate, newest first, at most 200.
+    fn principle_candidates<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<PrincipleCandidate>>>;
+    /// Appends the text of a new candidate, or the owner's edit of it, to the principles. The save has the
+    /// same checks as `set_principles`.
+    fn adopt_principle<'a>(&'a self, profile: &'a str, adoption: AdoptPrinciple) -> BoxFuture<'a, ApiResult<()>>;
+    /// Dismisses a new candidate. A later extraction does not propose its text again.
+    fn dismiss_principle<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Checks the notes now with the settings `notes` and returns the findings that are new.
+    /// A check replaces the findings of the last one. It never changes a page.
+    fn lint_notes<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>>;
+    /// The findings of the last check that the owner has not dismissed.
+    fn lint_findings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<LintFinding>>>;
+    /// Dismisses a finding. Later checks do not report the same kind for the same pages again.
+    fn dismiss_finding<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Calls one tool that reads, with the checks of a poll, and lets the agent propose pages from its result.
+    /// Returns the inbox IDs of the page changes. Nothing else the agent proposes is run.
+    fn preload_notes<'a>(&'a self, profile: &'a str, request: PreloadNotes) -> BoxFuture<'a, ApiResult<Vec<i64>>>;
+    /// The caller tokens of the profile, revoked ones too, oldest first. A caller token opens only the
+    /// inbound endpoint of this profile, never this interface.
+    fn caller_tokens<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<CallerToken>>>;
+    /// Creates a caller token. The reply holds the token; it cannot be read again.
+    fn add_caller_token<'a>(&'a self, profile: &'a str, label: &'a str) -> BoxFuture<'a, ApiResult<NewCallerToken>>;
+    /// Revokes a caller token. The next request with it is refused.
+    fn revoke_caller_token<'a>(&'a self, profile: &'a str, id: i64) -> BoxFuture<'a, ApiResult<()>>;
+    /// Where the inbound endpoint is served, and whether the ARD catalogs list it or why not.
+    fn inbound_status<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundStatus>>;
+    /// Stores the signing secret of a webhook in the settings. The server never sends it back.
+    fn set_webhook_secret<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        secret: String,
+    ) -> BoxFuture<'a, ApiResult<()>>;
+    /// The settings of the inbound endpoint and its ARD listing.
+    fn inbound_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<InboundConfig>>;
+    /// Replaces only the inbound settings. They pass the same checks and server rules as in the settings file.
+    fn set_inbound_settings<'a>(&'a self, profile: &'a str, update: InboundUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The ARD registries that the agent may search.
+    fn ard_registries<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<Vec<ArdRegistry>>>;
+    /// Replaces only the ARD registries. Their addresses pass the server's address rules.
+    fn set_ard_registries<'a>(&'a self, profile: &'a str, update: ArdRegistriesUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The webhooks by name. The signing secrets are never in it; `inbound_status` says which are stored.
+    fn webhooks<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<BTreeMap<String, WebhookConfig>>>;
+    /// Replaces only the webhooks. The signing secret of a removed webhook is deleted.
+    fn set_webhooks<'a>(&'a self, profile: &'a str, update: WebhooksUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The settings of the notes: auto-apply and the checks.
+    fn notes_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<NotesConfig>>;
+    /// Replaces only the settings of the notes.
+    fn set_notes_settings<'a>(&'a self, profile: &'a str, update: NotesSettingsUpdate) -> BoxFuture<'a, ApiResult<()>>;
+    /// The evaluation settings: the pass mark and the LLM judge.
+    fn eval_settings<'a>(&'a self, profile: &'a str) -> BoxFuture<'a, ApiResult<EvalConfig>>;
+    /// Replaces only the evaluation settings.
+    fn set_eval_settings<'a>(&'a self, profile: &'a str, update: EvalSettingsUpdate) -> BoxFuture<'a, ApiResult<()>>;
 }

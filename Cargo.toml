@@ -13,6 +13,7 @@ bunsin-core = { path = "crates/core" }
 bunsin-store = { path = "crates/store" }
 bunsin-llm = { path = "crates/llm" }
 bunsin-connectors = { path = "crates/connectors" }
+bunsin-ard = { path = "crates/ard" }
 bunsin-coding = { path = "crates/coding" }
 bunsin-engine = { path = "crates/engine" }
 bunsin-api = { path = "crates/api" }
@@ -26,3 +27,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "fs", "signal", "net"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
 tempfile = "3"
+# Tests only: checks the ARD catalog against the schema of an ARD entry. Released 2026-10-26.
+# No default features: the tests resolve no schema over the network or from files.
+jsonschema = { version = "=0.60.2", default-features = false }

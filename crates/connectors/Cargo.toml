@@ -12,6 +12,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 rmcp = { version = "=3.10.0", default-features = false, features = [
+    "auth",
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
@@ -19,6 +20,11 @@ rmcp = { version = "=3.10.0", default-features = false, features = [
 ] }
 # The same reqwest that rmcp uses. It is named here to build the client without redirects.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Versions already in Cargo.lock. They encode basic auth and check webhook signatures.
+base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
+sha2.workspace = true
 
 [dev-dependencies]
 rmcp = { version = "=3.10.0", default-features = false, features = [

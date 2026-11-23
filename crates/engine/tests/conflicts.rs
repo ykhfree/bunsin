@@ -199,10 +199,10 @@ async fn a_connector_save_is_refused_when_it_changed_or_appeared_since_the_form_
     assert!(matches!(stale, Err(ApiError::Conflict(_))), "{stale:?}");
     let now = rig.engine.connections("kim").await.unwrap().connectors["jira"].clone();
     assert_eq!(
-        now.mcp,
-        bunsin_core::settings::McpConfig::Http {
+        now.kind,
+        bunsin_core::settings::ConnectorKind::Mcp(bunsin_core::settings::McpConfig::Http {
             url: "https://moved.example/jira".into()
-        }
+        })
     );
 
     // Another connector of the same profile is not part of the comparison.

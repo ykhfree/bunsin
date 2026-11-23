@@ -215,6 +215,7 @@ fn saved_settings_are_the_ones_the_server_uses(cx: &mut TestAppContext) {
         thread: None,
         author: "lee".into(),
         text: "Is PRJ-1234 done? Mail lee@example.com".into(),
+        channel: Default::default(),
     };
     rt.block_on(rig.engine.ingest("kim", event)).unwrap();
     let request = serde_json::to_string(rig.llm.requests().last().unwrap()).unwrap();
@@ -713,4 +714,338 @@ fn a_note_is_approved_in_the_inbox_and_stored_on_the_server(cx: &mut TestAppCont
             .iter()
             .any(|i| i.id == 3 && i.state.as_str() == "pending")
     );
+}
+
+#[gpui_kit::test]
+fn terms_are_added_removed_and_used_by_the_server(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "term-count"), "Terms: 0");
+        let help = label(window, "terms-help");
+        assert!(help.contains("in upper or lower case"), "{help}");
+        // A typed term that is not added is not dropped without notice.
+        window.click("new-term", cx);
+        window.input("Park Jiwon", cx);
+        window.click("save-privacy", cx);
+        assert_eq!(
+            label(window, "privacy-message"),
+            "Add the term or clear its field first"
+        );
+        window.click("add-term", cx);
+        assert_eq!(value(window, "new-term"), "");
+        window.click("new-term", cx);
+        window.input("  12 Teheran-ro  ", cx);
+        window.click("add-term", cx);
+        window.click("new-term", cx);
+        window.input("Lee", cx);
+        window.click("add-term", cx);
+        assert_eq!(label(window, "term-count"), "Terms: 3");
+        // Spaces around a term are not kept.
+        assert_eq!(label(window, "term-1"), "12 Teheran-ro");
+        window.click("remove-term-2", cx);
+        assert_eq!(label(window, "term-count"), "Terms: 2");
+        assert!(window.try_find("term-2").is_none());
+        assert_eq!(label(window, "privacy-changes"), "Not saved");
+        // Add without text adds nothing.
+        window.click("add-term", cx);
+        assert_eq!(label(window, "privacy-message"), "Enter a term.");
+        assert_eq!(label(window, "term-count"), "Terms: 2");
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    let saved = rt.block_on(rig.engine.privacy("kim")).unwrap();
+    assert_eq!(saved.terms, ["Park Jiwon", "12 Teheran-ro"]);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "privacy-result"), "Saved");
+        assert_eq!(label(window, "term-0"), "Park Jiwon");
+    });
+
+    rig.llm.reply(
+        &serde_json::json!({
+            "kind": "ignore", "rationale": "nothing to do", "summary": null, "tool": null, "args_json": null
+        })
+        .to_string(),
+        10,
+    );
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e-terms".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "park jiwon moved to 12 TEHERAN-RO".into(),
+        channel: Default::default(),
+    };
+    rt.block_on(rig.engine.ingest("kim", event)).unwrap();
+    let request = serde_json::to_string(rig.llm.requests().last().unwrap()).unwrap();
+    assert!(
+        request.contains("[REDACTED:TERM] moved to [REDACTED:TERM]"),
+        "{request}"
+    );
+    assert!(!request.to_lowercase().contains("jiwon"), "{request}");
+}
+
+#[gpui_kit::test]
+fn a_refused_term_shows_the_server_error_and_keeps_the_form(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.click("new-term", cx);
+        window.input("K", cx);
+        window.click("add-term", cx);
+        window.click("save-privacy", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    on_screen(cx, window, |window, _| {
+        let result = label(window, "privacy-result");
+        assert!(result.contains("term 1 must have 2 to 100 characters"), "{result}");
+        assert_eq!(label(window, "term-0"), "K");
+        assert_eq!(label(window, "privacy-changes"), "Not saved");
+    });
+    assert_eq!(
+        rt.block_on(rig.engine.privacy("kim")).unwrap(),
+        PrivacyConfig::default()
+    );
+}
+
+/// Makes pending item 1 of `kim` an item whose call a stop cut, as the next start finds it.
+fn cut_item_one(rig: &common::Rig) {
+    use bunsin_core::approval::ApprovalState::{Approved, Executing, Pending};
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    assert!(store.move_inbox_state(1, Pending, Approved, 1).unwrap());
+    assert!(store.move_inbox_state(1, Approved, Executing, 1).unwrap());
+    assert!(rig.engine.mark_interrupted().failures.is_empty());
+}
+
+#[gpui_kit::test]
+fn an_unknown_item_offers_done_drop_and_a_retry_that_warns(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    cut_item_one(&rig);
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbox-1"), "unknown · slack/post");
+        assert!(label(window, "unknown-note-1").contains("may have reached its tool"));
+        assert!(label(window, "retry-warning-1").contains("sent twice"));
+        assert_eq!(label(window, "done-1"), "It ran: mark done");
+        assert_eq!(label(window, "drop-1"), "It did not run: drop");
+        assert_eq!(label(window, "retry-1"), "Run again");
+        // The owner cannot approve or dismiss it like a pending item.
+        assert!(window.try_find("approve-1").is_none());
+        assert!(window.try_find("reject-1").is_none());
+        window.click("retry-1", cx);
+    });
+    // The first click only asks.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-1"), "Yes, run it again");
+        window.click("retry-1", cx);
+    });
+
+    let copy = |s: &Shell| {
+        s.state
+            .snapshot
+            .as_ref()
+            .and_then(|snap| snap.inbox.iter().find(|item| item.retry_of == Some(1)).cloned())
+    };
+    wait_until(cx, &shell, "the executed copy", |s| {
+        copy(s).is_some_and(|item| item.state.as_str() == "executed")
+    });
+    assert_eq!(rig.slack.calls().len(), 1);
+    let copy_id = shell.read_with(cx, |s, _| copy(s).unwrap().id);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "inbox-1"), "failed · slack/post");
+        assert!(window.try_find("retry-1").is_none());
+        let shown = window.find(format!("inbox-{copy_id}")).label().map(str::to_owned);
+        assert_eq!(shown.as_deref(), Some("executed · slack/post"));
+    });
+}
+
+#[gpui_kit::test]
+fn marking_an_unknown_item_done_sends_nothing(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    cut_item_one(&rig);
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| window.click("done-1", cx));
+    wait_until(cx, &shell, "the item marked done", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox[0].state.as_str() == "executed")
+    });
+    assert!(rig.slack.calls().is_empty());
+    let inbox = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    assert_eq!(inbox.len(), 1);
+    on_screen(cx, window, |window, _| assert!(window.try_find("done-1").is_none()));
+}
+
+#[gpui_kit::test]
+fn run_again_needs_a_second_click_on_the_same_item(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // A second call that a stop cut: item 2.
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let body = bunsin_core::records::InboxBody::ToolCall {
+        tool: "slack/post".into(),
+        args: serde_json::json!({"channel": "C2", "text": "Second."})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    let executing = bunsin_core::approval::ApprovalState::Executing;
+    assert_eq!(store.add_inbox_item("k2", &body, "r", &[], executing, 1).unwrap().id, 2);
+    cut_item_one(&rig);
+    let (window, shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbox-2"), "unknown · slack/post");
+        window.click("retry-2", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-2"), "Yes, run it again");
+        assert_eq!(label(window, "retry-1"), "Run again");
+        // A click on another item asks again, for that item.
+        window.scroll("inbox-1", ScrollDelta::Pixels(point(px(0.), px(-300.))), cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("retry-1", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-1"), "Yes, run it again");
+        assert_eq!(label(window, "retry-2"), "Run again");
+        // A command after the clicks. When it is done, a command of the clicks would be done too.
+        window.click("drop-1", cx);
+    });
+    wait_until(cx, &shell, "item 1 dropped", |s| {
+        s.state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| snap.inbox.iter().any(|i| i.id == 1 && i.state.as_str() == "failed"))
+    });
+    let inbox = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    assert_eq!(inbox.len(), 2);
+    assert!(inbox.iter().any(|i| i.id == 2 && i.state.as_str() == "unknown"));
+    assert!(rig.slack.calls().is_empty());
+
+    // Two clicks on the same item run its call once.
+    on_screen(cx, window, |window, cx| window.click("retry-2", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "retry-2"), "Yes, run it again");
+        window.click("retry-2", cx);
+    });
+    wait_until(cx, &shell, "the executed copy of item 2", |s| {
+        s.state.snapshot.as_ref().is_some_and(|snap| {
+            snap.inbox
+                .iter()
+                .any(|i| i.retry_of == Some(2) && i.state.as_str() == "executed")
+        })
+    });
+    assert_eq!(rig.slack.calls().len(), 1);
+    assert_eq!(rig.slack.calls()[0].1["channel"], "C2");
+}
+
+#[gpui_kit::test]
+fn a_call_that_ran_without_asking_can_be_reported_once(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let mut rules = rt.block_on(rig.engine.permissions("kim")).unwrap().rules;
+    rules.get_mut("slack/post").unwrap().tier = bunsin_core::policy::Tier::Autonomous;
+    let update = bunsin_api::PermissionsUpdate {
+        rules,
+        expected: bunsin_api::Expected::Unchecked,
+    };
+    rt.block_on(rig.engine.set_permissions("kim", update)).unwrap();
+    let call = serde_json::json!({"kind": "tool_call", "rationale": "asked", "summary": null, "tool": "slack/post",
+        "args_json": serde_json::json!({"channel": "C1", "text": "Done."}).to_string()});
+    rig.llm.reply(&call.to_string(), 10);
+    let event = InboundEvent {
+        source: "slack".into(),
+        external_id: "e-auto".into(),
+        thread: None,
+        author: "lee".into(),
+        text: "is it done?".into(),
+        channel: Default::default(),
+    };
+    let bunsin_api::Outcome::Executed { inbox_id: ran } = rt.block_on(rig.engine.ingest("kim", event)).unwrap() else {
+        panic!("expected an autonomous run")
+    };
+    let (window, shell) = open(cx, &rt, &rig);
+    let report = format!("report-{ran}");
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find(report.clone()).is_some());
+        // The waiting call from before asks the owner. It has nothing to report.
+        assert!(window.try_find("report-1").is_none());
+    });
+    let held = |s: &Shell| {
+        s.state
+            .autonomy
+            .as_ref()
+            .is_some_and(|a| a.tools.iter().any(|t| t.tool == "slack/post" && t.held))
+    };
+    on_screen(cx, window, |window, cx| window.click(report.clone(), cx));
+    wait_until(cx, &shell, "the hold after the report", held);
+    on_screen(cx, window, |window, _| {
+        // A held tool has nothing more to report.
+        assert!(window.try_find(report.clone()).is_none());
+        assert_eq!(label(window, "error"), "");
+    });
+    assert!(rt.block_on(rig.engine.autonomy("kim")).unwrap().tools[0].held);
+}
+
+#[gpui_kit::test]
+fn a_coding_call_and_the_result_of_its_job_show_in_the_inbox(cx: &mut TestAppContext) {
+    use bunsin_core::approval::ApprovalState;
+    use bunsin_core::records::InboxBody;
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    // The rows are written beside the engine: the test server runs no coding job.
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let args = serde_json::json!({"repo": "app", "instructions": "Fix the login bug."});
+    let call = InboxBody::ToolCall {
+        tool: "bunsin.coding/start".into(),
+        args: args.as_object().unwrap().clone(),
+    };
+    let pending = store
+        .add_inbox_item(
+            "k-code",
+            &call,
+            "Lee reported a bug",
+            &[],
+            ApprovalState::Pending,
+            1_000,
+        )
+        .unwrap()
+        .id;
+    let summary = "The coding job b7-kim in `app` ended with exit code 0. Branch `agent/b7-kim`: base aaa, head bbb.\n\
+                   Review the branch and merge it yourself. Bunsin never merges.";
+    let result = InboxBody::Escalation {
+        summary: summary.into(),
+    };
+    let rationale = "a coding job ended; review its branch and merge it yourself";
+    let draft = store
+        .add_inbox_item("k-code", &result, rationale, &[], ApprovalState::Draft, 1_001)
+        .unwrap()
+        .id;
+    let (window, _shell) = open(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        let note = window
+            .find(format!("coding-note-{pending}"))
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            note.contains("starts a coding job") && note.contains("never merges"),
+            "{note}"
+        );
+        let detail = window
+            .find(format!("detail-{draft}"))
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            detail.contains("Branch `agent/b7-kim`") && detail.contains("merge it yourself"),
+            "{detail}"
+        );
+        // A post has no coding note.
+        assert!(window.try_find("coding-note-1").is_none());
+    });
 }

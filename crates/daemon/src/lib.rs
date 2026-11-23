@@ -7,17 +7,28 @@
 //! A profile owner chooses the LLM and MCP addresses, and the server sends the requests.
 //! [`UpstreamPolicy`] stops an owner from pointing the server at its own internal network.
 
+pub mod a2a;
+pub mod ard_search;
+pub mod coding;
+pub mod crawl;
+pub mod fetch;
+pub mod inbound;
 pub mod keystore;
+pub mod oauth;
+pub mod registry;
+pub mod rules;
 pub mod server;
+pub mod webhooks;
 
 use bunsin_api::ProfileConfig;
-use bunsin_connectors::{McpConnector, TokenAuth};
-use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_connectors::{ApiAuth, ApiConnector, McpConnector, TokenAuth};
+use bunsin_core::ard::{ARD_CONNECTOR, ArdDomain, ArdRegistry};
+use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::settings::{
-    ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key, env_secret_origin, origin_of,
-    valid_env_name,
+    ApiAuthMethod, ConnectorKind, ConnectorSection, LlmSection, McpConfig, check_token_header, env_secret_key,
+    env_secret_origin, oauth_secret_key, oauth_secret_origin, origin_of, valid_env_name,
 };
-use bunsin_engine::{Backends, ProfileSecrets, Runtime};
+use bunsin_engine::{Backends, OAuthSignIn, ProfileSecrets, Runtime, SecretWriter};
 use bunsin_llm::{ApiToken, HttpLlmClient, LlmConfig};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -126,6 +137,12 @@ pub struct RealBackends {
     /// A stdio connector runs a command on this machine. Off unless the operator allows it.
     allow_stdio: bool,
     upstream: UpstreamPolicy,
+    /// Runs coding jobs. `None` unless the operator allows coding.
+    coder: Option<Arc<coding::RealCoder>>,
+    /// The publisher domains that ARD entries may name, in lower case. Empty: nothing is published.
+    ard_publishers: Vec<String>,
+    /// The OAuth sign-ins that wait for the browser.
+    sign_ins: oauth::SignIns,
 }
 
 impl RealBackends {
@@ -138,7 +155,33 @@ impl RealBackends {
             secrets,
             allow_stdio,
             upstream,
+            coder: None,
+            ard_publishers: Vec::new(),
+            sign_ins: oauth::SignIns::default(),
         }
+    }
+
+    /// Lets profiles publish their inbound endpoint in the ARD catalogs under these domains.
+    /// A domain is letters, digits, `-` and `.`, with at least one `.`.
+    pub fn with_ard_publishers(mut self, domains: &[String]) -> Result<Self, String> {
+        for domain in domains {
+            let domain = domain.trim().to_ascii_lowercase();
+            let valid = domain.contains('.')
+                && domain
+                    .split('.')
+                    .all(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+            if !valid {
+                return Err(format!("--ard-publisher-domain `{domain}` is not a domain name"));
+            }
+            self.ard_publishers.push(domain);
+        }
+        Ok(self)
+    }
+
+    /// Lets profiles run coding jobs on repositories under the root of `access`.
+    pub fn with_coding(mut self, access: coding::CodingAccess) -> Self {
+        self.coder = Some(Arc::new(coding::RealCoder::new(access)));
+        self
     }
 
     /// The token for `key`, to be sent to `address`.
@@ -193,15 +236,16 @@ impl RealBackends {
         if let Some(header) = &section.token_header {
             check_token_header(header).map_err(|e| format!("connector `{name}`: {e}"))?;
         }
-        match &section.mcp {
-            McpConfig::Stdio { .. } if !self.allow_stdio => {
+        section.check_oauth().map_err(|e| format!("connector `{name}`: {e}"))?;
+        match &section.kind {
+            ConnectorKind::Mcp(McpConfig::Stdio { .. }) if !self.allow_stdio => {
                 return Err(format!(
                     "connector `{name}` uses the stdio transport, which runs a command on the server. \
                      The server operator must start the server with --allow-stdio-connectors"
                 ));
             }
             // Every way to store settings and every start of the command passes these checks.
-            McpConfig::Stdio { command, env, .. } => {
+            ConnectorKind::Mcp(McpConfig::Stdio { command, env, .. }) => {
                 if !command.is_absolute() {
                     return Err(format!(
                         "connector `{name}`: the command must be an absolute path, got `{}`",
@@ -220,16 +264,56 @@ impl RealBackends {
                     ));
                 }
             }
-            McpConfig::Http { .. } if !section.secret_env.is_empty() => {
+            _ if !section.secret_env.is_empty() => {
                 return Err(format!(
                     "connector `{name}` has an address. Secret environment variables are for a command"
                 ));
             }
-            McpConfig::Http { url } => self
+            ConnectorKind::Mcp(McpConfig::Http { url }) => self
                 .upstream
                 .check(&format!("the address of connector `{name}`"), url)?,
+            ConnectorKind::Api(api) => {
+                api.check().map_err(|e| format!("connector `{name}`: {e}"))?;
+                if section.token_header.is_some() {
+                    return Err(format!(
+                        "connector `{name}` calls a REST API, which takes its token in `Authorization`"
+                    ));
+                }
+                if section.token_secret.is_none() {
+                    return Err(format!("connector `{name}` calls a REST API, which needs a token"));
+                }
+                self.upstream
+                    .check(&format!("the base URL of connector `{name}`"), &api.base_url)?;
+            }
         }
         Ok(section)
+    }
+
+    /// Checks the addresses of the ARD registries with the same rules as the other addresses.
+    /// Every save and every build of the search passes here.
+    fn ard_registries(&self, registries: &[ArdRegistry]) -> Result<(), String> {
+        for registry in registries {
+            self.upstream.check(
+                &format!("the address of ARD registry `{}`", registry.name),
+                &registry.url,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Checks `https://<domain>/` and the catalog address of each ARD domain with the same rules.
+    /// Every save and every build of the tools passes here.
+    fn ard_domains(&self, domains: &[ArdDomain]) -> Result<(), String> {
+        for entry in domains {
+            let domain = entry.domain();
+            self.upstream
+                .check(&format!("the ARD domain `{domain}`"), &format!("https://{domain}/"))?;
+            if let Some(catalog) = entry.catalog() {
+                self.upstream
+                    .check(&format!("the catalog of ARD domain `{domain}`"), catalog)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn llm(&self, profile: &str, section: &Value, secrets: &ProfileSecrets) -> Result<HttpLlmClient, String> {
@@ -252,26 +336,47 @@ impl RealBackends {
         name: &str,
         section: &Value,
         secrets: &ProfileSecrets,
-    ) -> Result<McpConnector, String> {
+        writer: Option<&Arc<dyn SecretWriter>>,
+    ) -> Result<Arc<dyn Connector>, String> {
         let section = self.connector_section(name, section)?;
-        let address = match &section.mcp {
-            McpConfig::Http { url } => Some(url.as_str()),
-            McpConfig::Stdio { .. } => None,
-        };
+        if section.oauth.is_some() {
+            let connect = self.oauth_connector(name, &section, secrets, writer);
+            return match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+                Ok(result) => result.map(|connector| Arc::new(connector) as Arc<dyn Connector>),
+                Err(_) => Err(format!(
+                    "connector `{name}` did not answer in {} s",
+                    CONNECT_TIMEOUT.as_secs()
+                )),
+            };
+        }
         let token = section
             .token_secret
             .as_deref()
-            .map(|key| self.token(profile, key, address, secrets))
+            .map(|key| self.token(profile, key, section.kind.address(), secrets))
             .transpose()?;
+        let secret_env = stored_env(name, &section, secrets)?;
+        let mcp = match section.kind {
+            ConnectorKind::Mcp(mcp) => mcp,
+            ConnectorKind::Api(api) => {
+                let token = token.expect("connector_section refuses an API connector without a token");
+                let auth = match (api.auth, api.email) {
+                    (ApiAuthMethod::Basic, Some(email)) => ApiAuth::Basic { email, token },
+                    _ => ApiAuth::Bearer(token),
+                };
+                // Each request gets the time limit of an MCP connect.
+                let connector = ApiConnector::new(name, api.service, &api.base_url, auth, CONNECT_TIMEOUT)
+                    .map_err(|e| format!("connector `{name}` cannot start: {e}"))?;
+                return Ok(Arc::new(connector));
+            }
+        };
         // A server that starts but never answers must not block the profile forever.
         let auth = token.as_deref().map(|token| TokenAuth {
             token,
             header: section.token_header.as_deref(),
         });
-        let secret_env = stored_env(name, &section, secrets)?;
-        let connect = McpConnector::connect_with_env(name, section.mcp, auth, &secret_env);
+        let connect = McpConnector::connect_with_env(name, mcp, auth, &secret_env);
         match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
-            Ok(Ok(connector)) => Ok(connector),
+            Ok(Ok(connector)) => Ok(Arc::new(connector)),
             Ok(Err(error)) => Err(format!("connector `{name}` cannot connect: {error}")),
             Err(_) => Err(format!(
                 "connector `{name}` did not answer in {} s",
@@ -281,29 +386,134 @@ impl RealBackends {
     }
 }
 
-impl Backends for RealBackends {
-    fn build<'a>(&'a self, profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
-        Box::pin(async move { self.build_with_secrets(profile, config, &ProfileSecrets::new()).await })
+impl RealBackends {
+    /// Connects an OAuth connector with its sealed credentials. They count only for the origin
+    /// of the connector's present address.
+    async fn oauth_connector(
+        &self,
+        name: &str,
+        section: &ConnectorSection,
+        secrets: &ProfileSecrets,
+        writer: Option<&Arc<dyn SecretWriter>>,
+    ) -> Result<McpConnector, String> {
+        let ConnectorKind::Mcp(McpConfig::Http { url }) = &section.kind else {
+            unreachable!("check_oauth allows OAuth only for an address");
+        };
+        let origin = origin_of(url).ok_or_else(|| format!("the address of connector `{name}` has no origin"))?;
+        let credentials = match secrets.get(&oauth_secret_key(name)) {
+            Some(Ok(stored)) if stored.origin == oauth_secret_origin(name, &origin) => stored.value.clone(),
+            Some(Ok(_)) => {
+                return Err(format!(
+                    "connector `{name}` was signed in for another address: {}",
+                    oauth::SIGN_IN_HINT
+                ));
+            }
+            Some(Err(error)) => return Err(error.clone()),
+            None => {
+                return Err(format!(
+                    "connector `{name}` signs in with OAuth and nobody signed in yet: {}",
+                    oauth::SIGN_IN_HINT
+                ));
+            }
+        };
+        oauth::connect(name, url, &origin, &self.upstream, credentials, writer.cloned())
+            .await
+            .map_err(|error| format!("connector `{name}` cannot connect: {error}"))
     }
 
     /// Builds each client on its own. One that fails holds its reason and does not stop the others.
+    async fn build_all(
+        &self,
+        profile: &str,
+        config: &ProfileConfig,
+        secrets: &ProfileSecrets,
+        writer: Option<&Arc<dyn SecretWriter>>,
+    ) -> Result<Runtime, String> {
+        let llm = self
+            .llm(profile, &config.llm, secrets)
+            .map(|client| Arc::new(client) as Arc<dyn LlmClient>);
+        let mut connectors = BTreeMap::new();
+        for (name, section) in &config.connectors {
+            let connector = self.connector(profile, name, section, secrets, writer).await;
+            connectors.insert(name.clone(), connector);
+        }
+        if !config.ard_registries.is_empty() || !config.ard_domains.is_empty() {
+            let tools = self
+                .ard_registries(&config.ard_registries)
+                .and_then(|()| self.ard_domains(&config.ard_domains))
+                .and_then(|()| ard_search::ArdTools::new(&config.ard_registries, &config.ard_domains, &self.upstream))
+                .map(|tools| Arc::new(tools) as Arc<dyn Connector>);
+            connectors.insert(ARD_CONNECTOR.to_owned(), tools);
+        }
+        Ok(Runtime { llm, connectors })
+    }
+}
+
+impl Backends for RealBackends {
+    fn build<'a>(&'a self, profile: &'a str, config: &'a ProfileConfig) -> BoxFuture<'a, Result<Runtime, String>> {
+        Box::pin(async move { self.build_all(profile, config, &ProfileSecrets::new(), None).await })
+    }
+
+    /// Without a writer, a refreshed OAuth token lives only in the runtime.
     fn build_with_secrets<'a>(
         &'a self,
         profile: &'a str,
         config: &'a ProfileConfig,
         secrets: &'a ProfileSecrets,
     ) -> BoxFuture<'a, Result<Runtime, String>> {
+        Box::pin(async move { self.build_all(profile, config, secrets, None).await })
+    }
+
+    fn build_with_writer<'a>(
+        &'a self,
+        profile: &'a str,
+        config: &'a ProfileConfig,
+        secrets: &'a ProfileSecrets,
+        writer: Arc<dyn SecretWriter>,
+    ) -> BoxFuture<'a, Result<Runtime, String>> {
+        Box::pin(async move { self.build_all(profile, config, secrets, Some(&writer)).await })
+    }
+
+    fn oauth_start<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        section: &'a Value,
+        redirect_uri: &'a str,
+    ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            let llm = self
-                .llm(profile, &config.llm, secrets)
-                .map(|client| Arc::new(client) as Arc<dyn LlmClient>);
-            let mut connectors = BTreeMap::new();
-            for (name, section) in &config.connectors {
-                let connector = self.connector(profile, name, section, secrets).await;
-                connectors.insert(name.clone(), connector.map(|c| Arc::new(c) as Arc<dyn Connector>));
-            }
-            Ok(Runtime { llm, connectors })
+            // The same checks as every save and connect: the address rules and the OAuth rules.
+            let section = self.connector_section(name, section)?;
+            let (ConnectorKind::Mcp(McpConfig::Http { url }), Some(oauth)) = (&section.kind, &section.oauth) else {
+                return Err(format!("connector `{name}` does not sign in with OAuth"));
+            };
+            let origin = origin_of(url).ok_or_else(|| format!("the address of connector `{name}` has no origin"))?;
+            self.sign_ins
+                .start(profile, name, url, origin, oauth, redirect_uri, &self.upstream)
+                .await
         })
+    }
+
+    fn oauth_finish<'a>(
+        &'a self,
+        profile: &'a str,
+        name: &'a str,
+        callback_url: &'a str,
+    ) -> BoxFuture<'a, Result<OAuthSignIn, String>> {
+        Box::pin(async move { self.sign_ins.finish(profile, name, callback_url).await })
+    }
+
+    fn coder(&self) -> Result<Arc<dyn Coder>, String> {
+        match &self.coder {
+            Some(coder) => Ok(coder.clone()),
+            None => {
+                Err("this server does not run coding jobs: its operator did not start it with --allow-coding".into())
+            }
+        }
+    }
+
+    fn ard_publishers(&self) -> Vec<String> {
+        self.ard_publishers.clone()
     }
 
     fn has_server_secret(&self, profile: &str, key: &str) -> bool {
@@ -313,6 +523,21 @@ impl Backends for RealBackends {
     /// Refuses settings that this server will not run. Empty `llm` settings are allowed,
     /// because a profile is set up step by step.
     fn validate(&self, profile: &str, config: &ProfileConfig) -> Result<(), String> {
+        if let Some(settings) = &config.coding {
+            let coder = self.coder.as_ref().ok_or(
+                "the settings have `coding`, but the server operator did not start the server with --allow-coding",
+            )?;
+            coder.check_settings(settings)?;
+        }
+        if let Some(ard) = &config.inbound.ard
+            && !self.ard_publishers.contains(&ard.publisher.trim().to_ascii_lowercase())
+        {
+            return Err(format!(
+                "the server operator does not allow the ARD publisher domain `{}`: \
+                 the server must start with --ard-publisher-domain {}",
+                ard.publisher, ard.publisher
+            ));
+        }
         if !config.llm.is_null() {
             secret_env_name(profile, &self.llm_section(&config.llm)?.token_secret)?;
         }
@@ -321,7 +546,8 @@ impl Backends for RealBackends {
                 secret_env_name(profile, &key)?;
             }
         }
-        Ok(())
+        self.ard_registries(&config.ard_registries)?;
+        self.ard_domains(&config.ard_domains)
     }
 }
 
@@ -482,7 +708,7 @@ mod tests {
             "transport": "stdio", "command": "/usr/bin/touch", "args": [marker.to_str().unwrap()], "env": {}
         }});
         let error = backends(&[], false)
-            .connector("kim", "slack", &stdio, &ProfileSecrets::new())
+            .connector("kim", "slack", &stdio, &ProfileSecrets::new(), None)
             .await
             .err()
             .unwrap();
@@ -521,7 +747,7 @@ mod tests {
         let b = backends(&[("BUNSIN_SECRET_KIM__SLACK", "xoxb-s3cret")], true);
         let relative = json!({"mcp": {"transport": "stdio", "command": "slack-mcp", "args": [], "env": {}}});
         let error = b
-            .connector("kim", "slack", &relative, &ProfileSecrets::new())
+            .connector("kim", "slack", &relative, &ProfileSecrets::new(), None)
             .await
             .err()
             .unwrap();
@@ -541,7 +767,7 @@ mod tests {
         );
         let dead = json!({"mcp": {"transport": "http", "url": "http://127.0.0.1:1/mcp"}, "token_secret": "SLACK"});
         let error = b
-            .connector("kim", "slack", &dead, &ProfileSecrets::new())
+            .connector("kim", "slack", &dead, &ProfileSecrets::new(), None)
             .await
             .err()
             .unwrap();
@@ -550,7 +776,7 @@ mod tests {
 
         let missing = json!({"mcp": {"transport": "http", "url": "http://127.0.0.1:1/mcp"}, "token_secret": "JIRA"});
         let error = b
-            .connector("kim", "slack", &missing, &ProfileSecrets::new())
+            .connector("kim", "slack", &missing, &ProfileSecrets::new(), None)
             .await
             .err()
             .unwrap();
@@ -636,7 +862,7 @@ mod tests {
         // Settings that were stored earlier are refused at use, before any request is sent.
         assert!(b.llm("kim", &llm, &ProfileSecrets::new()).is_err());
         let error = b
-            .connector("kim", "jira", &mcp, &ProfileSecrets::new())
+            .connector("kim", "jira", &mcp, &ProfileSecrets::new(), None)
             .await
             .err()
             .unwrap();

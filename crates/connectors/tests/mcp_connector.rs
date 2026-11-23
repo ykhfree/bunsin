@@ -368,3 +368,92 @@ async fn a_redirect_is_not_followed_and_the_token_does_not_reach_the_other_host(
     assert!(matches!(error, ConnectorError::Transport(_)), "{error:?}");
     assert_eq!(with_token.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn a_call_that_does_not_end_in_time_is_cancelled_on_the_server() {
+    let server = TestServer::default();
+    *server.hang.lock().unwrap() = true;
+    let limit = Duration::from_millis(300);
+    let connector = connect_http(&server).await.with_call_timeout(limit);
+
+    let started = std::time::Instant::now();
+    // The outer limit only stops a hung test. The connector must end the call first.
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        connector.call_tool("echo", args(json!({"text": "hi"}))),
+    )
+    .await
+    .expect("the call must end at the connector's time limit")
+    .unwrap_err();
+    assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+    // The call was sent, so the server may have done it. The engine must not treat it as failed.
+    match &error {
+        ConnectorError::Unanswered(text) => assert!(
+            text.contains("`echo` did not end in 0.3 s") && text.contains("may have done it"),
+            "{text}"
+        ),
+        other => panic!("expected an unanswered call, got {other:?}"),
+    }
+
+    // The server hears that the client gave up on the call.
+    wait_for_cancels(&server, 1).await;
+
+    // The session stays usable.
+    *server.hang.lock().unwrap() = false;
+    let result = connector
+        .call_tool("echo", args(json!({"text": "again"})))
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"text": "again"}));
+}
+
+/// Waits until the server has seen `n` cancelled requests. Fails after 5 seconds.
+async fn wait_for_cancels(server: &TestServer, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while *server.cancelled.lock().unwrap() < n {
+        assert!(std::time::Instant::now() < deadline, "the server was not told");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_tool_list_that_does_not_end_in_time_is_cancelled_too() {
+    let server = TestServer::default();
+    let limit = Duration::from_millis(300);
+    let connector = connect_http(&server).await.with_call_timeout(limit);
+    *server.hang_list.lock().unwrap() = true;
+
+    // The list alone, as the engine asks for it before a call.
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(Duration::from_secs(10), connector.list_tools())
+        .await
+        .expect("the list must end at the connector's time limit")
+        .unwrap_err();
+    assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
+    assert_eq!(
+        error,
+        ConnectorError::Transport("the tool list did not end in 0.3 s and was cancelled".into())
+    );
+    wait_for_cancels(&server, 1).await;
+
+    // A call lists first. The tool never runs.
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        connector.call_tool("echo", args(json!({"text": "hi"}))),
+    )
+    .await
+    .expect("the call must end at the connector's time limit")
+    .unwrap_err();
+    // The call itself was not sent, so it did not run.
+    assert_eq!(
+        error,
+        ConnectorError::Transport(
+            "the tool list before the call of `echo` did not end in 0.3 s; the call was not sent".into()
+        )
+    );
+    wait_for_cancels(&server, 2).await;
+    assert!(calls(&server).is_empty());
+
+    *server.hang_list.lock().unwrap() = false;
+    assert_eq!(connector.list_tools().await.unwrap().len(), 5);
+}

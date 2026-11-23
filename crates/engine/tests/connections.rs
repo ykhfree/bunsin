@@ -4,7 +4,7 @@ mod common;
 
 use bunsin_api::{ApiError, ConnectorUpdate, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource};
 use bunsin_core::ports::BoxFuture;
-use bunsin_core::settings::{McpConfig, Wire};
+use bunsin_core::settings::{ConnectorKind, McpConfig, Wire};
 use bunsin_engine::{Backends, Engine, ProfileSecrets, Runtime};
 use common::*;
 use std::sync::{Arc, Mutex};
@@ -56,10 +56,10 @@ async fn a_saved_token_is_reported_as_stored_and_is_nowhere_in_plain_text() {
     );
     let jira = &connections.connectors["jira"];
     assert_eq!(
-        jira.mcp,
-        McpConfig::Http {
+        jira.kind,
+        ConnectorKind::Mcp(McpConfig::Http {
             url: "https://mcp.example/jira".into()
-        }
+        })
     );
     assert_eq!(jira.token, TokenSource::Stored);
 
@@ -459,7 +459,7 @@ async fn a_connector_that_runs_as_a_command_is_not_replaced_by_an_address() {
         stdio
     );
     assert!(matches!(
-        rig.engine.connections("kim").await.unwrap().connectors["wiki"].mcp,
-        McpConfig::Stdio { .. }
+        rig.engine.connections("kim").await.unwrap().connectors["wiki"].kind,
+        ConnectorKind::Mcp(McpConfig::Stdio { .. })
     ));
 }

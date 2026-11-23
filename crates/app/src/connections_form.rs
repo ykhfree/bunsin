@@ -6,10 +6,13 @@ use crate::bridge::{ConnectionResult, SaveError, UiCommand, UiState};
 use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
 use crate::theme::{card, field, palette, quiet};
 use bunsin_api::{
-    CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection, LlmUpdate, SecretChange,
-    TokenChange, TokenSource, ToolsReport,
+    ApiConnectorUpdate, CommandConnectorUpdate, ConnectorConnection, ConnectorUpdate, Expected, LlmConnection,
+    LlmUpdate, OAuthState, SecretChange, TokenChange, TokenSource, ToolsReport,
 };
-use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, McpConfig, Wire, default_timeout_secs};
+use bunsin_core::settings::{
+    ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ApiAuthMethod, ApiConfig, ApiService, ConnectorKind, McpConfig,
+    SLACK_BASE_URL, Wire, default_timeout_secs,
+};
 use bunsin_core::tool::pin;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
@@ -32,7 +35,9 @@ const HELP: &str = "Leave a token field empty to keep the stored token. \
     The server never sends a token back.";
 const COMMAND_HELP: &str = "The server starts this program and talks to it. \
     The operator of the server must allow that: the server starts with --allow-stdio-connectors.";
-const KIND_TAKEN: &str = "A connector with this name is of the other kind. Remove it first, or use another name.";
+const KIND_TAKEN: &str = "A connector with this name is of another kind. Remove it first, or use another name.";
+const API_HELP: &str = "The server calls the REST API itself, with fixed tools to search, read and add. \
+    No tool deletes. Approve the tools and give each a rule, as for an MCP server.";
 const SECRET_HELP: &str = "Secret variables, such as an API token. The server encrypts each value, \
     gives it to the program, and does not show it again.";
 const SECRET_FIELDS: &str = "Enter the name and the value of the secret variable.";
@@ -49,10 +54,77 @@ enum Kind {
     Address,
     /// A program that the server starts.
     Command,
+    /// The REST API of Slack, Jira Cloud or Confluence Cloud.
+    Api,
+}
+
+impl Kind {
+    fn of(connector: &ConnectorKind) -> Self {
+        match connector {
+            ConnectorKind::Mcp(McpConfig::Http { .. }) => Kind::Address,
+            ConnectorKind::Mcp(McpConfig::Stdio { .. }) => Kind::Command,
+            ConnectorKind::Api(_) => Kind::Api,
+        }
+    }
+}
+
+/// The services of a REST API connector, in the order of the choices on screen.
+const SERVICES: [(ApiService, &str); 3] = [
+    (ApiService::Slack, "Slack"),
+    (ApiService::Jira, "Jira Cloud"),
+    (ApiService::Confluence, "Confluence Cloud"),
+];
+
+/// The auth methods of a REST API connector, in the order of the choices on screen.
+const AUTH_METHODS: [(ApiAuthMethod, &str); 2] = [
+    (ApiAuthMethod::Bearer, "Bearer token"),
+    (ApiAuthMethod::Basic, "Email and API token"),
+];
+
+/// The name of a service on screen.
+fn service_text(service: ApiService) -> &'static str {
+    SERVICES
+        .iter()
+        .find(|(each, _)| *each == service)
+        .map(|(_, text)| *text)
+        .expect("SERVICES names every service")
+}
+
+/// The token field that the Keychain fields fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeychainTarget {
+    Llm,
+    /// The token of the connector in the connector form.
+    Connector,
 }
 
 /// The kinds, in the order of the choices on screen.
-const KINDS: [(Kind, &str); 2] = [(Kind::Address, "Address"), (Kind::Command, "Command on the server")];
+const KINDS: [(Kind, &str); 3] = [
+    (Kind::Address, "Address"),
+    (Kind::Command, "Command on the server"),
+    (Kind::Api, "REST API"),
+];
+
+/// True for an https address, or an http address on this computer. Only such an address of a
+/// sign-in is opened: another scheme (`smb:`, `file:`, an app's own scheme) would start a program.
+fn is_web_address(address: &str) -> bool {
+    if address.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = address.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // A user part could hide the real host: `http://127.0.0.1@example.com`.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
+}
 
 /// The arguments in the text of the form: one in each line. Empty lines are no arguments.
 /// A line is used as it is, so an argument can hold spaces. Quotes are not removed.
@@ -124,6 +196,17 @@ const SAVE_FIRST: &str = "Save the endpoint first. The test uses the saved setti
 const TESTING: &str = "Testing… One short request goes to the endpoint. It waits for the answer up to the timeout.";
 const TYPED_TOKEN: &str = "Empty the token field first, or save the token.";
 const APPROVE_NOTE: &str = "Approving tools does not create permission rules.";
+const SIGN_IN_WAITING: &str = "Sign in in the browser. The window waits 10 minutes for it. \
+    If no browser opened, open this address:";
+const SIGNED_IN: &str = "Signed in. Check lists the tools with the new sign-in.";
+
+/// How the row of an OAuth connector shows its sign-in.
+pub fn oauth_text(state: OAuthState) -> &'static str {
+    match state {
+        OAuthState::SignedIn => "signed in with OAuth",
+        OAuthState::SignInNeeded => "OAuth sign-in needed",
+    }
+}
 
 pub struct ConnectionsForm {
     /// The profile that the drafts belong to. None until the server's connections arrive.
@@ -137,17 +220,24 @@ pub struct ConnectionsForm {
     name: Entity<InputState>,
     address: Entity<InputState>,
     token: Entity<InputState>,
-    /// The service and the account of a Keychain item that holds the LLM token.
+    /// The service and the account of a Keychain item that holds a token.
     keychain_service: Entity<InputState>,
     keychain_account: Entity<InputState>,
     /// What the last read of the Keychain did.
     keychain_message: Option<String>,
-    /// True while the Keychain fields are shown. Most owners type the token, so they start hidden.
-    keychain_open: bool,
+    /// The token field whose Keychain fields are shown. Most owners type the token, so they start hidden.
+    keychain_open: Option<KeychainTarget>,
     /// The header that carries the connector's token. Empty: `Authorization: Bearer`.
     token_header: Entity<InputState>,
-    /// Whether the connector draft is an address or a command.
+    /// Whether the connector draft is an address, a command or a REST API.
     kind: Kind,
+    /// The service and the auth method of a REST API draft.
+    api_service: ApiService,
+    api_auth: ApiAuthMethod,
+    /// The base URL of a REST API draft.
+    api_base: Entity<InputState>,
+    /// The account email of basic auth.
+    api_email: Entity<InputState>,
     /// The absolute path of the program of a command connector.
     command: Entity<InputState>,
     /// The arguments of the command, one in each line.
@@ -255,9 +345,13 @@ impl ConnectionsForm {
             keychain_service: input("Where, for example api.anthropic.com", window, cx),
             keychain_account: input("Account", window, cx),
             keychain_message: None,
-            keychain_open: false,
+            keychain_open: None,
             token_header: input("Authorization: Bearer", window, cx),
             kind: Kind::Address,
+            api_service: ApiService::Slack,
+            api_auth: ApiAuthMethod::Bearer,
+            api_base: input(SLACK_BASE_URL, window, cx),
+            api_email: input("you@example.com", window, cx),
             command: input("/usr/local/bin/npx", window, cx),
             args: cx.new(|cx| TextareaState::new(window, cx).placeholder("-y\nsome-mcp-server")),
             env: cx.new(|cx| TextareaState::new(window, cx).placeholder("REGION=eu")),
@@ -298,6 +392,9 @@ impl ConnectionsForm {
             self.load_connector("", None, window, cx);
         }
         match result {
+            // The page opens once, when the start arrives. The row shows the address too.
+            // The server refuses other schemes; this check holds if the server does not.
+            Some(ConnectionResult::SignInStarted { result: Ok(url), .. }) if is_web_address(url) => cx.open_url(url),
             Some(ConnectionResult::LlmSaved(Err(SaveError::Conflict))) => self.llm_conflict = true,
             Some(ConnectionResult::ConnectorSaved {
                 name,
@@ -309,10 +406,12 @@ impl ConnectionsForm {
         if llm_saved {
             // The token is on the server now, even if the reload after the save failed.
             set(&self.llm_token, "", window, cx);
-            self.clear_keychain(window, cx);
+            if self.keychain_open == Some(KeychainTarget::Llm) {
+                self.clear_keychain(window, cx);
+            }
         }
         if matches!(result, Some(ConnectionResult::ConnectorSaved { result: Ok(()), .. })) {
-            // The form is empty for the next connector.
+            // The form is empty for the next connector. Loading it also hides its Keychain fields.
             self.load_connector("", None, window, cx);
         }
         let (Some(profile), Some(connections)) = (&state.selected, &state.connections) else {
@@ -379,18 +478,26 @@ impl ConnectionsForm {
     ) {
         let (mut address, mut header, mut command) = ("", "", String::new());
         let (mut args, mut env) = (String::new(), String::new());
-        match connector.map(|connector| (&connector.mcp, connector)) {
-            Some((McpConfig::Http { url }, connector)) => {
+        let (mut base, mut email) = ("", "");
+        match connector.map(|connector| (&connector.kind, connector)) {
+            Some((ConnectorKind::Mcp(McpConfig::Http { url }), connector)) => {
                 self.kind = Kind::Address;
                 address = url;
                 header = connector.token_header.as_deref().unwrap_or_default();
             }
+            Some((ConnectorKind::Api(api), _)) => {
+                self.kind = Kind::Api;
+                self.api_service = api.service;
+                self.api_auth = api.auth;
+                base = &api.base_url;
+                email = api.email.as_deref().unwrap_or_default();
+            }
             Some((
-                McpConfig::Stdio {
+                ConnectorKind::Mcp(McpConfig::Stdio {
                     command: path,
                     args: stored_args,
                     env: stored_env,
-                },
+                }),
                 _,
             )) => match command_texts(stored_args, stored_env) {
                 Some(texts) => {
@@ -409,6 +516,8 @@ impl ConnectionsForm {
         }
         set(&self.name, if connector.is_some() { name } else { "" }, window, cx);
         set(&self.address, address, window, cx);
+        set(&self.api_base, base, window, cx);
+        set(&self.api_email, email, window, cx);
         set(&self.token, "", window, cx);
         set(&self.token_header, header, window, cx);
         set(&self.command, &command, window, cx);
@@ -426,6 +535,10 @@ impl ConnectionsForm {
             .unwrap_or_default();
         set(&self.secret_name, "", window, cx);
         set(&self.secret_value, "", window, cx);
+        // A message about a token that was copied into the emptied field would be wrong now.
+        if self.keychain_open == Some(KeychainTarget::Connector) {
+            self.clear_keychain(window, cx);
+        }
         self.connector_base = connector.map(|c| (name.to_owned(), c.clone()));
         self.connector_message = None;
         self.connector_conflict = None;
@@ -461,7 +574,26 @@ impl ConnectionsForm {
         set(&self.keychain_service, "", window, cx);
         set(&self.keychain_account, "", window, cx);
         self.keychain_message = None;
-        self.keychain_open = false;
+        self.keychain_open = None;
+    }
+
+    /// Shows the Keychain fields for `target`, or hides them if they are shown for it.
+    /// The fields keep their text, so the owner can read the same item for the other token.
+    fn toggle_keychain(&mut self, target: KeychainTarget) {
+        self.keychain_message = None;
+        self.keychain_open = if self.keychain_open == Some(target) {
+            None
+        } else {
+            Some(target)
+        };
+    }
+
+    /// The token field that the Keychain fields fill.
+    fn keychain_field(&self, target: KeychainTarget) -> &Entity<InputState> {
+        match target {
+            KeychainTarget::Llm => &self.llm_token,
+            KeychainTarget::Connector => &self.token,
+        }
     }
 
     /// True if the LLM fields are not the endpoint `llm` of the server, or the server has none.
@@ -481,14 +613,17 @@ impl ConnectionsForm {
     fn connector_untouched(&self, cx: &App) -> bool {
         self.connector_base.as_ref().is_some_and(|(name, base)| {
             text(&self.name, cx) == *name
-                && match &base.mcp {
-                    McpConfig::Http { url } => {
+                && match &base.kind {
+                    ConnectorKind::Api(api) => {
+                        self.kind == Kind::Api && self.api_config(cx) == *api && text(&self.token, cx).is_empty()
+                    }
+                    ConnectorKind::Mcp(McpConfig::Http { url }) => {
                         self.kind == Kind::Address
                             && *url == text(&self.address, cx)
                             && text(&self.token, cx).is_empty()
                             && base.token_header.as_deref().unwrap_or_default() == text(&self.token_header, cx)
                     }
-                    McpConfig::Stdio { command, args, env } => {
+                    ConnectorKind::Mcp(McpConfig::Stdio { command, args, env }) => {
                         self.kind == Kind::Command
                             && command.display().to_string() == text(&self.command, cx)
                             && *args == parse_args(&Self::raw(&self.args, cx))
@@ -501,6 +636,42 @@ impl ConnectionsForm {
                     }
                 }
         })
+    }
+}
+
+impl ConnectionsForm {
+    /// The REST API settings of the draft. Bearer auth has no email.
+    fn api_config(&self, cx: &App) -> ApiConfig {
+        let email = text(&self.api_email, cx);
+        ApiConfig {
+            service: self.api_service,
+            base_url: text(&self.api_base, cx),
+            auth: self.api_auth,
+            email: (self.api_auth == ApiAuthMethod::Basic && !email.is_empty()).then_some(email),
+        }
+    }
+
+    /// Changes the kind of the draft. A REST API draft starts with the base URL of its service if it has one.
+    fn choose_kind(&mut self, kind: Kind, window: &mut Window, cx: &mut App) {
+        self.kind = kind;
+        if kind == Kind::Api {
+            self.choose_service(self.api_service, window, cx);
+        }
+    }
+
+    /// Changes the service. Slack has one base URL and takes only a bearer token, so the form
+    /// fills them in. The Slack address goes when another service is chosen. Text that the user typed stays.
+    fn choose_service(&mut self, service: ApiService, window: &mut Window, cx: &mut App) {
+        let base = text(&self.api_base, cx);
+        if service == ApiService::Slack {
+            self.api_auth = ApiAuthMethod::Bearer;
+            if base.is_empty() {
+                set(&self.api_base, SLACK_BASE_URL, window, cx);
+            }
+        } else if base == SLACK_BASE_URL {
+            set(&self.api_base, "", window, cx);
+        }
+        self.api_service = service;
     }
 }
 
@@ -562,7 +733,7 @@ impl Shell {
             .connections
             .as_ref()
             .and_then(|c| c.connectors.get(&name))
-            .is_some_and(|c| matches!(c.mcp, McpConfig::Stdio { .. }) != (form.kind == Kind::Command));
+            .is_some_and(|c| Kind::of(&c.kind) != form.kind);
         if other_kind {
             form.connector_message = Some(KIND_TAKEN);
             return;
@@ -606,6 +777,15 @@ impl Shell {
         form.connector_message = None;
         form.connector_conflict = None;
         form.connector_remove_token = remove_token;
+        if form.kind == Kind::Api {
+            let update = ApiConnectorUpdate {
+                api: form.api_config(cx),
+                token,
+                expected,
+            };
+            self.send(UiCommand::SaveApiConnector { profile, name, update });
+            return;
+        }
         let update = ConnectorUpdate {
             url: text(&form.address, cx),
             token,
@@ -615,10 +795,14 @@ impl Shell {
         self.send(UiCommand::SaveConnector { profile, name, update });
     }
 
-    /// Copies the password of the named Keychain item into the masked token field.
-    /// Nothing goes to the server before Save.
+    /// Copies the password of the named Keychain item into the masked token field that the
+    /// Keychain fields are open for. Nothing goes to the server before Save.
     fn read_keychain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let form = &mut self.connections;
+        let Some(target) = form.keychain_open else {
+            return;
+        };
+        let field = form.keychain_field(target).clone();
         let service = text(&form.keychain_service, cx).trim().to_owned();
         let account = text(&form.keychain_account, cx).trim().to_owned();
         if service.is_empty() || account.is_empty() {
@@ -628,18 +812,86 @@ impl Shell {
         let found = self.keychain.password(&service, &account);
         // A token from an earlier read must not stay in the field beside "was not read".
         if !matches!(&found, Ok(password) if !password.trim().is_empty()) {
-            set(&form.llm_token, "", window, cx);
+            set(&field, "", window, cx);
         }
         form.keychain_message = Some(match found {
             Ok(password) if password.trim().is_empty() => KEYCHAIN_EMPTY.to_owned(),
             Ok(password) => {
                 // A save reads every field without the space around its text, so a line end
                 // after the password does not reach the server.
-                set(&form.llm_token, &password, window, cx);
+                set(&field, &password, window, cx);
                 KEYCHAIN_READ.to_owned()
             }
             Err(error) => format!("The token was not read: {error}."),
         });
+    }
+
+    /// The button that shows or hides the Keychain fields of one token field.
+    fn keychain_toggle(&self, id: &'static str, target: KeychainTarget, cx: &Context<Self>) -> impl IntoElement {
+        Button::new(id)
+            .self_start()
+            .small()
+            .ghost()
+            .label(if self.connections.keychain_open == Some(target) {
+                "Hide the Keychain fields"
+            } else {
+                "Copy the token from the Keychain"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.connections.toggle_keychain(target);
+                cx.notify();
+            }))
+    }
+
+    /// The Keychain fields, if they are open for `target`. Only one set is on screen at a time.
+    fn keychain_fields(&self, target: KeychainTarget, cx: &Context<Self>) -> Option<Div> {
+        let form = &self.connections;
+        (form.keychain_open == Some(target)).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(labelled_as("keychain-help", KEYCHAIN_HELP, quiet(KEYCHAIN_HELP, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_2()
+                        .child(
+                            field(
+                                "Where (service)",
+                                Input::new(&form.keychain_service)
+                                    .id("keychain-service")
+                                    .aria_label("Keychain service"),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            field(
+                                "Account",
+                                Input::new(&form.keychain_account)
+                                    .id("keychain-account")
+                                    .aria_label("Keychain account"),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            Button::new("read-keychain")
+                                .outline()
+                                .label("Read from Keychain")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.read_keychain(window, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(labelled(
+                    "keychain-message",
+                    form.keychain_message.clone().unwrap_or_default(),
+                )))
+        })
     }
 
     /// Tests the saved endpoint. A draft is not tested, so the form must equal the server's settings.
@@ -702,15 +954,26 @@ impl Shell {
                     .font_weight(FontWeight::MEDIUM)
                     .child(SharedString::from(name.to_owned())),
             ));
-        match &connector.mcp {
-            McpConfig::Http { url } => {
+        match &connector.kind {
+            ConnectorKind::Api(api) => {
+                let calls = format!("calls the {} REST API at {}", service_text(api.service), api.base_url);
+                let token = match &api.email {
+                    Some(email) => format!("{} for {email}", token_text(connector.token)),
+                    None => token_text(connector.token).to_owned(),
+                };
+                row = row
+                    .child(labelled_as("address", calls.clone(), quiet(calls, cx)))
+                    .child(labelled_as("token", token.clone(), quiet(token, cx)));
+            }
+            ConnectorKind::Mcp(McpConfig::Http { url }) => {
+                // An OAuth connector has no token. It shows its sign-in instead.
+                let (id, access) = match &connector.oauth {
+                    Some(oauth) => ("oauth", oauth_text(oauth.state)),
+                    None => ("token", token_text(connector.token)),
+                };
                 row = row
                     .child(labelled_as("address", url.clone(), quiet(url.clone(), cx)))
-                    .child(labelled_as(
-                        "token",
-                        token_text(connector.token),
-                        quiet(token_text(connector.token), cx),
-                    ))
+                    .child(labelled_as(id, access, quiet(access, cx)))
                     .children(connector.token_header.as_ref().map(|header| {
                         let text = format!("sent in the header {header}");
                         labelled_as("token-header", text.clone(), quiet(text, cx))
@@ -718,13 +981,26 @@ impl Shell {
             }
             // The row shows the program and how much it gets. The arguments and the variables can
             // hold a secret, so they are shown only in the form, after Edit.
-            McpConfig::Stdio { command, args, env } => {
+            ConnectorKind::Mcp(McpConfig::Stdio { command, args, env }) => {
                 let runs = format!("runs the command {}", command.display());
                 let counts = counts_text(args.len(), env.len(), connector.secret_env.len());
                 row = row
                     .child(labelled_as("address", runs.clone(), quiet(runs, cx)))
                     .child(labelled_as("command-counts", counts.clone(), quiet(counts, cx)));
             }
+        }
+        if connector.oauth.is_some() {
+            let sign_in = UiCommand::SignIn {
+                profile: profile.to_owned(),
+                name: name.to_owned(),
+            };
+            buttons = buttons.child(
+                Button::new("sign-in")
+                    .small()
+                    .outline()
+                    .label("Sign in")
+                    .on_click(send(sign_in)),
+            );
         }
         let (edit_name, edited) = (name.to_owned(), connector.clone());
         let remove = UiCommand::RemoveConnector {
@@ -770,6 +1046,20 @@ impl Shell {
                 }
                 Err(error) => row = row.child(labelled("tools", error.clone())),
             },
+            Some(ConnectionResult::SignInStarted { name: started, result }) if started == name => {
+                let text = match result {
+                    Ok(url) => format!("{SIGN_IN_WAITING} {url}"),
+                    Err(error) => error.clone(),
+                };
+                row = row.child(labelled("sign-in-result", text));
+            }
+            Some(ConnectionResult::SignedIn { name: signed, result }) if signed == name => {
+                let text = match result {
+                    Ok(()) => SIGNED_IN.to_owned(),
+                    Err(error) => error.clone(),
+                };
+                row = row.child(labelled("sign-in-result", text));
+            }
             Some(ConnectionResult::ToolsApproved { name: approved, result }) if approved == name => {
                 let text = match result {
                     Ok(()) => "Tools approved".to_owned(),
@@ -794,12 +1084,18 @@ impl Shell {
             .flex()
             .flex_col()
             .gap_4();
-        let form = &self.connections;
-        let (Some(server), Some(profile)) = (&self.state.connections, &form.profile) else {
-            return section;
-        };
+        match (self.llm_card(cx), self.connectors_card(cx)) {
+            (Some(llm), Some(connectors)) => section.child(llm).child(connectors),
+            _ => section,
+        }
+    }
 
-        // The LLM endpoint.
+    /// The LLM endpoint with Save and Test, while the server's connections are known.
+    pub(crate) fn llm_card(&self, cx: &Context<Self>) -> Option<Div> {
+        let form = &self.connections;
+        let (Some(server), Some(_)) = (&self.state.connections, &form.profile) else {
+            return None;
+        };
         let llm = server.llm.as_ref();
         let llm_token = llm.map_or(TokenSource::None, |llm| llm.token);
         let llm_changed = form.llm_differs(llm, cx);
@@ -858,67 +1154,8 @@ impl Shell {
                     cx,
                 ))
                 // The Keychain fields open on request. Closed, they take one line.
-                .child(
-                    Button::new("open-keychain")
-                        .self_start()
-                        .small()
-                        .ghost()
-                        .label(if form.keychain_open {
-                            "Hide the Keychain fields"
-                        } else {
-                            "Copy the token from the Keychain"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.connections.keychain_open = !this.connections.keychain_open;
-                            cx.notify();
-                        })),
-                )
-                .children(form.keychain_open.then(|| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(labelled_as("keychain-help", KEYCHAIN_HELP, quiet(KEYCHAIN_HELP, cx)))
-                        .child(
-                            div()
-                                .flex()
-                                .items_end()
-                                .gap_2()
-                                .child(
-                                    field(
-                                        "Where (service)",
-                                        Input::new(&form.keychain_service)
-                                            .id("keychain-service")
-                                            .aria_label("Keychain service"),
-                                        cx,
-                                    )
-                                    .flex_1(),
-                                )
-                                .child(
-                                    field(
-                                        "Account",
-                                        Input::new(&form.keychain_account)
-                                            .id("keychain-account")
-                                            .aria_label("Keychain account"),
-                                        cx,
-                                    )
-                                    .flex_1(),
-                                )
-                                .child(
-                                    Button::new("read-keychain")
-                                        .outline()
-                                        .label("Read from Keychain")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.read_keychain(window, cx);
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(labelled(
-                            "keychain-message",
-                            form.keychain_message.clone().unwrap_or_default(),
-                        )))
-                }))
+                .child(self.keychain_toggle("open-keychain", KeychainTarget::Llm, cx))
+                .children(self.keychain_fields(KeychainTarget::Llm, cx))
                 .child(labelled_as(
                     "llm-token-state",
                     token_text(llm_token),
@@ -982,7 +1219,16 @@ impl Shell {
                     cx,
                 )
             }));
+        Some(llm_section)
+    }
 
+    /// The saved connectors with Check, and the form that adds or changes one,
+    /// while the server's connections are known.
+    pub(crate) fn connectors_card(&self, cx: &Context<Self>) -> Option<Div> {
+        let form = &self.connections;
+        let (Some(server), Some(profile)) = (&self.state.connections, &form.profile) else {
+            return None;
+        };
         // The saved connectors, each in its own ID scope.
         let rows: Vec<_> = server
             .connectors
@@ -1005,7 +1251,7 @@ impl Shell {
         let selected_kind = KINDS.iter().position(|(kind, _)| *kind == form.kind);
         // Only the fields of the chosen kind are shown.
         let kind_fields: Vec<AnyElement> = match form.kind {
-            Kind::Address => vec![
+            Kind::Address => [
                 field(
                     "Address of the MCP server",
                     Input::new(&form.address)
@@ -1030,7 +1276,79 @@ impl Shell {
                     cx,
                 )
                 .into_any_element(),
-            ],
+                self.keychain_toggle("open-connector-keychain", KeychainTarget::Connector, cx)
+                    .into_any_element(),
+            ]
+            .into_iter()
+            // The Keychain fields of the connector token, while they are open.
+            .chain(
+                self.keychain_fields(KeychainTarget::Connector, cx)
+                    .map(IntoElement::into_any_element),
+            )
+            .collect(),
+            Kind::Api => {
+                let service = SERVICES.iter().position(|(each, _)| *each == form.api_service);
+                let auth = AUTH_METHODS.iter().position(|(each, _)| *each == form.api_auth);
+                let mut fields = vec![
+                    labelled_as("api-help", API_HELP, quiet(API_HELP, cx)).into_any_element(),
+                    RadioGroup::horizontal("api-service")
+                        .selected_index(service)
+                        .children(SERVICES.map(|(_, label)| label))
+                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                            this.connections.choose_service(SERVICES[*ix].0, window, cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    field(
+                        "Base URL: https://slack.com/api, or your Atlassian site",
+                        Input::new(&form.api_base).id("api-base-url").aria_label("Base URL"),
+                        cx,
+                    )
+                    .into_any_element(),
+                ];
+                // Slack takes only a bearer token, so the choice is shown for Jira and Confluence.
+                if form.api_service != ApiService::Slack {
+                    fields.push(
+                        RadioGroup::horizontal("api-auth")
+                            .selected_index(auth)
+                            .children(AUTH_METHODS.map(|(_, label)| label))
+                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                this.connections.api_auth = AUTH_METHODS[*ix].0;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                if form.api_auth == ApiAuthMethod::Basic {
+                    fields.push(
+                        field(
+                            "Email of the Atlassian account",
+                            Input::new(&form.api_email).id("api-email").aria_label("Account email"),
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                }
+                fields.push(
+                    field(
+                        "Token. Leave it empty to keep the stored token.",
+                        Input::new(&form.token)
+                            .id("connector-token")
+                            .aria_label("Connector token"),
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                fields.push(
+                    self.keychain_toggle("open-connector-keychain", KeychainTarget::Connector, cx)
+                        .into_any_element(),
+                );
+                fields.extend(
+                    self.keychain_fields(KeychainTarget::Connector, cx)
+                        .map(IntoElement::into_any_element),
+                );
+                fields
+            }
             Kind::Command => {
                 // The rows name each secret variable. A value is never on screen.
                 let secret_rows: Vec<AnyElement> = form
@@ -1150,8 +1468,8 @@ impl Shell {
                 RadioGroup::horizontal("connector-kind")
                     .selected_index(selected_kind)
                     .children(KINDS.map(|(_, label)| label))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.connections.kind = KINDS[*ix].0;
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.connections.choose_kind(KINDS[*ix].0, window, cx);
                         cx.notify();
                     })),
             )
@@ -1171,7 +1489,8 @@ impl Shell {
                         cx.notify();
                     })),
             );
-        if editing.is_some_and(|c| c.token == TokenSource::Stored && matches!(c.mcp, McpConfig::Http { .. })) {
+        // A REST API connector cannot work without its token, so only an MCP address offers the removal.
+        if editing.is_some_and(|c| c.token == TokenSource::Stored && Kind::of(&c.kind) == Kind::Address) {
             connector_form = connector_form.child(
                 Button::new("remove-connector-token")
                     .self_start()
@@ -1203,7 +1522,7 @@ impl Shell {
             );
 
         let count = server.connectors.len();
-        section.child(llm_section).child(
+        Some(
             card(cx)
                 .child(
                     div()
@@ -1234,6 +1553,31 @@ impl Shell {
 mod tests {
     use super::*;
     use bunsin_core::tool::{PinDiff, ToolSpec};
+
+    #[test]
+    fn a_sign_in_opens_only_a_web_address() {
+        for good in [
+            "https://auth.example.com/authorize?state=s",
+            "http://127.0.0.1:9000/authorize?state=s",
+            "http://[::1]:9000/authorize",
+            "http://localhost/authorize",
+        ] {
+            assert!(is_web_address(good), "{good}");
+        }
+        for bad in [
+            "smb://attacker.example.com/share",
+            "file:///Applications/Calculator.app",
+            "ssh://attacker.example.com",
+            "javascript:alert(1)",
+            "http://auth.example.com/authorize",
+            "http://localhost.example.com/authorize",
+            "http://127.0.0.1@attacker.example.com/authorize",
+            "HTTPS-like://x",
+            "",
+        ] {
+            assert!(!is_web_address(bad), "{bad}");
+        }
+    }
 
     fn report(tools: &[&str], diff: PinDiff) -> ToolsReport {
         let tools = tools

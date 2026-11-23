@@ -54,7 +54,7 @@ pub struct FakeConnector {
     name: String,
     tools: Mutex<Vec<ToolSpec>>,
     calls: Mutex<Vec<(String, Map<String, Value>)>>,
-    failure: Mutex<Option<String>>,
+    failure: Mutex<Option<ConnectorError>>,
     results: Mutex<std::collections::BTreeMap<String, Value>>,
 }
 
@@ -88,7 +88,12 @@ impl FakeConnector {
 
     /// Makes every later call fail with `message`.
     pub fn fail_with(&self, message: &str) {
-        *self.failure.lock().unwrap() = Some(message.to_owned());
+        self.fail_with_error(ConnectorError::Failed(message.to_owned()));
+    }
+
+    /// Makes every later call end with `error`.
+    pub fn fail_with_error(&self, error: ConnectorError) {
+        *self.failure.lock().unwrap() = Some(error);
     }
 
     pub fn calls(&self) -> Vec<(String, Map<String, Value>)> {
@@ -109,7 +114,7 @@ impl Connector for FakeConnector {
     fn call_tool(&self, tool: &str, args: Map<String, Value>) -> BoxFuture<'_, Result<Value, ConnectorError>> {
         self.calls.lock().unwrap().push((tool.to_owned(), args.clone()));
         let result = match self.failure.lock().unwrap().clone() {
-            Some(message) => Err(ConnectorError::Failed(message)),
+            Some(error) => Err(error),
             None => match self.results.lock().unwrap().get(tool) {
                 Some(result) => Ok(result.clone()),
                 None => Ok(json!({"ok": true, "tool": tool, "echo": args})),

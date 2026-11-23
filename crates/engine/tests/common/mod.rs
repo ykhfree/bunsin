@@ -2,24 +2,64 @@
 #![allow(dead_code)]
 
 use bunsin_api::ProfileConfig;
+use bunsin_core::coding::{CodingJobSpec, CodingReport};
 use bunsin_core::event::InboundEvent;
 use bunsin_core::policy::{OutgoingText, ToolClass, ToolRule};
 use bunsin_core::poll::{PollConfig, PollMapping};
-use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
+use bunsin_core::ports::{BoxFuture, Coder, Connector, LlmClient};
 use bunsin_core::tool::ToolSpec;
 use bunsin_engine::{Backends, Engine, Runtime};
 use bunsin_testkit::{FakeConnector, FakeLlm, tool};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const MARKER: &str = "— AI agent (Bunsin) acting for Kim";
 
 struct Fakes {
     llm: Arc<FakeLlm>,
     slack: Arc<FakeConnector>,
+    coder: Arc<FakeCoder>,
+}
+
+/// A coder that records the jobs it is asked to start and gives back the reports a test hands it.
+#[derive(Default)]
+pub struct FakeCoder {
+    started: Mutex<Vec<CodingJobSpec>>,
+    finished: Mutex<Vec<CodingReport>>,
+    refusal: Mutex<Option<String>>,
+}
+
+impl FakeCoder {
+    pub fn started(&self) -> Vec<CodingJobSpec> {
+        self.started.lock().unwrap().clone()
+    }
+
+    /// The report of a job that ended. The next background tick collects it.
+    pub fn finish(&self, report: CodingReport) {
+        self.finished.lock().unwrap().push(report);
+    }
+
+    /// Every later start fails with `reason`.
+    pub fn refuse(&self, reason: &str) {
+        *self.refusal.lock().unwrap() = Some(reason.to_owned());
+    }
+}
+
+impl Coder for FakeCoder {
+    fn start(&self, spec: CodingJobSpec) -> Result<(), String> {
+        if let Some(reason) = self.refusal.lock().unwrap().clone() {
+            return Err(reason);
+        }
+        self.started.lock().unwrap().push(spec);
+        Ok(())
+    }
+
+    fn finished(&self) -> Vec<CodingReport> {
+        std::mem::take(&mut *self.finished.lock().unwrap())
+    }
 }
 
 impl Backends for Fakes {
@@ -33,12 +73,17 @@ impl Backends for Fakes {
             })
         })
     }
+
+    fn coder(&self) -> Result<Arc<dyn Coder>, String> {
+        Ok(self.coder.clone())
+    }
 }
 
 pub struct Rig {
     pub dir: tempfile::TempDir,
     pub llm: Arc<FakeLlm>,
     pub slack: Arc<FakeConnector>,
+    pub coder: Arc<FakeCoder>,
     pub clock: Arc<AtomicI64>,
     pub engine: Engine,
 }
@@ -64,6 +109,43 @@ impl Rig {
         let mut out = Vec::new();
         walk(self.dir.path(), &mut out);
         out
+    }
+
+    /// Stops the engine like a crash would and opens a new one on the same data directory,
+    /// with the same fakes and clock.
+    pub fn restart(self) -> Rig {
+        let Rig {
+            dir,
+            llm,
+            slack,
+            coder,
+            clock,
+            engine,
+        } = self;
+        drop(engine);
+        let backends = Arc::new(Fakes {
+            llm: llm.clone(),
+            slack: slack.clone(),
+            coder: coder.clone(),
+        });
+        let time = clock.clone();
+        let engine = Engine::open(dir.path(), backends, Arc::new(move || time.load(Ordering::SeqCst))).unwrap();
+        Rig {
+            dir,
+            llm,
+            slack,
+            coder,
+            clock,
+            engine,
+        }
+    }
+
+    /// The store of profile `kim`, opened beside the engine.
+    pub fn kim_store(&self) -> bunsin_store::ProfileStore {
+        bunsin_store::AppStore::open(self.dir.path())
+            .unwrap()
+            .open_profile("kim")
+            .unwrap()
     }
 
     pub fn stores(&self, value: &str) -> bool {
@@ -117,9 +199,11 @@ pub async fn rig_with(config: ProfileConfig) -> Rig {
     let slack = Arc::new(FakeConnector::new("slack", slack_tools()));
     let clock = Arc::new(AtomicI64::new(1_000_000));
     let time = clock.clone();
+    let coder = Arc::new(FakeCoder::default());
     let backends = Arc::new(Fakes {
         llm: llm.clone(),
         slack: slack.clone(),
+        coder: coder.clone(),
     });
     let engine = Engine::open(dir.path(), backends, Arc::new(move || time.load(Ordering::SeqCst))).unwrap();
     engine.create_profile("kim", config).await.unwrap();
@@ -127,6 +211,7 @@ pub async fn rig_with(config: ProfileConfig) -> Rig {
         dir,
         llm,
         slack,
+        coder,
         clock,
         engine,
     }
@@ -143,6 +228,7 @@ pub fn event(id: &str, author: &str, text: &str) -> InboundEvent {
         thread: None,
         author: author.into(),
         text: text.into(),
+        channel: Default::default(),
     }
 }
 

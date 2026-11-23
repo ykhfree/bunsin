@@ -1,8 +1,15 @@
 //! Pure harness logic. This crate does no IO: callers inject time, IDs and data.
 
 pub mod approval;
+pub mod ard;
+pub mod autonomy;
+pub mod candidates;
+pub mod coding;
 pub mod context;
+pub mod eval;
 pub mod event;
+pub mod inbound;
+pub mod lint;
 pub mod llm;
 pub mod marker;
 pub mod policy;
@@ -11,8 +18,11 @@ pub mod ports;
 pub mod privacy;
 pub mod proposal;
 pub mod records;
+pub mod search;
 pub mod settings;
+pub mod time;
 pub mod tool;
+pub mod webhook;
 pub mod wiki;
 
 use sha2::{Digest, Sha256};

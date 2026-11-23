@@ -2,9 +2,10 @@
 //! The clicks change a draft. Only Save sends the table to the server.
 
 use crate::bridge::{SaveError, UiCommand, UiState};
-use crate::shell::{Shell, labelled, labelled_as};
-use crate::theme::{card, palette, quiet};
-use bunsin_api::{Expected, PermissionsUpdate};
+use crate::shell::{Shell, View, labelled, labelled_as};
+use crate::theme::{card, notice, palette, quiet};
+use bunsin_api::{Expected, PermissionsUpdate, ToolAutonomy};
+use bunsin_core::autonomy::AutonomyThresholds;
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::tool::ToolSpec;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -16,10 +17,13 @@ use std::collections::BTreeMap;
 
 const HELP: &str = "The agent can use a tool only if it has a rule here. Read: the agent calls the tool without \
     asking, also while all changes are stopped. Give Read only to a tool that changes nothing and sends nothing out. \
-    Write and Delete: the step says how far the agent goes. For a tool that sends text to other people, choose the \
-    argument that holds the text: the server adds the AI marker to it.";
-const NESTED: &str = "The buttons list the text arguments at the top of a tool's input. \
-    If the text is inside another value, set the rule in the settings file.";
+    Write and Delete: the step says how far the agent goes. For a tool that sends text to other people, choose \
+    every argument that holds such text: the server adds the AI marker to each.";
+const NESTED: &str = "The buttons list the text arguments at the top of a tool's input. A click adds or removes one. \
+    If the text is inside another value, for example in the items of a list, set the rule with \
+    `bunsind rule-set` or in the settings file.";
+const HELD: &str = "Held at approval: you dismissed or reported a call of this tool while it ran without \
+    asking. Each call asks you, whatever the step says, until you clear the hold.";
 const PAGE_CONFLICT: &str = "The rules changed on the server since this view loaded them. Nothing was saved.";
 const UNCHANGED: &str = "Nothing changed, so nothing was saved.";
 
@@ -79,13 +83,46 @@ fn class_word(class: ToolClass) -> &'static str {
     }
 }
 
-fn tier_word(tier: Tier) -> &'static str {
+pub(crate) fn tier_word(tier: Tier) -> &'static str {
     match tier {
         Tier::Observe => "observe",
         Tier::Draft => "draft",
         Tier::Approve => "approve",
         Tier::Autonomous => "autonomous",
     }
+}
+
+/// The top-level arguments that a text choice names, or None if it names a place inside another value.
+fn top_level(text: &OutgoingText) -> Option<Vec<String>> {
+    match text {
+        OutgoingText::None => Some(Vec::new()),
+        OutgoingText::Arg(name) => Some(vec![name.clone()]),
+        OutgoingText::Paths(paths) => paths.iter().all(|path| !path.contains('.')).then(|| paths.clone()),
+    }
+}
+
+/// The text choice after a click on `arg`: the argument is added or removed. `offered` sets the order.
+/// The choice is empty again when the last argument is removed, so "no text" is never a default.
+fn toggle_arg(text: Option<&OutgoingText>, arg: &str, offered: &[String]) -> Option<OutgoingText> {
+    let mut chosen = text.and_then(top_level).unwrap_or_default();
+    if let Some(at) = chosen.iter().position(|name| name == arg) {
+        chosen.remove(at);
+    } else {
+        chosen.push(arg.to_owned());
+    }
+    let mut chosen: Vec<String> = offered.iter().filter(|name| chosen.contains(name)).cloned().collect();
+    match chosen.len() {
+        0 => None,
+        // One argument is stored in the form from before, so older clients can read the rule.
+        1 => chosen.pop().map(OutgoingText::Arg),
+        _ => Some(OutgoingText::Paths(chosen)),
+    }
+}
+
+/// The places of a text choice as a list, for example "`text`, `blocks.*.text`".
+fn places(text: &OutgoingText) -> String {
+    let names: Vec<String> = text.locations().iter().map(|place| format!("`{place}`")).collect();
+    names.join(", ")
 }
 
 /// A rule in a few words, for the list of changes.
@@ -100,10 +137,44 @@ fn rule_words(rule: Option<&DraftRule>) -> String {
             match &rule.text {
                 None => "text not chosen".to_owned(),
                 Some(OutgoingText::None) => "no text".to_owned(),
-                Some(OutgoingText::Arg(arg)) => format!("text in `{arg}`"),
+                Some(text) => format!("text in {}", places(text)),
             }
         ),
     }
+}
+
+/// When a tool is suggested, as one line above the list.
+fn thresholds_text(thresholds: Option<&AutonomyThresholds>) -> String {
+    match thresholds {
+        None => "Suggestions for Autonomous are off. Set the thresholds in the Learning view to get them.".to_owned(),
+        Some(t) => format!(
+            "Suggested for Autonomous: a write tool at Approve with {} or more reviewed calls and {}% or more \
+             approved unchanged in the last {} days. A hold starts the counts again.",
+            t.min_reviewed, t.min_unchanged_percent, t.window_days
+        ),
+    }
+}
+
+/// The counts of one tool as a line under it.
+fn counts_text(entry: &ToolAutonomy, thresholds: Option<&AutonomyThresholds>) -> String {
+    let c = &entry.counts;
+    let days = match thresholds {
+        None => "All days".to_owned(),
+        Some(t) => format!("Last {} days", t.window_days),
+    };
+    let percent = c
+        .unchanged_percent()
+        .map_or_else(String::new, |percent| format!(" ({percent}%)"));
+    format!(
+        "{days}: {} reviewed, {} approved unchanged{percent}, {} edited, {} dismissed. \
+         Ran without asking: {}, failed: {}.",
+        c.reviewed(),
+        c.approved,
+        c.edited,
+        c.rejected,
+        c.autonomous,
+        c.autonomous_failed
+    )
 }
 
 /// What a rule lets the agent do, as a sentence under the tool.
@@ -125,7 +196,7 @@ fn rule_sentence(rule: Option<&DraftRule>) -> String {
     let text = match &rule.text {
         None => "Choose where its text for other people is.".to_owned(),
         Some(OutgoingText::None) => "It sends no text to other people.".to_owned(),
-        Some(OutgoingText::Arg(arg)) => format!("The AI marker goes into `{arg}`."),
+        Some(text) => format!("The AI marker goes into {}.", places(text)),
     };
     let class = if rule.class == ToolClass::Write {
         "Write"
@@ -339,10 +410,19 @@ impl Shell {
         let row = || div().flex().flex_wrap().items_center().gap_2();
         let mut lines: Vec<AnyElement> = Vec::new();
         if let Some(rule) = rule.filter(|rule| rule.class != ToolClass::Read) {
-            // "Autonomous" is not offered for a delete. A stored rule that has it is still shown.
+            // "Autonomous" is not offered for a delete. The setup offers only Observe and Approve,
+            // the steps a setup may end with. A stored rule's step is always shown.
+            let setup = self.view == View::Setup;
             let tiers = [Tier::Observe, Tier::Draft, Tier::Approve, Tier::Autonomous]
                 .into_iter()
-                .filter(|tier| *tier != Tier::Autonomous || rule.class == ToolClass::Write || rule.tier == *tier)
+                .filter(|tier| {
+                    rule.tier == *tier
+                        || match tier {
+                            Tier::Draft | Tier::Autonomous if setup => false,
+                            Tier::Autonomous => rule.class == ToolClass::Write,
+                            _ => true,
+                        }
+                })
                 .map(|tier| {
                     let tool_id = id.to_owned();
                     let word = tier_word(tier);
@@ -361,27 +441,48 @@ impl Shell {
                 });
             lines.push(row().child(quiet("Step", cx)).children(tiers).into_any_element());
 
-            // The arguments the buttons can offer, and the stored one even if it is not among them.
-            // The server's one stays in the list after another click, so the owner can go back to it.
+            // The arguments the buttons can offer, and the stored ones even if they are not among them.
+            // The server's ones stay in the list after another click, so the owner can go back to them.
             let mut args = text_args(tool);
             let base = self.permissions.base.get(id).map(|rule| &rule.outgoing_text);
-            for stored in [rule.text.as_ref(), base].into_iter().flatten() {
-                if let OutgoingText::Arg(stored) = stored
-                    && !args.contains(stored)
-                {
-                    args.push(stored.clone());
+            for stored in [rule.text.as_ref(), base].into_iter().flatten().filter_map(top_level) {
+                for name in stored {
+                    if !args.contains(&name) {
+                        args.push(name);
+                    }
                 }
             }
-            let texts = args.into_iter().map(|arg| {
-                let (tool_id, value) = (id.to_owned(), OutgoingText::Arg(arg.clone()));
-                let chosen = rule.text.as_ref() == Some(&value);
-                Self::choice(format!("perm-{id}-text-{arg}"), arg, chosen, cx, move |this| {
-                    if let Some(rule) = this.permissions.draft.get_mut(&tool_id) {
-                        rule.text = Some(value.clone());
-                    }
-                    this.permissions.message = None;
+            let chosen_args = rule.text.as_ref().and_then(top_level).unwrap_or_default();
+            let mut texts: Vec<AnyElement> = args
+                .iter()
+                .map(|arg| {
+                    let (tool_id, arg_name, offered) = (id.to_owned(), arg.clone(), args.clone());
+                    let chosen = chosen_args.contains(arg);
+                    Self::choice(format!("perm-{id}-text-{arg}"), arg.clone(), chosen, cx, move |this| {
+                        if let Some(rule) = this.permissions.draft.get_mut(&tool_id) {
+                            rule.text = toggle_arg(rule.text.as_ref(), &arg_name, &offered);
+                        }
+                        this.permissions.message = None;
+                    })
                 })
-            });
+                .collect();
+            // A stored choice with a place inside another value has one button. A click restores it whole.
+            if let Some(stored) = base.filter(|text| top_level(text).is_none()) {
+                let (tool_id, value) = (id.to_owned(), stored.clone());
+                let chosen = rule.text.as_ref() == Some(stored);
+                texts.push(Self::choice(
+                    format!("perm-{id}-text-stored"),
+                    places(stored),
+                    chosen,
+                    cx,
+                    move |this| {
+                        if let Some(rule) = this.permissions.draft.get_mut(&tool_id) {
+                            rule.text = Some(value.clone());
+                        }
+                        this.permissions.message = None;
+                    },
+                ));
+            }
             let tool_id = id.to_owned();
             let none = Self::choice(
                 format!("perm-{id}-text-none"),
@@ -404,6 +505,46 @@ impl Shell {
             );
         }
         let sentence = rule_sentence(rule);
+        let autonomy = self.state.autonomy.as_ref();
+        let thresholds = autonomy.and_then(|autonomy| autonomy.thresholds.as_ref());
+        let entry = autonomy.and_then(|autonomy| autonomy.tools.iter().find(|entry| entry.tool == id));
+        let colors = palette(cx);
+        let counts = entry.map(|entry| {
+            let text = counts_text(entry, thresholds);
+            row()
+                .child(labelled_as(format!("perm-{id}-counts"), text.clone(), quiet(text, cx)))
+                .children(entry.suggested.then(|| {
+                    labelled_as(
+                        format!("perm-{id}-suggested"),
+                        "Suggested: Autonomous",
+                        div()
+                            .px_2()
+                            .rounded_full()
+                            .bg(colors.done.opacity(0.15))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.done)
+                            .child("Suggested: Autonomous"),
+                    )
+                }))
+        });
+        let held = entry.filter(|entry| entry.held).map(|_| {
+            let (profile, tool_id) = (self.state.selected.clone(), id.to_owned());
+            notice(colors.stopped, cx)
+                .child(labelled_as(format!("perm-{id}-held"), HELD, div().child(HELD)))
+                .child(
+                    Button::new(SharedString::from(format!("perm-{id}-clear-hold")))
+                        .small()
+                        .outline()
+                        .label("Clear the hold")
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if let Some(profile) = profile.clone() {
+                                let tool = tool_id.clone();
+                                this.send(UiCommand::ClearAutonomyHold { profile, tool });
+                            }
+                        })),
+                )
+        });
         div()
             .flex()
             .flex_col()
@@ -441,6 +582,8 @@ impl Shell {
                 sentence.clone(),
                 quiet(sentence, cx),
             ))
+            .children(counts)
+            .children(held)
             .into_any_element()
     }
 
@@ -451,6 +594,12 @@ impl Shell {
         let Some(server) = &self.state.permissions else {
             return quiet("The rules are not loaded.", cx).into_any_element();
         };
+        let thresholds_text = thresholds_text(
+            self.state
+                .autonomy
+                .as_ref()
+                .and_then(|autonomy| autonomy.thresholds.as_ref()),
+        );
         let changes = form.changes();
         let changes_text = if changes.is_empty() {
             String::new()
@@ -619,6 +768,11 @@ impl Shell {
                     .overflow_y_scroll()
                     .child(labelled_as("permissions-help", HELP, quiet(HELP, cx)))
                     .child(quiet(NESTED, cx))
+                    .child(labelled_as(
+                        "permissions-thresholds",
+                        thresholds_text.clone(),
+                        quiet(thresholds_text, cx),
+                    ))
                     .children(groups),
             )
             .into_any_element()
@@ -689,5 +843,95 @@ mod tests {
         // The sentence says what the server does with a delete, not what the step says.
         assert!(rule_sentence(Some(&delete)).contains("A delete always asks."));
         assert_eq!(rule_sentence(None), "The agent cannot use this tool.");
+        let nested = DraftRule {
+            class: ToolClass::Write,
+            tier: Tier::Approve,
+            text: Some(OutgoingText::Paths(vec!["text".into(), "blocks.*.text".into()])),
+        };
+        assert_eq!(
+            rule_words(Some(&nested)),
+            "write, approve, text in `text`, `blocks.*.text`"
+        );
+        assert!(rule_sentence(Some(&nested)).ends_with("The AI marker goes into `text`, `blocks.*.text`."));
+    }
+
+    #[test]
+    fn the_counts_name_their_days_and_the_share_approved_unchanged() {
+        let entry = ToolAutonomy {
+            tool: "slack/post".into(),
+            counts: bunsin_core::records::DecisionCounts {
+                approved: 3,
+                edited: 1,
+                rejected: 0,
+                autonomous: 2,
+                autonomous_failed: 1,
+            },
+            held: false,
+            suggested: true,
+        };
+        let thresholds = AutonomyThresholds {
+            min_reviewed: 4,
+            min_unchanged_percent: 75,
+            window_days: 30,
+        };
+        assert_eq!(
+            counts_text(&entry, Some(&thresholds)),
+            "Last 30 days: 4 reviewed, 3 approved unchanged (75%), 1 edited, 0 dismissed. \
+             Ran without asking: 2, failed: 1."
+        );
+        let none = ToolAutonomy {
+            counts: Default::default(),
+            ..entry
+        };
+        assert_eq!(
+            counts_text(&none, None),
+            "All days: 0 reviewed, 0 approved unchanged, 0 edited, 0 dismissed. Ran without asking: 0, failed: 0."
+        );
+        assert!(thresholds_text(None).contains("are off"));
+        assert!(thresholds_text(Some(&thresholds)).contains("with 4 or more reviewed calls and 75% or more"));
+    }
+
+    #[test]
+    fn a_click_adds_or_removes_one_argument() {
+        let offered: Vec<String> = ["channel", "text", "title"].map(String::from).to_vec();
+        let arg = |name: &str| OutgoingText::Arg(name.into());
+        let paths = |names: &[&str]| OutgoingText::Paths(names.iter().map(|n| (*n).to_owned()).collect());
+        // The first click makes the one-argument form from before.
+        assert_eq!(toggle_arg(None, "text", &offered), Some(arg("text")));
+        assert_eq!(
+            toggle_arg(Some(&OutgoingText::None), "text", &offered),
+            Some(arg("text"))
+        );
+        // A second argument makes a list in the order of the buttons, not of the clicks.
+        let two = toggle_arg(Some(&arg("title")), "channel", &offered);
+        assert_eq!(two, Some(paths(&["channel", "title"])));
+        let three = toggle_arg(two.as_ref(), "text", &offered);
+        assert_eq!(three, Some(paths(&["channel", "text", "title"])));
+        // A click on a chosen argument removes it. Without any, nothing is chosen: not "no text".
+        assert_eq!(
+            toggle_arg(Some(&paths(&["text", "title"])), "title", &offered),
+            Some(arg("text"))
+        );
+        assert_eq!(toggle_arg(Some(&arg("text")), "text", &offered), None);
+        // A click while a place inside another value is chosen starts a new choice of arguments.
+        assert_eq!(
+            toggle_arg(Some(&paths(&["text", "blocks.*.text"])), "title", &offered),
+            Some(arg("title"))
+        );
+    }
+
+    #[test]
+    fn only_choices_of_top_level_arguments_are_shown_as_buttons() {
+        let paths = |names: &[&str]| OutgoingText::Paths(names.iter().map(|n| (*n).to_owned()).collect());
+        assert_eq!(top_level(&OutgoingText::None), Some(vec![]));
+        assert_eq!(
+            top_level(&OutgoingText::Arg("a.b".into())),
+            Some(vec!["a.b".to_owned()])
+        );
+        assert_eq!(
+            top_level(&paths(&["text", "title"])),
+            Some(vec!["text".into(), "title".into()])
+        );
+        assert_eq!(top_level(&paths(&["text", "blocks.*.text"])), None);
     }
 }

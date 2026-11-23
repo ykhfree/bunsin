@@ -5,7 +5,10 @@ mod common;
 use bunsin_api::{ConnectorUpdate, EngineApi, Expected, LlmUpdate, TokenChange, TokenSource};
 use bunsin_app::bridge::ConnectionResult;
 use bunsin_app::shell::Shell;
-use bunsin_core::settings::{ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ConnectorSection, McpConfig, Wire};
+use bunsin_core::settings::{
+    ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_MODEL, ApiAuthMethod, ApiConfig, ApiService, ConnectorKind, ConnectorSection,
+    McpConfig, Wire,
+};
 use bunsin_testkit::tool;
 use common::window::{REFRESH, label, on_screen, open_settings, runtime, screen_texts, value, wait_until};
 use gpui_kit::test::TestWindowExt;
@@ -105,13 +108,13 @@ fn set_connector_from_outside(
 ) {
     rt.block_on(rig.engine.set_connector("kim", name, connector(url, TokenChange::Keep)))
         .unwrap();
-    let shown = McpConfig::Http { url: url.into() };
+    let shown = ConnectorKind::Mcp(McpConfig::Http { url: url.into() });
     wait_until(cx, shell, "the outside change", |s| {
         s.state
             .connections
             .as_ref()
             .and_then(|c| c.connectors.get(name))
-            .is_some_and(|c| c.mcp == shown)
+            .is_some_and(|c| c.kind == shown)
     });
 }
 
@@ -238,8 +241,8 @@ fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut 
     });
     wait_for_commands(cx, &shell, 1);
     let jira = || rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"].clone();
-    let url = |url: &str| McpConfig::Http { url: url.into() };
-    assert_eq!(jira().mcp, url("https://mcp.example/jira"));
+    let url = |url: &str| ConnectorKind::Mcp(McpConfig::Http { url: url.into() });
+    assert_eq!(jira().kind, url("https://mcp.example/jira"));
     assert_eq!(jira().token, TokenSource::Stored);
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-result"), "Saved: jira");
@@ -270,7 +273,7 @@ fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut 
         window.click("save-connector", cx);
     });
     wait_for_commands(cx, &shell, 3);
-    assert_eq!(jira().mcp, url("https://mcp.example/jira/v2"));
+    assert_eq!(jira().kind, url("https://mcp.example/jira/v2"));
     assert_eq!(jira().token, TokenSource::Stored);
 
     // Another host with an empty token field is refused by the server.
@@ -291,7 +294,7 @@ fn a_connector_is_saved_and_its_address_changed_under_the_server_rules(cx: &mut 
             Some("https://mcp.example/jira/v2")
         );
     });
-    assert_eq!(jira().mcp, url("https://mcp.example/jira/v2"));
+    assert_eq!(jira().kind, url("https://mcp.example/jira/v2"));
     assert_eq!(jira().token, TokenSource::Stored);
 }
 
@@ -683,10 +686,11 @@ fn another_profile_discards_the_drafts_and_saves_only_to_itself(cx: &mut TestApp
 /// Stores a command connector through the settings, as `config-set` does.
 fn store_command(rt: &tokio::runtime::Runtime, rig: &common::Rig, name: &str, mcp: McpConfig) {
     let section = ConnectorSection {
-        mcp,
+        kind: ConnectorKind::Mcp(mcp),
         token_secret: None,
         token_header: None,
         secret_env: Default::default(),
+        oauth: None,
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config
@@ -719,6 +723,90 @@ fn choose_command(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle) {
 const ENV_SECRET: &str = "env-secret-9d04";
 
 #[gpui_kit::test]
+fn a_rest_api_connector_is_saved_and_edited_in_the_window(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.within("connector-kind").click(2usize, cx)
+    });
+    on_screen(cx, window, |window, cx| {
+        // Slack is the first service. It has one base URL and takes only a bearer token.
+        assert!(window.try_find("connector-address").is_none());
+        assert!(label(window, "api-help").contains("No tool deletes"));
+        assert_eq!(value(window, "api-base-url"), "https://slack.com/api");
+        assert!(window.try_find("api-auth").is_none());
+        assert!(window.try_find("api-email").is_none());
+        window.within("api-service").click(1usize, cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        // The Slack address does not fit Jira, so it goes. Jira offers basic auth.
+        assert_eq!(value(window, "api-base-url"), "");
+        window.within("api-auth").click(1usize, cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "api-base-url", "https://acme.atlassian.net");
+        fill(window, cx, "api-email", "kim@acme.example");
+        fill(window, cx, "connector-token", SLACK_TOKEN);
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 1);
+    let jira = || rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"].clone();
+    let expected = ConnectorKind::Api(ApiConfig {
+        service: ApiService::Jira,
+        base_url: "https://acme.atlassian.net".into(),
+        auth: ApiAuthMethod::Basic,
+        email: Some("kim@acme.example".into()),
+    });
+    assert_eq!(jira().kind, expected);
+    assert_eq!(jira().token, TokenSource::Stored);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "connector-result"), "Saved: jira");
+        assert_eq!(
+            row(window, "jira", "address").as_deref(),
+            Some("calls the Jira Cloud REST API at https://acme.atlassian.net")
+        );
+        assert_eq!(
+            row(window, "jira", "token").as_deref(),
+            Some("token stored on the server for kim@acme.example")
+        );
+        assert_not_on_screen(window, SLACK_TOKEN, "calls the Jira Cloud REST API");
+        click_row(window, cx, "jira", "edit");
+    });
+    on_screen(cx, window, |window, cx| {
+        // Edit shows the stored settings. The token stays on the server and cannot be removed here:
+        // a REST API connector needs it.
+        assert_eq!(value(window, "api-base-url"), "https://acme.atlassian.net");
+        assert_eq!(value(window, "api-email"), "kim@acme.example");
+        assert_eq!(value(window, "connector-token"), "");
+        assert_eq!(window.within("api-service").find(1usize).checked(), Some(true));
+        assert_eq!(window.within("api-auth").find(1usize).checked(), Some(true));
+        assert!(window.try_find("remove-connector-token").is_none());
+        fill(window, cx, "api-base-url", "https://acme.atlassian.net/x");
+        window.click("save-connector", cx);
+    });
+    wait_for_commands(cx, &shell, 2);
+    // The same origin keeps the token.
+    let ConnectorKind::Api(saved) = jira().kind else {
+        panic!("expected a REST API connector")
+    };
+    assert_eq!(saved.base_url, "https://acme.atlassian.net/x");
+    assert_eq!(jira().token, TokenSource::Stored);
+    // A name keeps its kind: the window refuses an address under this name before it sends.
+    on_screen(cx, window, |window, cx| {
+        window.within("connector-kind").click(0usize, cx);
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "connector-address", "https://mcp.example/jira");
+        window.click("save-connector", cx);
+        assert_eq!(
+            label(window, "connector-message"),
+            "A connector with this name is of another kind. Remove it first, or use another name."
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut TestAppContext) {
     let rt = runtime();
     let rig = rt.block_on(common::rig());
@@ -749,7 +837,7 @@ fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut T
     on_screen(cx, window, |window, _| {
         assert_eq!(
             label(window, "connector-message"),
-            "A connector with this name is of the other kind. Remove it first, or use another name."
+            "A connector with this name is of another kind. Remove it first, or use another name."
         );
         assert_eq!(value(window, "connector-address"), "https://mcp.example/local");
         assert!(window.try_find("connector-save-anyway").is_none());
@@ -758,7 +846,7 @@ fn a_command_connector_shows_its_command_and_counts_not_its_arguments(cx: &mut T
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
     let connectors = rt.block_on(rig.engine.connections("kim")).unwrap().connectors;
-    assert_eq!(connectors["local"].mcp, stdio);
+    assert_eq!(connectors["local"].kind, ConnectorKind::Mcp(stdio));
 }
 
 #[gpui_kit::test]
@@ -771,7 +859,7 @@ fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAp
             .unwrap()
             .connectors
             .get("local")
-            .map(|c| c.mcp.clone())
+            .map(|c| c.kind.clone())
     };
     choose_command(cx, window);
     on_screen(cx, window, |window, cx| {
@@ -810,7 +898,7 @@ fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAp
         ]
         .into(),
     };
-    assert_eq!(local(), Some(stored));
+    assert_eq!(local(), Some(ConnectorKind::Mcp(stored)));
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-result"), "Saved: local");
         // A successful save empties the form. The kind stays for the next connector.
@@ -842,7 +930,7 @@ fn a_command_connector_is_saved_edited_and_removed_in_the_window(cx: &mut TestAp
     });
     wait_for_commands(cx, &shell, 2);
     match local() {
-        Some(McpConfig::Stdio { args, env, .. }) => {
+        Some(ConnectorKind::Mcp(McpConfig::Stdio { args, env, .. })) => {
             assert_eq!(args, vec!["--stdio".to_owned()]);
             assert_eq!(env.len(), 2);
         }
@@ -941,8 +1029,8 @@ fn a_command_the_form_cannot_show_is_not_loaded_for_editing(cx: &mut TestAppCont
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, _| s.state.connection_commands), 0);
     assert_eq!(
-        rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"].mcp,
-        unusual
+        rt.block_on(rig.engine.connections("kim")).unwrap().connectors["local"].kind,
+        ConnectorKind::Mcp(unusual)
     );
 }
 
@@ -960,7 +1048,7 @@ fn a_command_draft_follows_the_draft_rules_of_the_form(cx: &mut TestAppContext) 
     let server_arg = |cx: &mut TestAppContext, shell: &Entity<Shell>, arg: &'static str| {
         wait_until(cx, shell, "the outside change", move |s| {
             s.state.connections.as_ref().is_some_and(
-                |c| matches!(&c.connectors["local"].mcp, McpConfig::Stdio { args, .. } if args == &[arg.to_owned()]),
+                |c| matches!(&c.connectors["local"].kind, ConnectorKind::Mcp(McpConfig::Stdio { args, .. }) if args == &[arg.to_owned()]),
             )
         });
     };
@@ -1069,10 +1157,10 @@ fn unchanged_connection_forms_follow_the_server(cx: &mut TestAppContext) {
     let saved = rt.block_on(rig.engine.connections("kim")).unwrap();
     assert_eq!(saved.llm.unwrap().model, "my-model");
     assert_eq!(
-        saved.connectors["jira"].mcp,
-        McpConfig::Http {
+        saved.connectors["jira"].kind,
+        ConnectorKind::Mcp(McpConfig::Http {
             url: "https://mcp.example/jira/mine".into()
-        }
+        })
     );
 }
 
@@ -1101,10 +1189,10 @@ fn a_connector_save_over_an_outside_change_warns_and_save_anyway_overwrites(cx: 
     wait_for_commands(cx, &shell, 1);
     let jira = || {
         rt.block_on(rig.engine.connections("kim")).unwrap().connectors["jira"]
-            .mcp
+            .kind
             .clone()
     };
-    let url = |url: &str| McpConfig::Http { url: url.into() };
+    let url = |url: &str| ConnectorKind::Mcp(McpConfig::Http { url: url.into() });
     assert_eq!(jira(), url("https://mcp.example/jira/outside"));
     on_screen(cx, window, |window, cx| {
         assert_eq!(label(window, "connector-conflict"), CONFLICT);
@@ -1152,11 +1240,11 @@ fn a_second_new_connector_with_the_same_name_warns_and_load_shows_the_first(cx: 
     wait_for_commands(cx, &shell, 1);
     let wiki = rt.block_on(rig.engine.connections("kim")).unwrap().connectors["wiki"].clone();
     assert_eq!(
-        (wiki.mcp, wiki.token),
+        (wiki.kind, wiki.token),
         (
-            McpConfig::Http {
+            ConnectorKind::Mcp(McpConfig::Http {
                 url: "https://mcp.example/wiki/first".into()
-            },
+            }),
             TokenSource::None
         )
     );
@@ -1307,10 +1395,10 @@ fn the_header_of_a_token_is_saved_shown_and_kept_by_an_edit(cx: &mut TestAppCont
     wait_for_commands(cx, &shell, 2);
     assert_eq!(wiki().token_header.as_deref(), Some("X-API-Key"));
     assert_eq!(
-        wiki().mcp,
-        McpConfig::Http {
+        wiki().kind,
+        ConnectorKind::Mcp(McpConfig::Http {
             url: "https://mcp.example/wiki/v2".into()
-        }
+        })
     );
 
     // An emptied header field goes back to `Authorization: Bearer`.
@@ -1668,6 +1756,137 @@ fn the_keychain_token_is_sent_as_it_is_and_never_for_another_profile(cx: &mut Te
     assert_eq!(last_save(cx), ("lee".to_owned(), TokenChange::Keep));
 }
 
+#[gpui_kit::test]
+fn a_connector_token_is_copied_from_the_keychain_with_the_same_rules(cx: &mut TestAppContext) {
+    use bunsin_api::Connections;
+    use bunsin_app::bridge::{UiCommand, UiState};
+    use gpui_kit::AppContext;
+    // The test is the bridge: it sends the states, and it answers no command.
+    let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (states, receiver) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(gpui_kit::init);
+    let keychain = std::sync::Arc::new(FakeKeychain::default());
+    let lookup = keychain.clone();
+    // Tall enough for the whole settings page, as in `open_settings`.
+    let options = gpui_kit::WindowOptions {
+        window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+            origin: Default::default(),
+            size: gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2100.)),
+        })),
+        ..Default::default()
+    };
+    let (window, _shell) = cx.update(|cx| {
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| {
+                let mut shell = Shell::new(receiver, commands, window, cx);
+                shell.set_keychain(lookup);
+                shell
+            })
+        })
+        .unwrap()
+    });
+    let mut last_command = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        let sent: Vec<_> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+        sent.last().cloned()
+    };
+    let state = UiState {
+        selected: Some("kim".into()),
+        connections: Some(Connections {
+            llm: None,
+            connectors: Default::default(),
+        }),
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(state).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| window.click("tab-settings", cx));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "open-connector-keychain"),
+            "Copy the token from the Keychain"
+        );
+        // One set of Keychain fields is on screen at a time. It moves to the field that asked last.
+        window.click("open-keychain", cx);
+        window.click("open-connector-keychain", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(window.find_all("keychain-service").len(), 1);
+        assert_eq!(label(window, "open-keychain"), "Copy the token from the Keychain");
+        assert_eq!(label(window, "open-connector-keychain"), "Hide the Keychain fields");
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "connector-address", "https://mcp.example/jira");
+        read_keychain(window, cx, "api.anthropic.com", "kim");
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "keychain-message"), KEYCHAIN_READ);
+        // The token is in the masked connector field, not in the LLM field and not in a label.
+        assert_eq!(
+            window.find("connector-token").role(),
+            Some(gpui_kit::Role::PasswordInput)
+        );
+        assert_eq!(value(window, "llm-token"), "");
+        assert_not_on_screen(window, KEYCHAIN_VALUE, "https://mcp.example/jira");
+        window.click("save-connector", cx);
+    });
+    match last_command(cx) {
+        Some(UiCommand::SaveConnector { profile, name, update }) => {
+            assert_eq!((profile.as_str(), name.as_str()), ("kim", "jira"));
+            assert_eq!(update.token, TokenChange::Set(KEYCHAIN_VALUE.into()));
+        }
+        other => panic!("expected a save of the connector, got {other:?}"),
+    }
+
+    // A read that fails after a good one empties the connector token field.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "nobody");
+    });
+    on_screen(cx, window, |window, cx| {
+        let message = label(window, "keychain-message");
+        assert!(message.starts_with("The token was not read: "), "{message}");
+        assert!(!message.contains(KEYCHAIN_VALUE), "{message}");
+        window.click("save-connector", cx);
+    });
+    match last_command(cx) {
+        Some(UiCommand::SaveConnector { update, .. }) => assert_eq!(update.token, TokenChange::Keep),
+        other => panic!("expected a save of the connector, got {other:?}"),
+    }
+    assert_eq!(*keychain.0.lock().unwrap(), 2);
+
+    // A successful save of the connector empties the form and hides its Keychain fields.
+    on_screen(cx, window, |window, cx| {
+        read_keychain(window, cx, "api.anthropic.com", "kim")
+    });
+    let saved = UiState {
+        selected: Some("kim".into()),
+        connections: Some(Connections {
+            llm: None,
+            connectors: Default::default(),
+        }),
+        connection_result: Some(ConnectionResult::ConnectorSaved {
+            name: "jira".into(),
+            result: Ok(()),
+        }),
+        connection_commands: 1,
+        connected: true,
+        ..UiState::default()
+    };
+    states.send(saved).unwrap();
+    cx.run_until_parked();
+    on_screen(cx, window, |window, cx| {
+        assert!(window.try_find("keychain-service").is_none());
+        assert_eq!(value(window, "connector-token"), "");
+        fill(window, cx, "connector-name", "jira");
+        fill(window, cx, "connector-address", "https://mcp.example/jira");
+        window.click("save-connector", cx);
+    });
+    match last_command(cx) {
+        Some(UiCommand::SaveConnector { update, .. }) => assert_eq!(update.token, TokenChange::Keep),
+        other => panic!("expected a save of the connector, got {other:?}"),
+    }
+}
+
 const SECRET_VALUE: &str = "sv-secret-VALUE-63e0";
 
 /// Types a secret variable into its fields. Does not press Add.
@@ -1787,7 +2006,7 @@ fn a_secret_draft_follows_the_draft_rules_and_the_server_reason_is_shown(cx: &mu
     let server_arg = |cx: &mut TestAppContext, shell: &Entity<Shell>, arg: &'static str| {
         wait_until(cx, shell, "the outside change", move |s| {
             s.state.connections.as_ref().is_some_and(
-                |c| matches!(&c.connectors["local"].mcp, McpConfig::Stdio { args, .. } if args == &[arg.to_owned()]),
+                |c| matches!(&c.connectors["local"].kind, ConnectorKind::Mcp(McpConfig::Stdio { args, .. }) if args == &[arg.to_owned()]),
             )
         });
     };
@@ -1908,14 +2127,15 @@ fn a_secret_variable_without_a_value_is_not_shown_as_stored(cx: &mut TestAppCont
     let rig = rt.block_on(common::rig());
     // The settings file names a secret variable. It cannot give the value.
     let section = ConnectorSection {
-        mcp: McpConfig::Stdio {
+        kind: ConnectorKind::Mcp(McpConfig::Stdio {
             command: "/opt/mcp/does-not-exist".into(),
             args: vec![],
             env: Default::default(),
-        },
+        }),
         token_secret: None,
         token_header: None,
         secret_env: ["API_TOKEN".to_owned()].into(),
+        oauth: None,
     };
     let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
     config
@@ -1947,4 +2167,119 @@ fn a_secret_variable_without_a_value_is_not_shown_as_stored(cx: &mut TestAppCont
         assert_eq!(label(window, "secret-API_TOKEN"), "API_TOKEN: stored on the server");
         assert_eq!(label(window, "secret-missing"), "");
     });
+}
+
+/// Stores connector `docs` of kim at `OAUTH_URL`, signing in with OAuth. Only the settings file
+/// turns OAuth on.
+fn add_oauth_docs(rt: &tokio::runtime::Runtime, rig: &common::Rig) {
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config.connectors.insert(
+        "docs".into(),
+        serde_json::json!({"mcp": {"transport": "http", "url": common::OAUTH_URL}, "oauth": {}}),
+    );
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+}
+
+/// What the browser does after the sign-in: it asks the window's redirect address for
+/// `query`. Returns the answer of the window's listener.
+fn browser_returns(redirect_uri: &str, query: &str) -> String {
+    use std::io::{Read, Write};
+    let rest = redirect_uri.strip_prefix("http://").unwrap();
+    let (address, path) = rest.split_at(rest.find('/').unwrap());
+    let mut socket = std::net::TcpStream::connect(address).unwrap();
+    let request = format!("GET {path}?{query} HTTP/1.1\r\nhost: {address}\r\n\r\n");
+    socket.write_all(request.as_bytes()).unwrap();
+    let mut answer = String::new();
+    socket.read_to_string(&mut answer).unwrap();
+    answer
+}
+
+/// Clicks Sign in on connector `docs` and returns the redirect address that the opened page names.
+fn start_sign_in(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, shell: &Entity<Shell>, n: u64) -> String {
+    on_screen(cx, window, |window, cx| click_row(window, cx, "docs", "sign-in"));
+    wait_for_commands(cx, shell, n);
+    let opened = cx.opened_url().expect("the window opens the sign-in page");
+    assert!(opened.starts_with(common::AUTHORIZE), "{opened}");
+    on_screen(cx, window, |window, _| {
+        let shown = row(window, "docs", "sign-in-result").unwrap();
+        assert!(
+            shown.starts_with("Sign in in the browser.") && shown.ends_with(&opened),
+            "{shown}"
+        );
+    });
+    let redirect_uri = opened.split("redirect_uri=").nth(1).unwrap().to_owned();
+    assert!(redirect_uri.starts_with("http://127.0.0.1:"), "{redirect_uri}");
+    redirect_uri
+}
+
+#[gpui_kit::test]
+fn an_oauth_connector_is_signed_in_from_its_row_through_the_browser(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    add_jira(&rt, &rig);
+    add_oauth_docs(&rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(row(window, "docs", "oauth").as_deref(), Some("OAuth sign-in needed"));
+        assert_eq!(row(window, "docs", "token"), None);
+        assert!(row(window, "docs", "sign-in").is_some());
+        // A connector with a token has no sign-in.
+        assert!(row(window, "jira", "token").is_some());
+        assert_eq!(row(window, "jira", "sign-in"), None);
+    });
+
+    let redirect_uri = start_sign_in(cx, window, &shell, 1);
+    let answer = browser_returns(&redirect_uri, "code=c1&state=s1");
+    assert!(
+        answer.starts_with("HTTP/1.1 200") && answer.contains("close this page"),
+        "{answer}"
+    );
+    wait_for_commands(cx, &shell, 2);
+    wait_until(cx, &shell, "the signed-in row", |s| {
+        let connections = s.state.connections.as_ref();
+        let docs = connections.and_then(|c| c.connectors.get("docs"));
+        docs.and_then(|d| d.oauth.as_ref())
+            .is_some_and(|o| o.state == bunsin_api::OAuthState::SignedIn)
+    });
+    on_screen(cx, window, |window, _| {
+        assert_eq!(row(window, "docs", "oauth").as_deref(), Some("signed in with OAuth"));
+        assert_eq!(
+            row(window, "docs", "sign-in-result").as_deref(),
+            Some("Signed in. Check lists the tools with the new sign-in.")
+        );
+        assert_not_on_screen(window, common::OAUTH_ACCESS, "signed in with OAuth");
+    });
+    // The listener took its one callback and closed.
+    let address = redirect_uri.strip_prefix("http://").unwrap().split('/').next().unwrap();
+    assert!(std::net::TcpStream::connect(address).is_err());
+}
+
+#[gpui_kit::test]
+fn a_refused_sign_in_shows_why_and_the_connector_still_needs_one(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    add_oauth_docs(&rt, &rig);
+    let (window, shell) = open_settings(cx, &rt, &rig);
+
+    // A request to another path does not end the sign-in.
+    let redirect_uri = start_sign_in(cx, window, &shell, 1);
+    let origin = redirect_uri.trim_end_matches("/callback");
+    let other = browser_returns(&format!("{origin}/favicon.ico"), "");
+    assert!(other.starts_with("HTTP/1.1 404"), "{other}");
+    browser_returns(&redirect_uri, "error=access_denied&state=s1");
+    wait_for_commands(cx, &shell, 2);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            row(window, "docs", "sign-in-result").as_deref(),
+            Some("invalid request: the authorization server did not give access: access_denied")
+        );
+        assert_eq!(row(window, "docs", "oauth").as_deref(), Some("OAuth sign-in needed"));
+    });
+    let connections = rt.block_on(rig.engine.connections("kim")).unwrap();
+    let oauth = connections.connectors["docs"].oauth.as_ref().unwrap();
+    assert_eq!(oauth.state, bunsin_api::OAuthState::SignInNeeded);
+
+    // The owner can start again from the same row.
+    let again = start_sign_in(cx, window, &shell, 3);
+    assert_ne!(again, redirect_uri, "each sign-in listens on its own address");
 }

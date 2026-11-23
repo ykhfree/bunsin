@@ -1,6 +1,6 @@
 //! Runs the real `bunsind` binary: one server process and separate command processes.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
@@ -54,25 +54,31 @@ struct Server {
 
 impl Server {
     fn start(data_dir: &Path) -> Self {
+        Self::start_with(data_dir, &[], 0).0
+    }
+
+    /// Starts the server with more options and returns the `more` lines it prints after the first.
+    fn start_with(data_dir: &Path, options: &[&str], more: usize) -> (Self, Vec<String>) {
         let mut child = bunsind()
             .args(["serve", "--listen", "127.0.0.1:0", "--data-dir"])
             .arg(data_dir)
+            .args(options)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let line = lines.next().unwrap().unwrap();
         let url = line
             .trim()
             .strip_prefix("listening on ")
             .unwrap_or_else(|| panic!("unexpected: {line:?}"));
-        Self {
+        let more = lines.take(more).map(Result::unwrap).collect();
+        let server = Self {
             url: url.to_owned(),
             child,
-        }
+        };
+        (server, more)
     }
 
     /// Runs a remote command against this server.
@@ -140,7 +146,121 @@ fn an_owner_controls_only_the_own_profile_through_the_server() {
 
     let error = stderr_of_failure(server.run(&kim, &["stop", "lee", "on"]), "stop for another profile");
     assert!(error.contains("not authorized"), "{error}");
+    // A new profile has made no LLM call: the table has only its head line.
+    assert_eq!(
+        stdout_of(server.run(&kim, &["llm-usage", "kim"]), "llm-usage"),
+        "day\tpurpose\tcalls\tfailed\tinput tokens\toutput tokens\taverage ms\n"
+    );
+    let error = stderr_of_failure(server.run(&kim, &["llm-usage", "lee"]), "llm-usage for another profile");
+    assert!(error.contains("not authorized"), "{error}");
     assert!(stdout_of(server.run(&lee, &["status", "lee"]), "status").starts_with("kill switch: off\n"));
+
+    // An owner gives out caller tokens of the own profile and revokes them.
+    let token = stdout_of(
+        server.run(&kim, &["caller-add", "kim", "--label", "Lee's bot"]),
+        "caller-add",
+    );
+    assert!(token.starts_with("bsc_"), "{token}");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["callers", "kim"]), "callers"),
+        "1\tvalid\tLee's bot\n"
+    );
+    let error = stderr_of_failure(
+        server.run(&lee, &["caller-revoke", "kim", "1"]),
+        "a revoke for another profile",
+    );
+    assert!(error.contains("not authorized"), "{error}");
+    stdout_of(server.run(&kim, &["caller-revoke", "kim", "1"]), "caller-revoke");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["callers", "kim"]), "callers"),
+        "1\trevoked\tLee's bot\n"
+    );
+    // The caller token is no access token.
+    let error = stderr_of_failure(
+        server.run(token.trim(), &["profile-list"]),
+        "a caller token on the control API",
+    );
+    assert!(error.contains("not authorized"), "{error}");
+}
+
+#[test]
+fn the_server_opens_the_outer_listeners_it_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = [
+        "--internal-listen",
+        "127.0.0.1:0",
+        "--internal-url",
+        "http://127.0.0.1",
+        "--public-listen",
+        "127.0.0.1:0",
+        "--public-url",
+        "http://localhost",
+    ];
+    let (server, lines) = Server::start_with(dir.path(), &options, 2);
+    assert!(
+        lines[0].starts_with("internal listener on http://127.0.0.1:"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("public listener on http://127.0.0.1:"),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|line| line.contains(&server.url)));
+    server.stop();
+}
+
+#[test]
+fn the_operator_names_the_ard_publishers_and_the_owner_reads_the_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let options = [
+        "--internal-listen",
+        "127.0.0.1:0",
+        "--internal-url",
+        "http://127.0.0.1",
+        "--ard-publisher-domain",
+        "acme.com",
+    ];
+    let (server, _) = Server::start_with(dir.path(), &options, 1);
+    let mut config: serde_json::Value =
+        serde_json::from_str(&stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show")).unwrap();
+    config["inbound"] = serde_json::json!({"enabled": true, "description": "Questions about deploys.",
+        "ard": {"publisher": "acme.com", "agent_name": "kim", "representative_queries": ["When do we deploy?"]}});
+    let file = dir.path().join("kim.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    let shown = stdout_of(server.run(&kim, &["inbound", "kim"]), "inbound");
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(lines[0], "endpoint\ton\tinternal");
+    assert_eq!(
+        lines[1],
+        "internal\thttp://127.0.0.1/agents/kim/mcp\thttp://127.0.0.1/agents/kim/mcp/server-card\t\
+         http://127.0.0.1/.well-known/ard.json"
+    );
+    assert_eq!(lines[2], "ard\turn:air:acme.com:kim\tlisted on: internal");
+    assert!(
+        lines[3].starts_with("warning\tthe entry has 1 representative queries"),
+        "{shown}"
+    );
+    // An IP address cannot be an SVCB target, so the DNS line says why there is no record.
+    assert_eq!(
+        lines[4],
+        "dns\t; no _entries._agents record for http://127.0.0.1/: \
+         the SVCB target must be a host name, not an IP address"
+    );
+
+    // Another domain is refused when the settings are stored.
+    config["inbound"]["ard"]["publisher"] = serde_json::json!("other.example");
+    std::fs::write(&file, config.to_string()).unwrap();
+    let error = stderr_of_failure(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set with another domain",
+    );
+    assert!(error.contains("--ard-publisher-domain other.example"), "{error}");
+    server.stop();
 }
 
 #[test]
@@ -319,6 +439,140 @@ fn a_connector_takes_a_header_for_its_token_and_needs_no_token() {
 }
 
 #[test]
+fn a_rest_api_connector_is_saved_with_its_token_from_standard_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let set = [
+        "connector-set",
+        "kim",
+        "jira",
+        "--url",
+        "https://acme.atlassian.net",
+        "--api",
+        "jira",
+        "--auth",
+        "basic",
+        "--email",
+        "kim@acme.example",
+        "--token-stdin",
+    ];
+    let run = |args: &[&str], token: &str| {
+        let mut child = bunsind()
+            .arg(args[0])
+            .arg("--server")
+            .arg(&server.url)
+            .args(&args[1..])
+            .env("BUNSIN_TOKEN", &kim)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(token.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    stdout_of(run(&set, "atlassian-token-41\n"), "connector-set --api");
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        "llm\tnot set\njira\tapi jira https://acme.atlassian.net basic kim@acme.example\ttoken stored on the server\n"
+    );
+    // Slack takes only a bearer token. The server refuses the save.
+    let slack = [
+        "connector-set",
+        "kim",
+        "slack",
+        "--url",
+        "https://slack.com/api",
+        "--api",
+        "slack",
+        "--auth",
+        "basic",
+        "--email",
+        "kim@acme.example",
+        "--token-stdin",
+    ];
+    let error = stderr_of_failure(run(&slack, "xoxb-1\n"), "slack with basic auth");
+    assert!(error.contains("only a bearer token"), "{error}");
+    // A REST API takes its token in Authorization, so a token header is refused by the command line.
+    let header = [
+        "connector-set",
+        "kim",
+        "x",
+        "--url",
+        "https://slack.com/api",
+        "--api",
+        "slack",
+        "--token-header",
+        "X",
+    ];
+    let refused = server.run(&kim, &header);
+    assert_eq!(refused.status.code(), Some(2), "a usage error");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn the_owner_stores_a_webhook_secret_from_standard_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let options = ["--public-listen", "127.0.0.1:0", "--public-url", "http://localhost"];
+    let (server, _) = Server::start_with(dir.path(), &options, 1);
+    let piped = |args: &[&str], input: &str| {
+        let mut child = bunsind()
+            .arg(args[0])
+            .arg("--server")
+            .arg(&server.url)
+            .args(&args[1..])
+            .env("BUNSIN_TOKEN", &kim)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let set = [
+        "connector-set",
+        "kim",
+        "slack-api",
+        "--url",
+        "https://slack.com/api",
+        "--api",
+        "slack",
+        "--token-stdin",
+    ];
+    stdout_of(piped(&set, "xoxb-1\n"), "connector-set --api slack");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show")).unwrap();
+    config["webhooks"] = serde_json::json!({"slack-events": {"connector": "slack-api", "scope": "public"}});
+    let file = dir.path().join("kim.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    let line = |shown: String| shown.lines().find(|l| l.starts_with("webhook")).unwrap().to_owned();
+    assert_eq!(
+        line(stdout_of(server.run(&kim, &["inbound", "kim"]), "inbound")),
+        "webhook\tslack-events\tslack-api\tno secret\thttp://localhost/hooks/kim/slack-events"
+    );
+    stdout_of(
+        piped(&["webhook-secret", "kim", "slack-events"], "signing-secret-7\n"),
+        "webhook-secret",
+    );
+    let shown = stdout_of(server.run(&kim, &["inbound", "kim"]), "inbound");
+    assert!(line(shown.clone()).contains("\tsecret stored\t"), "{shown}");
+    assert!(!shown.contains("signing-secret-7"));
+    let error = stderr_of_failure(
+        piped(&["webhook-secret", "kim", "nothing"], "s\n"),
+        "an unknown webhook",
+    );
+    assert!(error.contains("webhook `nothing`"), "{error}");
+    server.stop();
+}
+
+#[test]
 fn llm_test_reports_why_the_endpoint_does_not_work() {
     let dir = tempfile::tempdir().unwrap();
     let kim = add_profile(dir.path(), "kim", "Kim");
@@ -388,6 +642,540 @@ fn a_key_store_that_cannot_work_stops_the_start_before_any_key_is_read() {
     // A public address without TLS is refused before the key is made.
     let public = operator(dir.path(), &["serve", "--listen", "0.0.0.0:0"]);
     stderr_of_failure(public, "a public address without TLS");
+    // So are an outer listener without TLS and a listener on the address of the control API.
+    let serve = |extra: &[&str]| operator(dir.path(), &[&["serve", "--listen", "127.0.0.1:8790"], extra].concat());
+    let open = serve(&[
+        "--internal-listen",
+        "0.0.0.0:0",
+        "--internal-url",
+        "https://agents.example.com",
+    ]);
+    assert!(stderr_of_failure(open, "an internal listener without TLS").contains("--internal-tls-cert"));
+    let shared = serve(&[
+        "--public-listen",
+        "127.0.0.1:8790",
+        "--public-url",
+        "https://agents.example.com",
+    ]);
+    assert!(stderr_of_failure(shared, "a shared address").contains("cannot share the address"));
     assert!(!dir.path().join("master.key").exists() && !key_file.exists());
     assert!(!dir.path().join("keychain-id").exists());
+}
+
+#[test]
+fn a_start_marks_a_cut_call_unknown_and_the_owner_resolves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    // The last server stopped while it ran this call.
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let body = bunsin_core::records::InboxBody::ToolCall {
+        tool: "slack/post".into(),
+        args: serde_json::json!({"text": "hi"}).as_object().unwrap().clone(),
+    };
+    let item = store
+        .add_inbox_item(
+            "k1",
+            &body,
+            "asked",
+            &[],
+            bunsin_core::approval::ApprovalState::Executing,
+            1,
+        )
+        .unwrap();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    let id = item.id.to_string();
+    let status = stdout_of(server.run(&kim, &["status", "kim"]), "status");
+    assert!(status.contains(&format!("#{id} [unknown] slack/post")), "{status}");
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["resolve-unknown", "kim", &id, "drop"]),
+            "resolve-unknown"
+        ),
+        format!("item {id} resolved\n")
+    );
+    let status = stdout_of(server.run(&kim, &["status", "kim"]), "status");
+    assert!(status.contains(&format!("#{id} [failed] slack/post")), "{status}");
+    let error = stderr_of_failure(
+        server.run(&kim, &["resolve-unknown", "kim", &id, "done"]),
+        "a second resolve",
+    );
+    assert!(error.contains("not unknown"), "{error}");
+}
+
+#[test]
+fn the_owner_lists_and_retires_corrections() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let correction = bunsin_core::context::Correction {
+        tool: "slack/post".into(),
+        source: "slack".into(),
+        task: "when is the deploy?".into(),
+        original: "It is on Friday.\nI think.".into(),
+        edited: "Thursday.".into(),
+        reason: "it moved".into(),
+    };
+    let id = store.add_correction(4, &correction, 1).unwrap().to_string();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    let listed = stdout_of(server.run(&kim, &["corrections", "kim"]), "corrections");
+    assert_eq!(
+        listed,
+        format!(
+            "#{id} slack/post from slack\n  task: when is the deploy?\n  draft: It is on Friday.\n    I think.\n  \
+             edit: Thursday.\n  reason: it moved\n"
+        )
+    );
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["retire-correction", "kim", &id]),
+            "retire-correction"
+        ),
+        format!("correction {id} retired\n")
+    );
+    let listed = stdout_of(server.run(&kim, &["corrections", "kim"]), "corrections");
+    assert!(
+        listed.starts_with(&format!("#{id} slack/post from slack (retired)\n")),
+        "{listed}"
+    );
+    let error = stderr_of_failure(server.run(&kim, &["retire-correction", "kim", &id]), "a second retire");
+    assert!(error.contains("already retired"), "{error}");
+}
+
+#[test]
+fn the_owner_reports_an_autonomous_call_and_clears_the_hold() {
+    use bunsin_core::approval::ApprovalState;
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    // A call that the policy ran without the owner.
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let body = bunsin_core::records::InboxBody::ToolCall {
+        tool: "slack/post".into(),
+        args: serde_json::json!({"text": "hi"}).as_object().unwrap().clone(),
+    };
+    let item = store
+        .add_inbox_item("k1", &body, "asked", &[], ApprovalState::Approved, 1)
+        .unwrap();
+    for (from, to) in [
+        (ApprovalState::Approved, ApprovalState::Executing),
+        (ApprovalState::Executing, ApprovalState::Executed),
+    ] {
+        assert!(store.move_inbox_state(item.id, from, to, 1).unwrap());
+    }
+    store
+        .add_decision(
+            1,
+            Some(item.id),
+            "slack/post",
+            bunsin_core::records::DecisionKind::Autonomous,
+        )
+        .unwrap();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    let id = item.id.to_string();
+    let header = "thresholds: none, so no tool is suggested; the counts cover all days\n\
+                  tool\treviewed\tunchanged\tedited\trejected\tautonomous\tfailed\tstate\n";
+    // The profile has no write rule and no hold yet.
+    assert_eq!(stdout_of(server.run(&kim, &["autonomy", "kim"]), "autonomy"), header);
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["report-autonomous", "kim", &id]),
+            "report-autonomous"
+        ),
+        format!("item {id} reported; its tool asks you until you clear the hold\n")
+    );
+    // The hold starts the counts again.
+    assert_eq!(
+        stdout_of(server.run(&kim, &["autonomy", "kim"]), "autonomy"),
+        format!("{header}slack/post\t0\t0 (-)\t0\t0\t0\t0\theld\n")
+    );
+    let error = stderr_of_failure(server.run(&kim, &["report-autonomous", "kim", &id]), "a second report");
+    assert!(error.contains("reported before"), "{error}");
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["clear-autonomy-hold", "kim", "slack/post"]),
+            "clear-autonomy-hold"
+        ),
+        "hold of slack/post cleared\n"
+    );
+    let error = stderr_of_failure(
+        server.run(&kim, &["clear-autonomy-hold", "kim", "slack/post"]),
+        "a second clear",
+    );
+    assert!(error.contains("not held"), "{error}");
+}
+
+#[test]
+fn the_owner_adds_replay_cases_and_runs_an_evaluation() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let file = dir.path().join("cases.json");
+    let cases = serde_json::json!([
+        {"event": {"source": "slack", "external_id": "c1", "thread": null, "author": "lee",
+                   "text": "when do we deploy?\nasap"},
+         "actual_reply": "At 3 pm."},
+        {"event": {"source": "slack", "external_id": "c2", "thread": null, "author": "lee",
+                   "text": "can I get a raise?"},
+         "actual_reply": "", "expect": "escalate"}
+    ]);
+    std::fs::write(&file, cases.to_string()).unwrap();
+    let path = file.to_str().unwrap();
+
+    let server = Server::start(dir.path());
+    assert_eq!(
+        stdout_of(server.run(&kim, &["add-replay-cases", "kim", path]), "add-replay-cases"),
+        "2 case(s) added: #1 #2\n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["replay-cases", "kim"]), "replay-cases"),
+        "#1 reply from slack by lee\n  event: when do we deploy?\n    asap\n  reply: At 3 pm.\n\
+         #2 escalate from slack by lee\n  event: can I get a raise?\n  reply: \n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["eval-report", "kim"]), "eval-report"),
+        "no evaluation has run\n"
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["start-eval", "kim"]), "start-eval"),
+        "evaluation run 1 started; see it with eval-report\n"
+    );
+    // The profile has no LLM, so each replay fails. The server's background task still ends the run.
+    let mut report = String::new();
+    for _ in 0..60 {
+        report = stdout_of(server.run(&kim, &["eval-report", "kim"]), "eval-report");
+        if report.starts_with("run 1: done") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let mut lines = report.lines();
+    assert_eq!(lines.next(), Some("run 1: done"), "{report}");
+    assert_eq!(lines.next(), Some("cases: 2, failed: 2"));
+    assert_eq!(
+        lines.next(),
+        Some("kind -\toverlap -\tboundary -\tover-escalation -\tread -")
+    );
+    assert_eq!(lines.next(), Some("pass mark: none"));
+    assert!(
+        report.contains("#2\tescalate\tfailed: the LLM cannot be used"),
+        "{report}"
+    );
+
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["delete-replay-case", "kim", "1"]),
+            "delete-replay-case"
+        ),
+        "replay case 1 deleted\n"
+    );
+    let error = stderr_of_failure(server.run(&kim, &["delete-replay-case", "kim", "1"]), "a second delete");
+    assert!(error.contains("does not exist"), "{error}");
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, "{}").unwrap();
+    let error = stderr_of_failure(
+        server.run(&kim, &["add-replay-cases", "kim", bad.to_str().unwrap()]),
+        "a file that is no list",
+    );
+    assert!(error.contains("is not a list of replay cases"), "{error}");
+}
+
+#[test]
+fn the_owner_extracts_adopts_and_dismisses_principle_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let first = store
+        .add_principle_candidate("Ask first.", "ask me\nfirst", "corrections", 5)
+        .unwrap()
+        .to_string();
+    let second = store
+        .add_principle_candidate("Be brief.", "short", "read:slack/search", 6)
+        .unwrap()
+        .to_string();
+    drop(store);
+
+    let server = Server::start(dir.path());
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["principle-candidates", "kim"]),
+            "principle-candidates"
+        ),
+        format!(
+            "#{second} new from read:slack/search\n  text: Be brief.\n  evidence: short\n\
+             #{first} new from corrections\n  text: Ask first.\n  evidence: ask me\n    first\n"
+        )
+    );
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["adopt-principle", "kim", &first, "--text", "Ask me first."]),
+            "adopt-principle"
+        ),
+        format!("candidate {first} added to the principles\n")
+    );
+    assert_eq!(
+        stdout_of(
+            server.run(&kim, &["dismiss-principle", "kim", &second]),
+            "dismiss-principle"
+        ),
+        format!("candidate {second} dismissed\n")
+    );
+    let error = stderr_of_failure(
+        server.run(&kim, &["adopt-principle", "kim", &second]),
+        "adopt a dismissed one",
+    );
+    assert!(error.contains("dismissed already"), "{error}");
+    let config = stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show");
+    let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(config["principles"], serde_json::json!(["Ask me first."]));
+
+    // The checks of the options run before the server is asked.
+    let error = stderr_of_failure(
+        server.run(&kim, &["extract-principles", "kim", "--from", "read"]),
+        "read without a tool",
+    );
+    assert!(error.contains("needs --tool"), "{error}");
+    // The profile has no correction yet.
+    let error = stderr_of_failure(
+        server.run(&kim, &["extract-principles", "kim", "--from", "corrections"]),
+        "no texts",
+    );
+    assert!(error.contains("has no text"), "{error}");
+}
+
+#[test]
+fn the_owner_checks_the_notes_and_dismisses_a_finding() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let error = stderr_of_failure(server.run(&kim, &["lint-notes", "kim"]), "checks off");
+    assert!(error.contains("checks of the notes are off"), "{error}");
+
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let text = store.setting("config").unwrap().unwrap();
+    let mut config: serde_json::Value = serde_json::from_str(&text).unwrap();
+    config["notes"] = serde_json::json!({"stale_days": 1});
+    store.set_setting("config", &config.to_string()).unwrap();
+    let page = bunsin_core::wiki::WikiText {
+        title: "Deploy".into(),
+        summary: "When".into(),
+        body: "Fridays.".into(),
+    };
+    // A page from long ago: the server's clock is the real one.
+    store
+        .write_wiki_page("deploy", &page, &[], bunsin_core::wiki::WikiAuthor::Owner, 0, None, 1)
+        .unwrap();
+    drop(store);
+
+    let out = stdout_of(server.run(&kim, &["lint-notes", "kim"]), "lint-notes");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "2 finding(s)");
+    assert!(lines[1].contains(" stale deploy: nobody changed it for "), "{out}");
+    assert!(lines[2].contains(" orphan deploy: no other page names it"), "{out}");
+    let id = lines[1].trim_start_matches('#').split(' ').next().unwrap();
+    assert_eq!(
+        stdout_of(server.run(&kim, &["dismiss-finding", "kim", id]), "dismiss-finding"),
+        format!("finding {id} dismissed\n")
+    );
+    let left = stdout_of(server.run(&kim, &["lint-findings", "kim"]), "lint-findings");
+    assert_eq!(left, format!("{}\n", lines[2]));
+}
+
+#[test]
+fn the_owner_searches_the_notes_from_the_command_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let store = bunsin_store::AppStore::open(dir.path())
+        .unwrap()
+        .open_profile("kim")
+        .unwrap();
+    let pages = [
+        ("deploy", "Deploy", "금요일에 배포합니다. Rollback with care."),
+        ("oncall", "On-call", "Rollback by the 당번."),
+        ("lunch", "Lunch", "Noodles."),
+        ("parking", "Parking", "Level B2."),
+    ];
+    for (at, (slug, title, body)) in pages.into_iter().enumerate() {
+        let text = bunsin_core::wiki::WikiText {
+            title: title.into(),
+            summary: format!("About {slug}"),
+            body: body.into(),
+        };
+        let owner = bunsin_core::wiki::WikiAuthor::Owner;
+        store
+            .write_wiki_page(slug, &text, &[], owner, 0, None, at as i64 + 1)
+            .unwrap();
+    }
+    drop(store);
+
+    let search = |query: &str| stdout_of(server.run(&kim, &["wiki-search", "kim", query]), query);
+    // The page with both words first, then the other match.
+    assert_eq!(
+        search("rollback 금요일"),
+        "deploy\tDeploy\tAbout deploy\noncall\tOn-call\tAbout oncall\n"
+    );
+    assert_eq!(search("배포"), "deploy\tDeploy\tAbout deploy\n");
+    assert_eq!(search("weather"), "no page matches\n");
+    let error = stderr_of_failure(server.run(&kim, &["wiki-search", "kim", "ab"]), "a short query");
+    assert!(error.contains("the query has no word to search for"), "{error}");
+}
+
+#[test]
+fn a_preload_needs_a_tool_with_a_read_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let server = Server::start(dir.path());
+    let error = stderr_of_failure(
+        server.run(
+            &kim,
+            &["preload-notes", "kim", "--tool", "slack/search", "--args", "[1]"],
+        ),
+        "args not an object",
+    );
+    assert!(error.contains("--args is not a JSON object"), "{error}");
+    let error = stderr_of_failure(
+        server.run(&kim, &["preload-notes", "kim", "--tool", "slack/search"]),
+        "no read rule",
+    );
+    assert!(error.contains("has no rule with the class `read`"), "{error}");
+}
+
+#[test]
+fn coding_needs_both_operator_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    for flags in [
+        vec!["--allow-coding"],
+        vec!["--coding-repo-root", root],
+        vec!["--coding-program", "codex=/usr/local/bin/codex"],
+        vec!["--allow-coding-commands"],
+    ] {
+        let output = operator(dir.path(), &[["serve"].as_slice(), flags.as_slice()].concat());
+        // clap refuses the arguments before the server starts.
+        assert_eq!(output.status.code(), Some(2), "{flags:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("required"), "{error}");
+    }
+    // A custom program is no operator program: it needs --allow-coding-commands and the profile's settings.
+    let output = operator(
+        dir.path(),
+        &[
+            "serve",
+            "--allow-coding",
+            "--coding-repo-root",
+            root,
+            "--coding-program",
+            "command=/bin/sh",
+        ],
+    );
+    let error = stderr_of_failure(output, "a custom program");
+    assert!(error.contains("not a backend"), "{error}");
+}
+
+#[path = "support/oauth_stub.rs"]
+mod oauth_stub;
+
+#[test]
+fn connector_oauth_prints_the_address_and_takes_the_pasted_callback() {
+    // The stub authorization server runs on its own threads while the processes run.
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let stub = runtime.block_on(oauth_stub::start());
+    let dir = tempfile::tempdir().unwrap();
+    let kim = add_profile(dir.path(), "kim", "Kim");
+    let (server, _) = Server::start_with(dir.path(), &["--allow-upstream-host", "127.0.0.1"], 0);
+    let shown = stdout_of(server.run(&kim, &["config-show", "kim"]), "config-show");
+    let mut config: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    config["connectors"] = serde_json::json!({
+        "docs": {"mcp": {"transport": "http", "url": stub.mcp_url()}, "oauth": {}}
+    });
+    let file = dir.path().join("kim.json");
+    std::fs::write(&file, config.to_string()).unwrap();
+    stdout_of(
+        server.run(&kim, &["config-set", "kim", file.to_str().unwrap()]),
+        "config-set",
+    );
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        format!("llm\tnot set\ndocs\t{}\tOAuth sign-in needed\n", stub.mcp_url())
+    );
+
+    let mut child = bunsind()
+        .args(["connector-oauth", "--server", &server.url, "kim", "docs"])
+        .env("BUNSIN_TOKEN", &kim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut address = String::new();
+    stdout.read_line(&mut address).unwrap();
+    assert!(
+        address.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8976%2Fcallback"),
+        "{address}"
+    );
+    let callback = runtime.block_on(oauth_stub::browser(address.trim()));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{callback}\n").as_bytes())
+        .unwrap();
+    let status = child.wait().unwrap();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).unwrap();
+    let mut errors = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut errors).unwrap();
+    assert!(status.success(), "connector-oauth failed: {errors}");
+    assert!(rest.contains("connector docs of kim is signed in"), "{rest}");
+    assert!(errors.contains("paste it here"), "{errors}");
+
+    assert_eq!(
+        stdout_of(server.run(&kim, &["connections", "kim"]), "connections"),
+        format!("llm\tnot set\ndocs\t{}\tsigned in with OAuth\n", stub.mcp_url())
+    );
+    let tools = stdout_of(server.run(&kim, &["tools", "kim", "docs"]), "tools");
+    assert!(tools.contains("hello"), "{tools}");
+    for text in [&address, &rest, &errors, &tools] {
+        for secret in [oauth_stub::ACCESS, oauth_stub::REFRESH] {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+
+    // A pasted address of no waiting sign-in is refused, with exit status 1.
+    let mut child = bunsind()
+        .args(["connector-oauth", "--server", &server.url, "kim", "docs"])
+        .env("BUNSIN_TOKEN", &kim)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{callback}\n").as_bytes())
+        .unwrap();
+    let error = stderr_of_failure(child.wait_with_output().unwrap(), "a used callback");
+    assert!(error.contains("no sign-in waits"), "{error}");
 }

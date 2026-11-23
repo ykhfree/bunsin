@@ -757,6 +757,7 @@ fn a_late_state_does_not_replace_a_new_page(cx: &mut TestAppContext) {
             profile: "kim".into(),
             slug: "team".into(),
             page: Some(page),
+            history: None,
         }),
         connected: true,
         ..UiState::default()
@@ -804,6 +805,7 @@ fn a_save_is_not_forgotten_if_the_reload_after_it_fails(cx: &mut TestAppContext)
             profile: "kim".into(),
             slug: "team".into(),
             page: Some(page),
+            history: None,
         }),
         connected: true,
         ..UiState::default()
@@ -848,5 +850,338 @@ fn a_save_is_not_forgotten_if_the_reload_after_it_fails(cx: &mut TestAppContext)
         );
         assert_eq!(label(window, "note-changes"), "");
         assert_eq!(label(window, "note-result"), "Saved");
+    });
+}
+
+fn history_len(shell: &Shell) -> Option<usize> {
+    shell.state.open_note.as_ref()?.history.as_ref().map(Vec::len)
+}
+
+#[gpui_kit::test]
+fn an_old_revision_is_read_and_saved_again_through_the_normal_save(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let later = text("Team", "Who does what", "Lee leads.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "team", later)).unwrap();
+    // The history is below the text area. This window is tall enough to click it without a scroll.
+    let (window, shell) = common::window::open_sized(cx, &rt, &rig, (1280., 1400.));
+    on_screen(cx, window, |window, cx| window.click("tab-notes", cx));
+    open_page(cx, window, &shell, "team");
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "note-history"), "History");
+        assert!(window.try_find("note-rev-0").is_none());
+        window.click("note-history", cx);
+    });
+    wait_until(cx, &shell, "the history", |s| history_len(s) == Some(2));
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "note-history"), "Hide the history");
+        let first = label(window, "note-rev-0");
+        assert!(first.starts_with("Revision 1 · by you · "), "{first}");
+        assert!(label(window, "note-rev-1").starts_with("Revision 2 · "));
+        // Nothing is chosen yet.
+        assert!(window.try_find("note-rev-text").is_none());
+        window.click("note-rev-0", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "note-rev-text"), "Team\nWho does what\n\nKim leads.");
+        // Typed text is not replaced by an old revision.
+        retype_body(window, cx, "Typed by me.");
+        window.click("note-rev-load", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "note-message"),
+            "This page has changes that are not saved. Save or discard them first."
+        );
+        assert_eq!(body(window), "Typed by me.");
+        retype_body(window, cx, "Lee leads.");
+        window.click("note-rev-load", cx);
+    });
+    let before = commands(cx, &shell);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(body(window), "Kim leads.");
+        assert_eq!(label(window, "note-changes"), "Not saved");
+        window.click("note-save", cx);
+    });
+    assert_eq!(
+        wait_for_result(cx, &shell, before),
+        NoteResult::Saved {
+            slug: "team".into(),
+            result: Ok(()),
+        }
+    );
+    let page = rt.block_on(rig.engine.wiki_page("kim", "team")).unwrap();
+    assert_eq!((page.revision, page.text.body.as_str()), (3, "Kim leads."));
+    // The history stays shown and gets the new revision.
+    wait_until(cx, &shell, "the new revision in the history", |s| {
+        history_len(s) == Some(3)
+    });
+    on_screen(cx, window, |window, cx| window.click("note-history", cx));
+    wait_until(cx, &shell, "the hidden history", |s| history_len(s).is_none());
+}
+
+#[gpui_kit::test]
+fn an_old_text_is_saved_with_the_revision_check(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let later = text("Team", "Who does what", "Lee leads.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "team", later)).unwrap();
+    let (window, shell) = common::window::open_sized(cx, &rt, &rig, (1280., 1400.));
+    on_screen(cx, window, |window, cx| window.click("tab-notes", cx));
+    open_page(cx, window, &shell, "team");
+    on_screen(cx, window, |window, cx| window.click("note-history", cx));
+    wait_until(cx, &shell, "the history", |s| history_len(s) == Some(2));
+    on_screen(cx, window, |window, cx| window.click("note-rev-0", cx));
+    on_screen(cx, window, |window, cx| window.click("note-rev-load", cx));
+    // Another client changes the page before the save.
+    let other = text("Team", "Who does what", "Park leads.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "team", other)).unwrap();
+    let before = commands(cx, &shell);
+    on_screen(cx, window, |window, cx| window.click("note-save", cx));
+    assert_eq!(
+        wait_for_result(cx, &shell, before),
+        NoteResult::Saved {
+            slug: "team".into(),
+            result: Err(SaveError::Conflict),
+        }
+    );
+    assert_eq!(rt.block_on(page_body(&rig, "team")), "Park leads.");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "note-conflict"), PAGE_CONFLICT);
+        assert_eq!(body(window), "Kim leads.");
+    });
+}
+
+#[gpui_kit::test]
+fn the_owner_checks_the_notes_and_dismisses_a_finding(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let now = 30 * 86_400;
+    let rig = rt.block_on(common::rig_at(now));
+    // Check with the default settings: the server says the checks are off. It is not a window error.
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "findings-count"), "Findings: 0");
+        window.click("lint-notes", cx);
+    });
+    wait_until(cx, &shell, "the refused check", |s| s.state.lint_result.is_some());
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "lint-result").contains("checks of the notes are off"));
+    });
+    assert_eq!(shell.read_with(cx, |s, _| s.state.error.clone()), None);
+
+    // A page that nobody changed for 29 days, with checks after 7 days.
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config.notes.stale_days = Some(7);
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+    let store = rig.engine.app_store().open_profile("kim").unwrap();
+    let page = WikiText {
+        title: "Deploy".into(),
+        summary: "When".into(),
+        body: "Fridays.".into(),
+    };
+    store
+        .write_wiki_page("deploy", &page, &[], WikiAuthor::Owner, 0, None, 86_400)
+        .unwrap();
+    on_screen(cx, window, |window, cx| window.click("lint-notes", cx));
+    wait_until(cx, &shell, "two findings", |s| {
+        s.state.lint_findings.as_ref().is_some_and(|found| found.len() == 2)
+    });
+    let ids: Vec<i64> = shell.read_with(cx, |s, _| {
+        s.state.lint_findings.as_ref().unwrap().iter().map(|f| f.id).collect()
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "lint-result"), "2 findings.");
+        assert_eq!(label(window, "findings-count"), "Findings: 2");
+        assert_eq!(
+            window.find(format!("finding-{}", ids[0])).label().unwrap_or_default(),
+            "Old: deploy · nobody changed it for 29 day(s)"
+        );
+        assert_eq!(
+            window.find(format!("finding-{}", ids[1])).label().unwrap_or_default(),
+            "Not named: deploy · no other page names it, and the agent never read it"
+        );
+        // The findings are below the pre-load card. The column scrolls.
+        window.scroll(
+            "preload-tools",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-600.))),
+            cx,
+        );
+    });
+    on_screen(cx, window, |window, cx| {
+        window.click(format!("dismiss-finding-{}", ids[0]), cx);
+    });
+    wait_until(cx, &shell, "one finding", |s| {
+        s.state.lint_findings.as_ref().is_some_and(|found| found.len() == 1)
+    });
+    // The check changed no page.
+    assert_eq!(rt.block_on(rig.engine.wiki_page("kim", "deploy")).unwrap().revision, 1);
+}
+
+#[gpui_kit::test]
+fn the_owner_preloads_the_notes_from_one_read(cx: &mut TestAppContext) {
+    use bunsin_core::policy::ToolRule;
+    use bunsin_testkit::tool;
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let tools = vec![tool("post", "Post a message"), tool("search", "Search messages")];
+    rig.slack.set_tools(tools.clone());
+    rig.slack.set_result(
+        "search",
+        serde_json::json!({"messages": [{"text": "We release on Thursdays."}]}),
+    );
+    let mut config = rt.block_on(rig.engine.profile_config("kim")).unwrap();
+    config.approved_tools.insert("slack".into(), tools);
+    config.policy.rules.insert("slack/search".into(), ToolRule::read());
+    rt.block_on(rig.engine.set_profile_config("kim", config)).unwrap();
+    let keep = serde_json::json!({"kind": "ignore", "rationale": "noted", "summary": null, "tool": null,
+        "args_json": null, "wiki_updates": [{"slug": "releases", "title": "Releases", "summary": "When",
+        "body": "Thursdays."}]});
+    rig.llm.reply(&keep.to_string(), 10);
+
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    // Arguments that are not a JSON object are not sent.
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "preload-tools"), "Tools that read: slack/search");
+        window.click("preload-tool", cx);
+        window.input("slack/search", cx);
+        window.click("preload-args", cx);
+        window.input("query=release", cx);
+        window.click("preload-notes", cx);
+    });
+    on_screen(cx, window, |window, _| {
+        assert!(label(window, "preload-result").starts_with("The arguments are not a JSON object"));
+    });
+    assert!(rig.slack.calls().is_empty());
+
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "preload-args", "{\"query\": \"release\"}");
+        window.click("preload-notes", cx);
+    });
+    wait_until(cx, &shell, "the pre-load", |s| s.state.preload_result.is_some());
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "preload-result"), "1 page change waits in the inbox.");
+    });
+    assert_eq!(rig.slack.calls().len(), 1);
+    let pending = rt.block_on(rig.engine.snapshot("kim")).unwrap().inbox;
+    assert!(pending.iter().any(|item| matches!(
+        &item.body,
+        bunsin_core::records::InboxBody::WikiChange { slug, .. } if slug == "releases"
+    ) && item.state == bunsin_core::approval::ApprovalState::Pending));
+}
+
+/// The vertical position of a row of the list on screen.
+fn row_top(window: &Window, slug: &str) -> f32 {
+    f32::from(window.find(format!("note-row-{slug}")).bounds().origin.y)
+}
+
+/// Types `query` into the search field, clicks Search and waits for the result of that query.
+fn search_for(cx: &mut TestAppContext, window: AnyWindowHandle, shell: &Entity<Shell>, query: &'static str) {
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "notes-search", query);
+        window.click("notes-search-go", cx);
+    });
+    wait_until(cx, shell, "the result of the search", |s| {
+        s.state
+            .note_search
+            .as_ref()
+            .is_some_and(|search| search.query == query && search.found.is_some())
+    });
+}
+
+#[gpui_kit::test]
+fn a_search_filters_the_list_to_the_matching_pages_and_show_all_ends_it(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let oncall = text("On-call", "Who answers", "Kim does the rollback on Fridays.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "oncall", oncall)).unwrap();
+    let parking = text("Parking", "Where to park", "Level B2.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "parking", parking))
+        .unwrap();
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "notes-count"), "Pages: 4");
+        assert!(window.try_find("notes-search-result").is_none());
+    });
+
+    search_for(cx, window, &shell, "rollback fridays");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(
+            label(window, "notes-search-result"),
+            "2 pages match “rollback fridays”, best first."
+        );
+        // The page with both words is above the page with one, as the agent's search ranks them.
+        assert!(row_top(window, "oncall") < row_top(window, "deploy-schedule"));
+        assert!(window.try_find("note-row-team").is_none());
+        assert!(window.try_find("note-row-parking").is_none());
+        // The count still names every page.
+        assert_eq!(label(window, "notes-count"), "Pages: 4");
+    });
+
+    // The search runs again with every refresh, so a new matching page appears in the list.
+    let release = text("Release", "When we ship", "The rollback plan is in the runbook.");
+    rt.block_on(rig.engine.set_wiki_page("kim", "release", release))
+        .unwrap();
+    wait_until(cx, &shell, "the new page in the search", |s| {
+        s.state
+            .note_search
+            .as_ref()
+            .and_then(|search| search.found.as_ref())
+            .is_some_and(|found| found.as_ref().is_ok_and(|pages| pages.len() == 3))
+    });
+    // A found page opens like any page of the list.
+    open_page(cx, window, &shell, "oncall");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(body(window), "Kim does the rollback on Fridays.");
+        assert!(window.try_find("note-row-release").is_some());
+    });
+
+    search_for(cx, window, &shell, "weather");
+    on_screen(cx, window, |window, _| {
+        assert_eq!(label(window, "notes-search-result"), "No page matches “weather”.");
+        assert!(window.try_find("note-row-oncall").is_none());
+    });
+
+    // A query without a usable word shows why. The window stays connected.
+    search_for(cx, window, &shell, "ab");
+    on_screen(cx, window, |window, _| {
+        let reason = label(window, "notes-search-result");
+        assert!(reason.contains("the query has no word to search for"), "{reason}");
+        assert!(window.try_find("note-row-team").is_none());
+    });
+    assert!(shell.read_with(cx, |s, _| s.state.connected && s.state.error.is_none()));
+
+    on_screen(cx, window, |window, cx| window.click("notes-search-clear", cx));
+    wait_until(cx, &shell, "the end of the search", |s| s.state.note_search.is_none());
+    on_screen(cx, window, |window, _| {
+        assert_eq!(value(window, "notes-search"), "");
+        assert!(window.try_find("notes-search-result").is_none());
+        for slug in ["deploy-schedule", "team", "oncall", "parking", "release"] {
+            assert!(window.try_find(format!("note-row-{slug}")).is_some(), "{slug}");
+        }
+    });
+}
+
+#[gpui_kit::test]
+fn search_with_an_empty_field_lists_every_page(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    rt.block_on(seed(&rig));
+    let (window, shell) = open_notes(cx, &rt, &rig);
+    search_for(cx, window, &shell, "kim leads");
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("note-row-deploy-schedule").is_none());
+        assert!(window.try_find("note-row-team").is_some());
+    });
+    on_screen(cx, window, |window, cx| {
+        retype(window, cx, "notes-search", "   ");
+        window.click("notes-search-go", cx);
+    });
+    wait_until(cx, &shell, "the end of the search", |s| s.state.note_search.is_none());
+    on_screen(cx, window, |window, _| {
+        assert!(window.try_find("note-row-deploy-schedule").is_some());
+        assert!(window.try_find("notes-search-result").is_none());
     });
 }

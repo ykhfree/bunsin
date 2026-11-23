@@ -2,11 +2,16 @@
 //! so one profile cannot read another profile's data through a missed filter.
 
 mod profile;
+mod registry;
 
-pub use profile::{EventStart, ProfileStore, SealedSecret, WikiWrite};
+pub use profile::{EventStart, IntakeMessage, IntakeRow, LlmCall, ProfileStore, SealedSecret, WikiWrite};
+pub use registry::{IndexedRow, NewEntry, Refusal, RegistryRead, RegistryStore, SourceKind, SourceStatus};
 
-use bunsin_core::records::ProfileInfo;
+use bunsin_core::records::{Caller, CallerToken, ProfileInfo};
+use bunsin_core::search::{TermQuery, term_query};
 use rusqlite::Connection;
+use rusqlite::types::FromSql;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -36,6 +41,28 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 pub(crate) const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// For each term, the keys of the rows that match it. `match_sql` and `like_sql` take the
+/// argument of `search::term_query` as `?1`.
+pub(crate) fn term_hits<K: FromSql + Ord>(
+    db: &Connection,
+    terms: &[String],
+    match_sql: &str,
+    like_sql: &str,
+) -> Result<Vec<BTreeSet<K>>> {
+    terms
+        .iter()
+        .map(|term| {
+            let (sql, arg) = match term_query(term) {
+                TermQuery::Match(phrase) => (match_sql, phrase),
+                TermQuery::Like(pattern) => (like_sql, pattern),
+            };
+            let mut statement = db.prepare_cached(sql)?;
+            let rows = statement.query_map([arg], |row| row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<BTreeSet<K>>>()?)
+        })
+        .collect()
+}
+
 /// An access token as the operator lists it. The token value is not stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenInfo {
@@ -47,12 +74,22 @@ pub struct TokenInfo {
 }
 
 const TOKEN_PREFIX: &str = "bsn_";
+/// Another prefix than access tokens, so a person can tell the two kinds apart.
+const CALLER_TOKEN_PREFIX: &str = "bsc_";
 const TOKEN_ID_LEN: usize = 12;
 
 /// The data directory of one Bunsin installation.
 pub struct AppStore {
     root: PathBuf,
     db: Mutex<Connection>,
+}
+
+/// A new token: the prefix and 32 random bytes from the OS as hex.
+fn new_token(prefix: &str) -> Result<String> {
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+    let secret: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("{prefix}{secret}"))
 }
 
 fn valid_profile_id(id: &str) -> bool {
@@ -79,6 +116,14 @@ impl AppStore {
                 profile TEXT NOT NULL,
                 label TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS caller_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash TEXT NOT NULL UNIQUE,
+                profile TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                revoked_at INTEGER
             );",
         )?;
         Ok(Self {
@@ -136,10 +181,7 @@ impl AppStore {
         if !self.profile_exists(profile)? {
             return Err(StoreError::NoSuchProfile(profile.to_owned()));
         }
-        let mut random = [0u8; 32];
-        getrandom::fill(&mut random).map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        let secret: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        let token = format!("{TOKEN_PREFIX}{secret}");
+        let token = new_token(TOKEN_PREFIX)?;
         self.db.lock().expect("store lock").execute(
             "INSERT INTO tokens (hash, profile, label, created_at) VALUES (?1, ?2, ?3, ?4)",
             (bunsin_core::sha256_hex(token.as_bytes()), profile, label, now),
@@ -189,6 +231,69 @@ impl AppStore {
             .lock()
             .expect("store lock")
             .execute("DELETE FROM tokens WHERE hash LIKE ?1 || '%'", [id])?)
+    }
+
+    /// Creates a caller token for one profile and returns its ID and the token. Only the hash of
+    /// the token is stored, so this is the only time the token can be read.
+    pub fn add_caller_token(&self, profile: &str, label: &str, now: i64) -> Result<(i64, String)> {
+        if !self.profile_exists(profile)? {
+            return Err(StoreError::NoSuchProfile(profile.to_owned()));
+        }
+        let token = new_token(CALLER_TOKEN_PREFIX)?;
+        let db = self.db.lock().expect("store lock");
+        db.execute(
+            "INSERT INTO caller_tokens (hash, profile, label, created_at) VALUES (?1, ?2, ?3, ?4)",
+            (bunsin_core::sha256_hex(token.as_bytes()), profile, label, now),
+        )?;
+        Ok((db.last_insert_rowid(), token))
+    }
+
+    /// The caller behind a token. `None` for an unknown or revoked token. The table is read
+    /// on every request, so a revocation works from the next request on.
+    pub fn caller(&self, token: &str) -> Result<Option<Caller>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .db
+            .lock()
+            .expect("store lock")
+            .query_row(
+                "SELECT id, profile, label FROM caller_tokens WHERE hash = ?1 AND revoked_at IS NULL",
+                [bunsin_core::sha256_hex(token.as_bytes())],
+                |row| {
+                    Ok(Caller {
+                        id: row.get(0)?,
+                        profile: row.get(1)?,
+                        label: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The caller tokens of one profile, revoked ones too, oldest first.
+    pub fn caller_tokens(&self, profile: &str) -> Result<Vec<CallerToken>> {
+        let db = self.db.lock().expect("store lock");
+        let mut statement =
+            db.prepare("SELECT id, label, created_at, revoked_at FROM caller_tokens WHERE profile = ?1 ORDER BY id")?;
+        let rows = statement.query_map([profile], |row| {
+            Ok(CallerToken {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                created_at: row.get(2)?,
+                revoked_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Revokes a caller token of `profile`. Returns false if the profile has no such token
+    /// that is still valid, so a token of another profile is never touched.
+    pub fn revoke_caller_token(&self, profile: &str, id: i64, now: i64) -> Result<bool> {
+        let changed = self.db.lock().expect("store lock").execute(
+            "UPDATE caller_tokens SET revoked_at = ?1 WHERE id = ?2 AND profile = ?3 AND revoked_at IS NULL",
+            (now, id, profile),
+        )?;
+        Ok(changed == 1)
     }
 
     /// Opens the private store of an existing profile.
@@ -340,6 +445,48 @@ mod tests {
             assert_eq!(app.revoke_token(id).unwrap(), 0, "{id:?}");
         }
         assert!(app.token_profile(&a).unwrap().is_some() && app.token_profile(&b).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_caller_token_names_its_caller_until_it_is_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppStore::open(dir.path()).unwrap();
+        app.create_profile("kim", "Kim", 1).unwrap();
+        app.create_profile("lee", "Lee", 1).unwrap();
+        assert!(matches!(
+            app.add_caller_token("nobody", "x", 1),
+            Err(StoreError::NoSuchProfile(_))
+        ));
+        let (bot, token) = app.add_caller_token("kim", "Lee's bot", 10).unwrap();
+        let (other, _) = app.add_caller_token("lee", "Kim's bot", 11).unwrap();
+        assert_ne!(bot, other);
+        assert!(token.starts_with("bsc_") && token.len() == 4 + 64);
+        let caller = app.caller(&token).unwrap().unwrap();
+        assert_eq!(
+            (caller.id, caller.profile.as_str(), caller.label.as_str()),
+            (bot, "kim", "Lee's bot")
+        );
+        // The two kinds of token never stand in for each other.
+        assert_eq!(app.token_profile(&token).unwrap(), None);
+        let access = app.add_token("kim", "laptop", 12).unwrap();
+        assert_eq!(app.caller(&access).unwrap(), None);
+        assert_eq!(app.caller("bsc_guess").unwrap(), None);
+
+        // An owner revokes only a token of the own profile.
+        assert!(!app.revoke_caller_token("lee", bot, 20).unwrap());
+        assert!(app.caller(&token).unwrap().is_some());
+        assert!(app.revoke_caller_token("kim", bot, 20).unwrap());
+        assert_eq!(app.caller(&token).unwrap(), None);
+        assert!(!app.revoke_caller_token("kim", bot, 21).unwrap());
+        let listed = app.caller_tokens("kim").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].id, listed[0].revoked_at), (bot, Some(20)));
+        assert_eq!(app.caller_tokens("lee").unwrap()[0].revoked_at, None);
+        // Only the hash is stored.
+        drop(app);
+        let bytes = std::fs::read(dir.path().join("app.db")).unwrap();
+        let secret = &token.as_bytes()[4..];
+        assert!(!bytes.windows(secret.len()).any(|window| window == secret));
     }
 
     #[test]

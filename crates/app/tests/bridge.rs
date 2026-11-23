@@ -94,6 +94,54 @@ async fn approve_runs_the_call_and_a_second_approve_reports_an_error() {
 }
 
 #[tokio::test]
+async fn an_edited_approval_is_only_for_the_selected_profile_and_reports_a_failed_call() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let edit = |text: &str| bunsin_api::Edit {
+        args: serde_json::json!({"channel": "C1", "text": text})
+            .as_object()
+            .unwrap()
+            .clone(),
+        reason: "shorter".into(),
+    };
+    let command = |profile: &str| UiCommand::ApproveEdited {
+        profile: profile.into(),
+        id: 1,
+        edit: edit("At 3."),
+    };
+    apply(&*rig.engine, &mut state, command("lee")).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("another profile is selected")),
+        "{:?}",
+        state.error
+    );
+    assert!(rig.slack.calls().is_empty());
+    assert_eq!(state.snapshot.as_ref().unwrap().inbox[0].state, ApprovalState::Pending);
+
+    rig.slack.fail_with("channel_not_found");
+    apply(&*rig.engine, &mut state, command("kim")).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("the call failed: ") && e.contains("channel_not_found")),
+        "{:?}",
+        state.error
+    );
+    // The edit reached the server before the call failed.
+    assert!(
+        rig.slack.calls()[0].1["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("At 3.\n\n")
+    );
+}
+
+#[tokio::test]
 async fn a_failed_call_is_shown_as_an_error() {
     let rig = common::rig().await;
     rig.slack.fail_with("channel_not_found");
@@ -106,6 +154,27 @@ async fn a_failed_call_is_shown_as_an_error() {
         state.error
     );
     assert_eq!(state.snapshot.unwrap().inbox[0].state, ApprovalState::Failed);
+}
+
+#[tokio::test]
+async fn a_call_without_an_answer_is_shown_as_unknown() {
+    let rig = common::rig().await;
+    rig.slack
+        .fail_with_error(bunsin_core::ports::ConnectorError::Unanswered(
+            "no reply in 120 s".into(),
+        ));
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    apply(&*rig.engine, &mut state, UiCommand::Approve(1)).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("the outcome of the call is unknown") && e.contains("no reply in 120 s")),
+        "{:?}",
+        state.error
+    );
+    assert_eq!(state.snapshot.unwrap().inbox[0].state, ApprovalState::Unknown);
 }
 
 #[tokio::test]
@@ -763,10 +832,10 @@ async fn a_connector_save_against_a_changed_server_is_a_conflict_not_an_error() 
     assert_eq!(state.error, None);
     let jira = &state.connections.as_ref().unwrap().connectors["jira"];
     assert_eq!(
-        jira.mcp,
-        bunsin_core::settings::McpConfig::Http {
+        jira.kind,
+        bunsin_core::settings::ConnectorKind::Mcp(bunsin_core::settings::McpConfig::Http {
             url: "https://first.example/jira".into()
-        }
+        })
     );
 }
 
@@ -820,6 +889,61 @@ async fn the_state_holds_the_index_and_the_open_page_of_the_selected_profile() {
     assert_eq!(state.notes, Some(vec![]));
     apply(&*rig.engine, &mut state, UiCommand::SelectProfile("kim".into())).await;
     assert_eq!(state.open_note, None);
+}
+
+fn search(profile: &str, query: &str) -> UiCommand {
+    UiCommand::SearchNotes {
+        profile: profile.into(),
+        query: query.into(),
+    }
+}
+
+/// The slugs that the active search found.
+fn found(state: &UiState) -> Vec<String> {
+    let found = state.note_search.as_ref().unwrap().found.clone().unwrap().unwrap();
+    found.into_iter().map(|page| page.slug).collect()
+}
+
+#[tokio::test]
+async fn a_search_of_the_notes_is_for_the_selected_profile_and_runs_with_every_reload() {
+    let rig = common::rig().await;
+    rig.engine
+        .set_wiki_page("kim", "team", note("Kim leads.", None))
+        .await
+        .unwrap();
+    rig.engine
+        .set_wiki_page("lee", "team", note("Lee leads.", None))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+
+    // A search for a profile that is not selected is refused.
+    apply(&*rig.engine, &mut state, search("lee", "leads")).await;
+    assert_eq!(state.note_search, None);
+    assert!(state.error.clone().unwrap().contains("another profile"));
+
+    apply(&*rig.engine, &mut state, search("kim", "leads")).await;
+    assert_eq!(found(&state), ["team"]);
+    // The search runs again with a refresh, so it follows the pages of the server.
+    rig.engine.delete_wiki_page("kim", "team").await.unwrap();
+    refresh(&*rig.engine, &mut state).await;
+    assert!(found(&state).is_empty());
+
+    // A refused query is shown in the search, not as a lost connection.
+    apply(&*rig.engine, &mut state, search("kim", "ab")).await;
+    let refused = state.note_search.clone().unwrap().found.unwrap().unwrap_err();
+    assert!(refused.contains("no word to search for"), "{refused}");
+    assert!(state.connected && state.error.is_none());
+
+    // The search ends with another profile, and with ClearNoteSearch.
+    apply(&*rig.engine, &mut state, search("kim", "leads")).await;
+    apply(&*rig.engine, &mut state, UiCommand::SelectProfile("lee".into())).await;
+    assert_eq!(state.note_search, None);
+    apply(&*rig.engine, &mut state, search("lee", "leads")).await;
+    assert_eq!(found(&state), ["team"]);
+    apply(&*rig.engine, &mut state, UiCommand::ClearNoteSearch).await;
+    assert_eq!(state.note_search, None);
 }
 
 #[tokio::test]
@@ -972,4 +1096,149 @@ async fn a_permissions_save_reports_its_own_result_and_reloads_the_rules() {
     apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
     assert_eq!(state.permissions_result, None);
     assert_eq!(state.permission_saves, 3);
+}
+
+#[tokio::test]
+async fn the_history_of_the_open_page_is_loaded_while_it_is_shown() {
+    let rig = common::rig().await;
+    let page = |body: &str| WikiPageUpdate {
+        text: WikiText {
+            title: "Team".into(),
+            summary: "Who".into(),
+            body: body.into(),
+        },
+        expected_revision: None,
+    };
+    rig.engine
+        .set_wiki_page("kim", "team", page("Kim leads."))
+        .await
+        .unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let history = |profile: &str, show| UiCommand::NoteHistory {
+        profile: profile.into(),
+        show,
+    };
+    // Without an open page there is nothing to load.
+    apply(&*rig.engine, &mut state, history("kim", true)).await;
+    assert_eq!(state.open_note, None);
+    let open = UiCommand::OpenNote {
+        profile: "kim".into(),
+        slug: "team".into(),
+    };
+    apply(&*rig.engine, &mut state, open).await;
+    apply(&*rig.engine, &mut state, history("lee", true)).await;
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("another profile is selected"))
+    );
+    assert_eq!(state.open_note.as_ref().unwrap().history, None);
+
+    apply(&*rig.engine, &mut state, history("kim", true)).await;
+    assert_eq!(state.open_note.as_ref().unwrap().history.as_ref().unwrap().len(), 1);
+    // A change on the server reaches the shown history with the next refresh.
+    rig.engine
+        .set_wiki_page("kim", "team", page("Lee leads."))
+        .await
+        .unwrap();
+    refresh(&*rig.engine, &mut state).await;
+    let revisions = state.open_note.as_ref().unwrap().history.clone().unwrap();
+    let bodies: Vec<_> = revisions
+        .iter()
+        .map(|r| r.as_ref().unwrap().text.body.as_str())
+        .collect();
+    assert_eq!(bodies, ["Kim leads.", "Lee leads."]);
+    apply(&*rig.engine, &mut state, history("kim", false)).await;
+    assert_eq!(state.open_note.as_ref().unwrap().history, None);
+}
+
+/// The sign-in result of the last command, as text.
+fn sign_in_result(state: &UiState) -> Result<String, String> {
+    match &state.connection_result {
+        Some(ConnectionResult::SignInStarted { result, .. }) => result.clone(),
+        Some(ConnectionResult::SignedIn { result, .. }) => result.clone().map(|()| "signed in".to_owned()),
+        other => panic!("not a sign-in result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_sign_in_without_a_callback_or_for_another_connector_or_profile_saves_nothing() {
+    let rig = common::rig().await;
+    let mut config = rig.engine.profile_config("kim").await.unwrap();
+    config.connectors.insert(
+        "docs".into(),
+        serde_json::json!({"mcp": {"transport": "http", "url": common::OAUTH_URL}, "oauth": {}}),
+    );
+    config.connectors.insert(
+        "wiki".into(),
+        serde_json::json!({"mcp": {"transport": "http", "url": "https://mcp.example/wiki"}}),
+    );
+    rig.engine.set_profile_config("kim", config).await.unwrap();
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let finish = |name: &str, profile: &str, callback: Result<String, String>| UiCommand::FinishSignIn {
+        profile: profile.into(),
+        name: name.into(),
+        callback,
+    };
+
+    // The listener gave up. The engine is not asked.
+    let late = "nobody signed in within 10 minutes. Sign in again".to_owned();
+    apply(&*rig.engine, &mut state, finish("docs", "kim", Err(late.clone()))).await;
+    assert_eq!(sign_in_result(&state), Err(late));
+
+    // A connector without OAuth cannot start one.
+    let start = UiCommand::StartSignIn {
+        profile: "kim".into(),
+        name: "wiki".into(),
+        redirect_uri: "http://127.0.0.1:8976/callback".into(),
+    };
+    apply(&*rig.engine, &mut state, start).await;
+    let error = sign_in_result(&state).unwrap_err();
+    assert!(error.contains("does not sign in with OAuth"), "{error}");
+
+    // A callback for a profile that is not selected is refused before the engine sees it.
+    let callback = "http://127.0.0.1:8976/callback?code=c1&state=s1".to_owned();
+    apply(&*rig.engine, &mut state, finish("docs", "lee", Ok(callback))).await;
+    let error = sign_in_result(&state).unwrap_err();
+    assert_eq!(error, "another profile is selected now, so nothing was done");
+
+    // A direct `SignIn` has no listener for the browser.
+    let sign_in = UiCommand::SignIn {
+        profile: "kim".into(),
+        name: "docs".into(),
+    };
+    apply(&*rig.engine, &mut state, sign_in).await;
+    assert!(sign_in_result(&state).unwrap_err().contains("cannot receive a sign-in"));
+
+    let connections = rig.engine.connections("kim").await.unwrap();
+    let oauth = connections.connectors["docs"].oauth.as_ref().unwrap();
+    assert_eq!(oauth.state, bunsin_api::OAuthState::SignInNeeded);
+    let audit = rig.engine.snapshot("kim").await.unwrap().audit;
+    assert!(!audit.iter().any(|entry| entry.kind == "oauth_signed_in"));
+}
+
+#[tokio::test]
+async fn a_typed_signing_secret_is_in_no_debug_text_and_a_refused_one_is_the_cards_result() {
+    let rig = common::rig().await;
+    let mut state = UiState::default();
+    apply(&*rig.engine, &mut state, UiCommand::Refresh).await;
+    let command = UiCommand::SetWebhookSecret {
+        profile: "kim".into(),
+        name: "nothing".into(),
+        secret: bunsin_app::bridge::Typed("hook-secret-7a1c".into()),
+    };
+    assert!(!format!("{command:?}").contains("hook-secret-7a1c"));
+    apply(&*rig.engine, &mut state, command).await;
+    // The server has no such webhook. The failure belongs to the card, not to the error line.
+    match &state.part_result {
+        Some((bunsin_app::bridge::Part::WebhookSecret, Err(SaveError::Failed(error)))) => {
+            assert!(error.contains("webhook `nothing`"), "{error}");
+        }
+        other => panic!("expected a failed secret, got {other:?}"),
+    }
+    assert_eq!((state.error.as_deref(), state.part_saves), (None, 1));
+    assert!(!format!("{state:?}").contains("hook-secret-7a1c"));
 }

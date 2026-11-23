@@ -1,21 +1,23 @@
 //! `bunsind`: the Bunsin server and its command line.
 //!
-//! Operator commands (`serve`, `profile-add`, `token-*`) work on the data directory
+//! Operator commands (`serve`, `profile-add`, `token-*`, `registry-status`) work on the data directory
 //! of this machine. All other commands talk to a running server over HTTPS.
 
 use bunsin_api::{
-    ConnectorUpdate, Edit, EngineApi, LlmUpdate, ProfileConfig, TokenChange, TokenSource, WikiPageUpdate,
+    ApiConnectorUpdate, ConnectorUpdate, Edit, EngineApi, LlmUpdate, OAuthState, ProfileConfig, TokenChange,
+    TokenSource, WikiPageUpdate,
 };
 use bunsin_client::{RemoteConfig, RemoteEngine};
 use bunsin_core::event::InboundEvent;
+use bunsin_core::inbound::InboundScope;
 use bunsin_core::records::InboxBody;
-use bunsin_core::settings::Wire;
+use bunsin_core::settings::{ApiConfig, ConnectorKind, McpConfig, Wire};
 use bunsin_daemon::keystore::KeyStore;
-use bunsin_daemon::server::{Poller, ServeConfig, serve};
-use bunsin_daemon::{RealBackends, UpstreamPolicy};
+use bunsin_daemon::server::{OuterConfig, Reach, ServeConfig, check_listeners, start_with_fetcher};
+use bunsin_daemon::{RealBackends, UpstreamPolicy, rules};
 use bunsin_engine::Engine;
 use bunsin_engine::{KeyFile, KeySource};
-use bunsin_store::AppStore;
+use bunsin_store::{AppStore, RegistryStore, SourceKind};
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -23,6 +25,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use url::Url;
 
 #[derive(Parser)]
 #[command(name = "bunsind", about = "Runs and controls Bunsin persona agents")]
@@ -76,6 +79,57 @@ struct Remote {
     ca_cert: Option<PathBuf>,
 }
 
+/// The listeners for callers who are not profile owners.
+#[derive(Args)]
+struct OuterArgs {
+    /// A second listener for callers in your own network: the inbound MCP endpoints of the profiles
+    /// that turn them on. It has no control API, and access tokens do not work on it. Needs --internal-url.
+    #[arg(long, requires = "internal_url")]
+    internal_listen: Option<SocketAddr>,
+    /// The address callers use for the internal listener, for example https://agents.corp.example.
+    /// It can differ from --internal-listen behind a proxy.
+    #[arg(long, requires = "internal_listen")]
+    internal_url: Option<String>,
+    /// PEM certificate chain of the internal listener. Required unless it listens on a loopback address.
+    #[arg(long, requires_all = ["internal_tls_key", "internal_listen"])]
+    internal_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "internal_tls_cert")]
+    internal_tls_key: Option<PathBuf>,
+    /// A third listener for callers on the internet. It serves only the profiles whose inbound
+    /// scope is `public`. It has no control API. Needs --public-url.
+    #[arg(long, requires = "public_url")]
+    public_listen: Option<SocketAddr>,
+    /// The address callers use for the public listener, for example https://agents.example.com.
+    #[arg(long, requires = "public_listen")]
+    public_url: Option<String>,
+    /// PEM certificate chain of the public listener. Required unless it listens on a loopback address.
+    #[arg(long, requires_all = ["public_tls_key", "public_listen"])]
+    public_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "public_tls_cert")]
+    public_tls_key: Option<PathBuf>,
+}
+
+impl OuterArgs {
+    /// The configs of the listeners that the options ask for.
+    fn configs(self) -> Result<Vec<OuterConfig>, String> {
+        let outer = [
+            outer_config(
+                Reach::Internal,
+                self.internal_listen,
+                self.internal_url,
+                self.internal_tls_cert.zip(self.internal_tls_key),
+            )?,
+            outer_config(
+                Reach::Public,
+                self.public_listen,
+                self.public_url,
+                self.public_tls_cert.zip(self.public_tls_key),
+            )?,
+        ];
+        Ok(outer.into_iter().flatten().collect())
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Operator: run the server until it gets SIGTERM or Ctrl-C.
@@ -89,6 +143,8 @@ enum Command {
         tls_cert: Option<PathBuf>,
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        #[command(flatten)]
+        outer: Box<OuterArgs>,
         /// Let profile settings name commands that run on this machine as MCP servers.
         /// Every profile owner can then start any program as the user of this server.
         /// Use it only if you trust every profile owner.
@@ -100,6 +156,45 @@ enum Command {
         /// resolves to an internal address still passes. Give the list on a shared server.
         #[arg(long = "allow-upstream-host")]
         allow_upstream_hosts: Vec<String>,
+        /// A domain that profiles may publish their inbound endpoint under in the ARD catalogs,
+        /// for example acme.com. Repeat it for more domains. Without it, no profile is published.
+        #[arg(long = "ard-publisher-domain")]
+        ard_publisher_domains: Vec<String>,
+        /// Serve an ARD registry at the root of the listeners for callers: POST /search, POST /explore
+        /// and GET /agents. `internal`: on the internal listener. `public`: on both listeners. It indexes
+        /// the ARD catalogs of this server, and the seeds of --ard-registry-source, in registry.db in the data directory.
+        #[arg(long = "ard-registry", value_parser = ["internal", "public"])]
+        ard_registry: Option<String>,
+        /// A domain whose ARD entries the registry indexes for the internal listener: `<domain>`, or
+        /// `<domain>=<https URL>` for one catalog address that speaks for the domain. Repeat it for more.
+        #[arg(long = "ard-registry-source", requires = "ard_registry")]
+        ard_registry_sources: Vec<String>,
+        /// Like --ard-registry-source, for both listeners. Needs --ard-registry public.
+        #[arg(long = "ard-registry-public-source", requires = "ard_registry")]
+        ard_registry_public_sources: Vec<String>,
+        /// Serve the A2A Agent Card of this profile at /.well-known/agent-card.json on the listeners for
+        /// callers, so that a stock A2A card resolver finds it from the listener address alone. The card
+        /// is served only where the profile's A2A endpoint is served. Use it when this server runs one
+        /// agent. The card shows the profile ID to anyone who reaches the listener.
+        #[arg(long = "a2a-root-profile")]
+        a2a_root_profile: Option<String>,
+        /// Let profiles start coding jobs: a coding agent CLI changes a repository on a new branch,
+        /// after the profile owner approves each job. The CLI runs as the user of this server, with its
+        /// own permission settings. Needs --coding-repo-root.
+        #[arg(long, requires = "coding_repo_root")]
+        allow_coding: bool,
+        /// Every repository of a coding job must be a git repository under this directory.
+        #[arg(long, requires = "allow_coding")]
+        coding_repo_root: Option<PathBuf>,
+        /// The program of a coding agent CLI: `claude-code=<absolute path>` or `codex=<absolute path>`.
+        /// Repeat it for both. A profile picks only the backend; a backend without a program cannot run.
+        #[arg(long = "coding-program", requires = "allow_coding")]
+        coding_programs: Vec<String>,
+        /// Let profile settings name programs of their own for coding: the backend `command` and test
+        /// commands. Every profile owner can then run any program as the user of this server, and that
+        /// program can read the data of the other profiles. Use it only if you trust every profile owner.
+        #[arg(long, requires = "allow_coding")]
+        allow_coding_commands: bool,
         /// Where the key is kept that encrypts tokens which owners store on the server.
         /// `keychain`: the login Keychain of this Mac. `file`: a key file.
         /// The default is `keychain` on macOS and `file` on other systems. A server on a Mac
@@ -115,6 +210,11 @@ enum Command {
         /// `master.key` in the data directory. Keep this file out of backups of the data directory.
         #[arg(long, env = "BUNSIN_MASTER_KEY_FILE")]
         master_key_file: Option<PathBuf>,
+    },
+    /// Operator: show the sources of the ARD registry index: entries, last read, failures and refusals.
+    RegistryStatus {
+        #[command(flatten)]
+        local: Local,
     },
     /// Operator: create a profile that can do nothing until it gets settings.
     ProfileAdd {
@@ -239,6 +339,12 @@ enum Command {
         remote: Remote,
         profile: String,
     },
+    /// Show the LLM calls of the last 90 days, added up by UTC day and purpose.
+    LlmUsage {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
     /// Save the LLM endpoint. With --token-stdin, read its token from standard input.
     LlmSet {
         #[command(flatten)]
@@ -259,20 +365,32 @@ enum Command {
         #[command(flatten)]
         token: TokenArgs,
     },
-    /// Save a connector that is reached over HTTP. With --token-stdin, read its token
-    /// from standard input. Then check it with `tools`.
+    /// Save a connector that is reached over HTTP: an MCP server, or with --api the REST API
+    /// of Slack, Jira Cloud or Confluence Cloud. With --token-stdin, read its token from
+    /// standard input. Then check it with `tools`.
     ConnectorSet {
         #[command(flatten)]
         remote: Remote,
         profile: String,
         name: String,
+        /// The MCP address, or with --api the base URL, for example https://slack.com/api
+        /// or https://your-domain.atlassian.net.
         #[arg(long)]
         url: String,
         /// The header that carries the token as it is, for example X-API-Key.
         /// Without it, the token goes as `Authorization: Bearer <token>`.
         /// Give it with every `connector-set` of this connector: a call without it sets Bearer again.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "api")]
         token_header: Option<String>,
+        /// Call this REST API with its fixed tools instead of an MCP server.
+        #[arg(long, value_parser = ["slack", "jira", "confluence"])]
+        api: Option<String>,
+        /// How the REST API gets the token: bearer, or basic with --email (an Atlassian API token).
+        #[arg(long, value_parser = ["bearer", "basic"], default_value = "bearer", requires = "api")]
+        auth: String,
+        /// The account email of basic auth.
+        #[arg(long, requires = "api")]
+        email: Option<String>,
         #[command(flatten)]
         token: TokenArgs,
     },
@@ -283,11 +401,32 @@ enum Command {
         profile: String,
         name: String,
     },
+    /// Sign in to the MCP server of a connector with OAuth. The settings of the connector must have
+    /// `oauth`. The command prints an address: open it in a browser and sign in. The browser then
+    /// goes to the redirect address, which does not load. Paste that address from the address bar.
+    ConnectorOauth {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        name: String,
+        /// Where the browser goes after the sign-in. It must be a loopback address with http.
+        /// A client ID that the owner registered may need the address it was registered with.
+        #[arg(long, default_value = "http://127.0.0.1:8976/callback")]
+        redirect_uri: String,
+    },
     /// List the pages of the agent's notes.
     WikiList {
         #[command(flatten)]
         remote: Remote,
         profile: String,
+    },
+    /// Search the notes by words. Prints every page that matches, best first, as `wiki-list` does.
+    /// The agent's tool `bunsin.wiki/search` ranks the pages the same way.
+    WikiSearch {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        query: String,
     },
     /// Print one page of the notes with its sources.
     WikiShow {
@@ -295,6 +434,39 @@ enum Command {
         remote: Remote,
         profile: String,
         slug: String,
+    },
+    /// Check the notes now with the settings `notes`: stale pages, orphan pages and, with
+    /// `notes.lint_conflicts`, pages that may say different things. A check changes no page.
+    LintNotes {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Call one tool that reads and let the agent propose pages of its notes from the result.
+    /// The tool needs a read rule. The page changes go to the inbox; nothing else is run.
+    PreloadNotes {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>.
+        #[arg(long)]
+        tool: String,
+        /// The arguments of the tool as a JSON object.
+        #[arg(long)]
+        args: Option<String>,
+    },
+    /// Show the findings of the last check of the notes that you have not dismissed.
+    LintFindings {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Dismiss a finding. Later checks do not report the same kind for the same pages again.
+    DismissFinding {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
     },
     /// Write a page of the notes yourself. The body is read from a file.
     WikiSet {
@@ -335,6 +507,199 @@ enum Command {
         profile: String,
         dir: PathBuf,
     },
+    /// Show the permission table: one line per rule, and `off` for an approved tool without a rule.
+    Rules {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Set the rule of one tool. The other rules stay. A write or delete rule needs
+    /// --text or --no-text, so that a text without the AI marker is a choice, not a default.
+    RuleSet {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>
+        tool: String,
+        #[arg(long, value_parser = ["read", "write", "delete"])]
+        class: String,
+        /// How far a write goes. The default is approve. Not for a read rule.
+        #[arg(long, value_parser = ["observe", "draft", "approve", "autonomous"])]
+        tier: Option<String>,
+        /// A place of text for other people: an argument name, or a path such as
+        /// blocks.*.text, where `*` means every item of a list. Repeat it for more places.
+        #[arg(long = "text", conflicts_with = "no_text")]
+        texts: Vec<String>,
+        /// The tool sends no text to other people.
+        #[arg(long)]
+        no_text: bool,
+    },
+    /// Remove the rule of one tool. The agent cannot use the tool then.
+    RuleRemove {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>
+        tool: String,
+    },
+    /// Resolve an item whose outcome is unknown, because the server stopped while its call ran.
+    /// Check the target system first. `done`: the call reached its tool. `drop`: give it up.
+    /// `retry`: run a copy now as a new item. If the first call reached its tool, it is sent twice.
+    ResolveUnknown {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        inbox_id: i64,
+        #[arg(value_parser = ["done", "retry", "drop"])]
+        resolution: String,
+    },
+    /// Show the stored corrections: the edits you made to the agent's drafts. Newest first.
+    Corrections {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Retire a correction. It stays stored, but the agent no longer gets it.
+    RetireCorrection {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
+    /// Show, for each write or delete tool, how often you approved, edited or dismissed its calls,
+    /// how often it ran without asking, whether it is held, and whether it is suggested for autonomous.
+    Autonomy {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Report a problem with a call that ran without asking. Its tool then asks you for every call
+    /// until you clear the hold.
+    ReportAutonomous {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        inbox_id: i64,
+    },
+    /// Clear the hold of a tool. Its calls then follow its step again.
+    ClearAutonomyHold {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// <connector>/<tool>
+        tool: String,
+    },
+    /// Store replay cases from a JSON file: an array of objects with `event`, `actual_reply` and
+    /// optional `expect` (`reply`, `escalate` or `ignore`; the default is `reply`). The server
+    /// filters personal data before it stores them.
+    AddReplayCases {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        file: PathBuf,
+    },
+    /// Show the stored replay cases, oldest first.
+    ReplayCases {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Delete a replay case. The results of earlier runs stay.
+    DeleteReplayCase {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
+    /// Start an evaluation of every stored case. The server replays a few cases every few seconds.
+    /// Read the result with `eval-report`.
+    StartEval {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Show the newest evaluation run: its rates, the pass mark, and one line per case.
+    EvalReport {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Ask the LLM for principles in your past texts. It reads them as quoted data after the privacy
+    /// filter. The results are candidates only: adopt or dismiss each one.
+    ExtractPrinciples {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// `corrections`: your edits and reasons. `replay-cases`: the real replies of the replay cases.
+        /// `read`: the result of one call of a tool with a read rule, named by --tool and --args.
+        #[arg(long, value_parser = ["corrections", "replay-cases", "read"])]
+        from: String,
+        /// <connector>/<tool>, with --from read.
+        #[arg(long)]
+        tool: Option<String>,
+        /// The arguments of the tool as a JSON object, with --from read.
+        #[arg(long)]
+        args: Option<String>,
+    },
+    /// Show the principle candidates, newest first.
+    PrincipleCandidates {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Add a new candidate to the end of your principles. With --text, add your edit of it instead.
+    AdoptPrinciple {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Dismiss a new candidate. A later extraction does not propose its text again.
+    DismissPrinciple {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
+    /// List the caller tokens of a profile: the tokens that let others ask your agent through its
+    /// inbound endpoint. Token values are not stored and cannot be shown.
+    Callers {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Show where the inbound endpoint is served, and whether the ARD catalogs list it or why not.
+    Inbound {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+    },
+    /// Store the signing secret of a webhook in the settings, read from standard input.
+    /// Slack calls it the signing secret; Jira the secret of the webhook.
+    WebhookSecret {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        name: String,
+    },
+    /// Create a caller token and print it once. It opens only the inbound endpoint of this profile.
+    CallerAdd {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        /// Who gets the token, for example "Team Lee's bot". The agent sees it as the author of each question.
+        #[arg(long)]
+        label: String,
+    },
+    /// Revoke a caller token by the ID that `callers` shows. The next request with it is refused.
+    CallerRevoke {
+        #[command(flatten)]
+        remote: Remote,
+        profile: String,
+        id: i64,
+    },
     /// Dismiss a pending item or a draft.
     Reject {
         #[command(flatten)]
@@ -359,6 +724,187 @@ fn page_markdown(page: &bunsin_core::wiki::WikiPage) -> String {
         text.push_str(&format!("- {}: {}\n", source.origin, source.detail));
     }
     text
+}
+
+/// A correction as indented lines. A line break in a text starts an indented line too.
+fn correction_text(record: &bunsin_core::records::CorrectionRecord) -> String {
+    let c = &record.correction;
+    let retired = if record.retired_at.is_some() { " (retired)" } else { "" };
+    let mut text = format!("#{} {} from {}{retired}\n", record.id, c.tool, c.source);
+    for (label, value) in [
+        ("task", &c.task),
+        ("draft", &c.original),
+        ("edit", &c.edited),
+        ("reason", &c.reason),
+    ] {
+        text.push_str(&format!("  {label}: {}\n", value.replace('\n', "\n    ")));
+    }
+    text
+}
+
+/// The autonomy counts as a header line and one tab-separated line per tool.
+fn autonomy_lines(autonomy: &bunsin_api::Autonomy) -> Vec<String> {
+    let thresholds = match &autonomy.thresholds {
+        None => "thresholds: none, so no tool is suggested; the counts cover all days".to_owned(),
+        Some(t) => format!(
+            "thresholds: {} reviewed, {}% unchanged, last {} days",
+            t.min_reviewed, t.min_unchanged_percent, t.window_days
+        ),
+    };
+    let mut lines = vec![
+        thresholds,
+        "tool\treviewed\tunchanged\tedited\trejected\tautonomous\tfailed\tstate".to_owned(),
+    ];
+    for tool in &autonomy.tools {
+        let c = &tool.counts;
+        let percent = c
+            .unchanged_percent()
+            .map_or_else(|| "-".to_owned(), |percent| format!("{percent}%"));
+        let state = match (tool.held, tool.suggested) {
+            (true, _) => "held",
+            (false, true) => "suggested",
+            (false, false) => "-",
+        };
+        lines.push(format!(
+            "{}\t{}\t{} ({percent})\t{}\t{}\t{}\t{}\t{state}",
+            tool.tool,
+            c.reviewed(),
+            c.approved,
+            c.edited,
+            c.rejected,
+            c.autonomous,
+            c.autonomous_failed
+        ));
+    }
+    lines
+}
+
+/// A replay case as indented lines. A line break in a text starts an indented line too.
+fn case_text(case: &bunsin_core::eval::ReplayCaseRecord) -> String {
+    let e = &case.event;
+    format!(
+        "#{} {} from {} by {}\n  event: {}\n  reply: {}\n",
+        case.id,
+        case.expect.as_str(),
+        e.source,
+        e.author,
+        e.text.replace('\n', "\n    "),
+        case.actual_reply.replace('\n', "\n    ")
+    )
+}
+
+/// A finding of a check of the notes as one line.
+fn finding_line(finding: &bunsin_core::lint::LintFinding) -> String {
+    format!(
+        "#{} {} {}: {}",
+        finding.id,
+        finding.kind.as_str(),
+        finding.slugs.join(" and "),
+        finding.detail.replace('\n', " ")
+    )
+}
+
+/// A principle candidate as indented lines.
+fn candidate_text(candidate: &bunsin_core::candidates::PrincipleCandidate) -> String {
+    format!(
+        "#{} {} from {}\n  text: {}\n  evidence: {}\n",
+        candidate.id,
+        candidate.state.as_str(),
+        candidate.source,
+        candidate.text.replace('\n', "\n    "),
+        candidate.evidence.replace('\n', "\n    ")
+    )
+}
+
+/// The source of an extraction from the options of `extract-principles`.
+fn principle_source(
+    from: &str,
+    tool: Option<String>,
+    args: Option<String>,
+) -> Result<bunsin_core::candidates::PrincipleSource, String> {
+    use bunsin_core::candidates::PrincipleSource;
+    match (from, tool) {
+        ("read", Some(tool)) => {
+            let args = match args {
+                Some(text) => serde_json::from_str(&text).map_err(|e| format!("--args is not a JSON object: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            Ok(PrincipleSource::Read { tool, args })
+        }
+        ("read", None) => Err("--from read needs --tool".to_owned()),
+        (_, Some(_)) => Err("--tool goes only with --from read".to_owned()),
+        (_, None) if args.is_some() => Err("--args goes only with --from read".to_owned()),
+        ("corrections", None) => Ok(PrincipleSource::Corrections),
+        _ => Ok(PrincipleSource::ReplayCases),
+    }
+}
+
+/// The report of the newest evaluation run as lines.
+fn eval_lines(report: &bunsin_api::EvalReport) -> Vec<String> {
+    let Some(run) = &report.run else {
+        return vec!["no evaluation has run".to_owned()];
+    };
+    let rate = |rate: Option<u32>| rate.map_or_else(|| "-".to_owned(), |rate| format!("{rate}%"));
+    let s = &report.summary;
+    let state = match run.state {
+        bunsin_core::eval::RunState::Running => format!("running, {} case(s) left", report.remaining),
+        bunsin_core::eval::RunState::Done => "done".to_owned(),
+    };
+    let mark = match (&report.pass, report.passed) {
+        (None, _) => "pass mark: none".to_owned(),
+        (Some(p), passed) => format!(
+            "pass mark: kind {}%, overlap {}%, boundary {}%: {}",
+            p.kind_percent,
+            p.overlap_percent,
+            p.boundary_percent,
+            match passed {
+                Some(true) => "passed",
+                Some(false) => "not passed",
+                None => "not judged yet",
+            }
+        ),
+    };
+    let mut lines = vec![
+        format!("run {}: {state}", run.id),
+        format!("cases: {}, failed: {}", s.cases, s.errors),
+        format!(
+            "kind {}\toverlap {}\tboundary {}\tover-escalation {}\tread {}",
+            rate(s.kind_percent),
+            rate(s.overlap_percent),
+            rate(s.boundary_percent),
+            rate(s.over_escalation_percent),
+            rate(s.read_percent)
+        ),
+        mark,
+        "case\texpect\tdraft\tkind\toverlap".to_owned(),
+    ];
+    for result in &report.results {
+        let line = match (&result.score, &result.error) {
+            (Some(score), _) => format!(
+                "#{}\t{}\t{}\t{}\t{}",
+                result.case_id,
+                result.expect.as_str(),
+                score.kind.as_str(),
+                if score.kind_ok { "ok" } else { "wrong" },
+                score
+                    .overlap_permille
+                    .map_or_else(|| "-".to_owned(), |permille| format!("{}%", permille / 10))
+            ),
+            (None, error) => format!(
+                "#{}\t{}\tfailed: {}",
+                result.case_id,
+                result.expect.as_str(),
+                error.as_deref().unwrap_or_default()
+            ),
+        };
+        lines.push(line);
+    }
+    lines
+}
+
+/// A value of a settings enum from its word on the command line, for example `jira`.
+fn word<T: serde::de::DeserializeOwned>(text: String) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(text)).map_err(|e| e.to_string())
 }
 
 fn json<T: serde::Serialize>(value: &T) -> String {
@@ -412,17 +958,92 @@ fn key_source(store: &KeyStore, data_dir: &std::path::Path) -> Result<Box<dyn Ke
     }
 }
 
+/// The config of an outer listener from its options. `None` if the listener is not asked for.
+fn outer_config(
+    reach: Reach,
+    listen: Option<SocketAddr>,
+    url: Option<String>,
+    tls: Option<(PathBuf, PathBuf)>,
+) -> Result<Option<OuterConfig>, String> {
+    let (Some(listen), Some(url)) = (listen, url) else {
+        return Ok(None);
+    };
+    let url = Url::parse(&url).map_err(|e| format!("--{}-url is not an address: {e}", reach.word()))?;
+    Ok(Some(OuterConfig {
+        reach,
+        listen,
+        url,
+        tls,
+        a2a_root_profile: None,
+    }))
+}
+
+/// Refuses a root profile that the data directory does not hold. It reads the profiles like the
+/// operator commands do, and creates nothing when the data directory has no profiles yet.
+fn check_root_profile(data_dir: &std::path::Path, profile: &str) -> Result<(), String> {
+    let missing = || format!("--a2a-root-profile names `{profile}`, but this data directory has no such profile");
+    if !data_dir.join("app.db").exists() {
+        return Err(missing());
+    }
+    let profiles = AppStore::open(data_dir)
+        .and_then(|store| store.list_profiles())
+        .map_err(|e| e.to_string())?;
+    if profiles.iter().any(|known| known.id == profile) {
+        Ok(())
+    } else {
+        Err(missing())
+    }
+}
+
+/// Says on stderr where the root Agent Card is served now, so that a 404 there has a visible reason.
+/// The owner can turn A2A on or off later; the card follows the settings at each request.
+async fn report_root_card(engine: &Engine, profile: &str, outer: &[OuterConfig]) {
+    let config = engine.profile_config(profile).await.ok();
+    for listener in outer {
+        let served = config
+            .as_ref()
+            .is_some_and(|config| bunsin_daemon::a2a::a2a_served_on(config, listener.reach));
+        let state = if served {
+            "serves it".to_owned()
+        } else {
+            format!(
+                "does not serve it now: the profile's A2A endpoint is off, or its scope does not reach the {} listener",
+                listener.reach.word()
+            )
+        };
+        eprintln!(
+            "root Agent Card of `{profile}` at {}{}: the {} listener {state}",
+            listener.url.as_str().trim_end_matches('/'),
+            bunsin_daemon::a2a::ROOT_CARD_PATH,
+            listener.reach.word()
+        );
+    }
+}
+
+/// The ARD registry that `serve` turns on.
+struct RegistryArgs {
+    scope: InboundScope,
+    /// Each seed text with the scope of its flag. They passed `crawl::check_seeds`.
+    seeds: Vec<(String, InboundScope)>,
+    /// The rules for the addresses that the crawl fetches.
+    upstream: UpstreamPolicy,
+}
+
 async fn run_server(
     local: Local,
-    listen: SocketAddr,
-    tls: Option<(PathBuf, PathBuf)>,
+    config: ServeConfig,
+    outer: Vec<OuterConfig>,
     backends: RealBackends,
     store: KeyStore,
     accept_new_key: bool,
+    registry: Option<RegistryArgs>,
 ) -> Result<(), String> {
-    let config = ServeConfig { listen, tls };
-    // A start that is refused for its address must not read or move the key.
-    config.check().map_err(|e| e.to_string())?;
+    // A start that is refused for its addresses or its root profile must not read or move the key.
+    check_listeners(&config, &outer).map_err(|e| e.to_string())?;
+    let root_profile = outer.iter().find_map(|listener| listener.a2a_root_profile.clone());
+    if let Some(profile) = &root_profile {
+        check_root_profile(&local.data_dir, profile)?;
+    }
     std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
     let backends = Arc::new(backends);
     let source = key_source(&store, &local.data_dir)?;
@@ -433,24 +1054,37 @@ async fn run_server(
     };
     let engine =
         Engine::open_with_key(&local.data_dir, source.as_ref(), backends, Arc::new(now)).map_err(|e| e.to_string())?;
+    let mut fetcher = None;
+    if let Some(registry) = registry {
+        engine.serve_registry(registry.scope).map_err(|e| e.to_string())?;
+        engine.set_registry_seeds(&registry.seeds).map_err(|e| e.to_string())?;
+        fetcher = Some(bunsin_daemon::fetch::Fetcher::new(&registry.upstream)?);
+    }
     let engine = Arc::new(engine);
-    let running = serve(engine.clone(), config).await.map_err(|e| e.to_string())?;
-    let poller = Poller::start(engine);
+    if let Some(profile) = &root_profile {
+        report_root_card(&engine, profile, &outer).await;
+    }
+    let reaches: Vec<Reach> = outer.iter().map(|listener| listener.reach).collect();
+    let started = start_with_fetcher(engine, config, outer, fetcher)
+        .await
+        .map_err(|e| e.to_string())?;
     // The handler is installed before the address is announced, so a stop request
     // that follows the announcement is never lost.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("cannot install the SIGTERM handler: {e}"))?;
     // Whoever started the server may have closed its output. That must not stop the server.
     let mut stdout = std::io::stdout();
-    let _ = writeln!(stdout, "listening on {}", running.url());
+    let _ = writeln!(stdout, "listening on {}", started.control.url());
+    for (reach, listener) in reaches.iter().zip(&started.outer) {
+        let _ = writeln!(stdout, "{} listener on {}", reach.word(), listener.url());
+    }
     let _ = stdout.flush();
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
     }
     let _ = writeln!(stdout, "stopping: waiting for running requests");
-    poller.stop().await;
-    running.shutdown().await.map_err(|e| e.to_string())
+    started.stop().await.map_err(|e| e.to_string())
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
@@ -461,8 +1095,18 @@ async fn run(cli: Cli) -> Result<(), String> {
             listen,
             tls_cert,
             tls_key,
+            outer,
             allow_stdio_connectors,
             allow_upstream_hosts,
+            ard_publisher_domains,
+            ard_registry,
+            ard_registry_sources,
+            ard_registry_public_sources,
+            a2a_root_profile,
+            allow_coding,
+            coding_repo_root,
+            coding_programs,
+            allow_coding_commands,
             key_store,
             accept_new_key,
             master_key_file,
@@ -471,14 +1115,98 @@ async fn run(cli: Cli) -> Result<(), String> {
                 .iter()
                 .map(|host| host.to_ascii_lowercase())
                 .collect();
-            let backends = RealBackends::from_env(allow_stdio_connectors, UpstreamPolicy { allowed_hosts });
+            let upstream = UpstreamPolicy { allowed_hosts };
+            let mut backends = RealBackends::from_env(allow_stdio_connectors, upstream.clone())
+                .with_ard_publishers(&ard_publisher_domains)?;
+            if let (true, Some(repo_root)) = (allow_coding, coding_repo_root) {
+                let programs = coding_programs
+                    .iter()
+                    .map(|text| bunsin_daemon::coding::parse_program(text))
+                    .collect::<Result<_, _>>()?;
+                let access = bunsin_daemon::coding::CodingAccess {
+                    repo_root,
+                    data_dir: local.data_dir.clone(),
+                    programs,
+                    allow_commands: allow_coding_commands,
+                };
+                backends = backends.with_coding(access);
+            }
             let store = bunsin_daemon::keystore::key_store(
                 std::env::consts::OS,
                 key_store.as_deref(),
                 master_key_file,
                 &local.data_dir,
             )?;
-            run_server(local, listen, tls_cert.zip(tls_key), backends, store, accept_new_key).await?;
+            let config = ServeConfig {
+                listen,
+                tls: tls_cert.zip(tls_key),
+            };
+            let mut outer = outer.configs()?;
+            if a2a_root_profile.is_some() && outer.is_empty() {
+                return Err(
+                    "--a2a-root-profile needs a listener for callers: --internal-listen or --public-listen".into(),
+                );
+            }
+            for listener in &mut outer {
+                listener.a2a_root_profile = a2a_root_profile.clone();
+            }
+            let registry = match ard_registry.as_deref() {
+                None => None,
+                Some(scope) => {
+                    let scope = if scope == "public" {
+                        InboundScope::Public
+                    } else {
+                        InboundScope::Internal
+                    };
+                    if scope == InboundScope::Internal && !ard_registry_public_sources.is_empty() {
+                        return Err("--ard-registry-public-source needs --ard-registry public".into());
+                    }
+                    let seeds: Vec<(String, InboundScope)> = ard_registry_sources
+                        .into_iter()
+                        .map(|seed| (seed, InboundScope::Internal))
+                        .chain(
+                            ard_registry_public_sources
+                                .into_iter()
+                                .map(|seed| (seed, InboundScope::Public)),
+                        )
+                        .collect();
+                    // A bad seed stops the start before the key is read.
+                    bunsin_daemon::crawl::check_seeds(&seeds, &upstream)?;
+                    Some(RegistryArgs { scope, seeds, upstream })
+                }
+            };
+            run_server(local, config, outer, backends, store, accept_new_key, registry).await?;
+        }
+        Command::RegistryStatus { local } => {
+            std::fs::create_dir_all(&local.data_dir).map_err(|e| format!("cannot create the data directory: {e}"))?;
+            let sources = RegistryStore::open(&local.data_dir)
+                .and_then(|store| store.status())
+                .map_err(|e| e.to_string())?;
+            if sources.is_empty() {
+                println!("no sources: a server with --ard-registry fills the index");
+            }
+            for source in sources {
+                let scope = json(&source.scope).trim_matches('"').to_owned();
+                let last_ok = source
+                    .last_ok_at
+                    .map_or("never".to_owned(), bunsin_core::time::utc_text);
+                // A self catalog is read on every tick, so it has no time of its own.
+                let next = match source.kind {
+                    SourceKind::Seed => bunsin_core::time::utc_text(source.next_fetch_at),
+                    SourceKind::SelfCatalog => "-".to_owned(),
+                };
+                println!(
+                    "source\t{}\t{}\t{scope}\t{} entries\tlast ok {last_ok}\tnext {next}\t{} failures\t{}",
+                    source.url,
+                    source.kind.as_str(),
+                    source.entries,
+                    source.failures,
+                    source.last_error.as_deref().unwrap_or("-")
+                );
+                for (reason, count) in &source.refusals {
+                    println!("refused\t{}\t{reason}\t{count}", source.url);
+                }
+            }
         }
         Command::ProfileAdd { local, id, owner } => {
             let store = open_store(&local)?;
@@ -548,7 +1276,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                     InboxBody::Escalation { summary } => format!("escalation: {summary}"),
                     InboxBody::WikiChange { slug, text, .. } => format!("note `{slug}`: {}", text.summary),
                 };
-                println!("  #{} [{}] {what}", item.id, item.state.as_str());
+                let retry = match item.retry_of {
+                    Some(of) => format!(" (repeats #{of})"),
+                    None => String::new(),
+                };
+                println!("  #{} [{}] {what}{retry}", item.id, item.state.as_str());
             }
         }
         Command::Stop { remote, profile, state } => {
@@ -573,6 +1305,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 thread,
                 author,
                 text: body,
+                // The server sets the channel from the access token.
+                channel: Default::default(),
             };
             let outcome = connect(&remote)?.ingest(&profile, event).await.map_err(text)?;
             // A handling that failed is an error for the caller, who may hand the event in again.
@@ -660,15 +1394,35 @@ async fn run(cli: Cli) -> Result<(), String> {
                 None => println!("llm\tnot set"),
             }
             for (name, connector) in &connections.connectors {
-                let address = match &connector.mcp {
-                    bunsin_core::settings::McpConfig::Http { url } => url.clone(),
-                    bunsin_core::settings::McpConfig::Stdio { command, .. } => format!("command {}", command.display()),
+                let address = match &connector.kind {
+                    ConnectorKind::Mcp(McpConfig::Http { url }) => url.clone(),
+                    ConnectorKind::Mcp(McpConfig::Stdio { command, .. }) => format!("command {}", command.display()),
+                    ConnectorKind::Api(api) => {
+                        let service = json(&api.service);
+                        let auth = json(&api.auth);
+                        let email = api
+                            .email
+                            .as_deref()
+                            .map(|email| format!(" {email}"))
+                            .unwrap_or_default();
+                        format!(
+                            "api {} {} {}{email}",
+                            service.trim_matches('"'),
+                            api.base_url,
+                            auth.trim_matches('"')
+                        )
+                    }
                 };
                 let header = match &connector.token_header {
                     Some(header) => format!("\tin the header {header}"),
                     None => String::new(),
                 };
-                println!("{name}\t{address}\t{}{header}", source(connector.token));
+                let token = match connector.oauth.as_ref().map(|oauth| oauth.state) {
+                    Some(OAuthState::SignedIn) => "signed in with OAuth",
+                    Some(OAuthState::SignInNeeded) => "OAuth sign-in needed",
+                    None => source(connector.token),
+                };
+                println!("{name}\t{address}\t{token}{header}");
             }
         }
         Command::LlmTest { remote, profile } => {
@@ -677,6 +1431,21 @@ async fn run(cli: Cli) -> Result<(), String> {
                 return Err(format!("the endpoint does not work: {}", test.detail));
             }
             println!("works: {}", test.detail);
+        }
+        Command::LlmUsage { remote, profile } => {
+            println!("day\tpurpose\tcalls\tfailed\tinput tokens\toutput tokens\taverage ms");
+            for usage in connect(&remote)?.llm_usage(&profile).await.map_err(text)? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    usage.day,
+                    usage.purpose,
+                    usage.calls,
+                    usage.failed,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.latency_ms / usage.calls.max(1)
+                );
+            }
         }
         Command::LlmSet {
             remote,
@@ -687,7 +1456,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             timeout_secs,
             token,
         } => {
-            let wire: Wire = serde_json::from_value(serde_json::Value::String(wire)).map_err(|e| e.to_string())?;
+            let wire: Wire = word(wire)?;
             // The Claude address and model fit only the Claude format.
             let default = |value: Option<String>, name: &str, claude: &str| match (value, wire) {
                 (Some(value), _) => Ok(value),
@@ -711,19 +1480,65 @@ async fn run(cli: Cli) -> Result<(), String> {
             name,
             url,
             token_header,
+            api,
+            auth,
+            email,
             token,
         } => {
-            let update = ConnectorUpdate {
-                url,
-                token: token.change()?,
-                token_header,
-                expected: bunsin_api::Expected::Unchecked,
-            };
-            connect(&remote)?
-                .set_connector(&profile, &name, update)
+            let remote = connect(&remote)?;
+            match api {
+                Some(service) => {
+                    let api = ApiConfig {
+                        service: word(service)?,
+                        base_url: url,
+                        auth: word(auth)?,
+                        email,
+                    };
+                    let update = ApiConnectorUpdate {
+                        api,
+                        token: token.change()?,
+                        expected: bunsin_api::Expected::Unchecked,
+                    };
+                    remote.set_api_connector(&profile, &name, update).await.map_err(text)?;
+                }
+                None => {
+                    let update = ConnectorUpdate {
+                        url,
+                        token: token.change()?,
+                        token_header,
+                        expected: bunsin_api::Expected::Unchecked,
+                    };
+                    remote.set_connector(&profile, &name, update).await.map_err(text)?;
+                }
+            }
+            println!("connector {name} of {profile} saved. Check it with: bunsind tools {profile} {name}");
+        }
+        Command::ConnectorOauth {
+            remote,
+            profile,
+            name,
+            redirect_uri,
+        } => {
+            let remote = connect(&remote)?;
+            let started = remote
+                .start_connector_oauth(&profile, &name, &redirect_uri)
                 .await
                 .map_err(text)?;
-            println!("connector {name} of {profile} saved. Check it with: bunsind tools {profile} {name}");
+            println!("{}", started.authorization_url);
+            eprintln!(
+                "Open the address above in a browser and sign in. The browser then goes to an address \
+                 that starts with {redirect_uri} and does not load. Copy that address from the address bar, \
+                 paste it here and press Enter. The sign-in waits 10 minutes."
+            );
+            let mut callback = String::new();
+            std::io::stdin()
+                .read_line(&mut callback)
+                .map_err(|e| format!("cannot read the address: {e}"))?;
+            remote
+                .finish_connector_oauth(&profile, &name, callback.trim().to_owned())
+                .await
+                .map_err(text)?;
+            println!("connector {name} of {profile} is signed in. Check it with: bunsind tools {profile} {name}");
         }
         Command::ConnectorRemove { remote, profile, name } => {
             connect(&remote)?
@@ -736,6 +1551,48 @@ async fn run(cli: Cli) -> Result<(), String> {
             for page in connect(&remote)?.wiki_index(&profile).await.map_err(text)? {
                 println!("{}\t{}\t{}", page.slug, page.title, page.summary);
             }
+        }
+        Command::WikiSearch { remote, profile, query } => {
+            let found = connect(&remote)?.wiki_search(&profile, &query).await.map_err(text)?;
+            if found.is_empty() {
+                println!("no page matches");
+            }
+            for page in found {
+                println!("{}\t{}\t{}", page.slug, page.title, page.summary);
+            }
+        }
+        Command::LintNotes { remote, profile } => {
+            let found = connect(&remote)?.lint_notes(&profile).await.map_err(text)?;
+            println!("{} finding(s)", found.len());
+            for finding in &found {
+                println!("{}", finding_line(finding));
+            }
+        }
+        Command::PreloadNotes {
+            remote,
+            profile,
+            tool,
+            args,
+        } => {
+            let args = match args {
+                Some(text) => serde_json::from_str(&text).map_err(|e| format!("--args is not a JSON object: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            let request = bunsin_api::PreloadNotes { tool, args };
+            let filed = connect(&remote)?.preload_notes(&profile, request).await.map_err(text)?;
+            println!("{} page change(s) in the inbox", filed.len());
+            for id in filed {
+                println!("#{id}");
+            }
+        }
+        Command::LintFindings { remote, profile } => {
+            for finding in connect(&remote)?.lint_findings(&profile).await.map_err(text)? {
+                println!("{}", finding_line(&finding));
+            }
+        }
+        Command::DismissFinding { remote, profile, id } => {
+            connect(&remote)?.dismiss_finding(&profile, id).await.map_err(text)?;
+            println!("finding {id} dismissed");
         }
         Command::WikiShow { remote, profile, slug } => {
             let page = connect(&remote)?.wiki_page(&profile, &slug).await.map_err(text)?;
@@ -823,6 +1680,240 @@ async fn run(cli: Cli) -> Result<(), String> {
                 preview.events.len()
             );
             println!("{}", json(&preview.events));
+        }
+        Command::Rules { remote, profile } => {
+            let permissions = connect(&remote)?.permissions(&profile).await.map_err(text)?;
+            for line in rules::table_lines(&permissions) {
+                println!("{line}");
+            }
+        }
+        Command::RuleSet {
+            remote,
+            profile,
+            tool,
+            class,
+            tier,
+            texts,
+            no_text,
+        } => {
+            // The options are checked before the server is asked.
+            let rule = rules::parse_rule(&class, tier.as_deref(), &texts, no_text)?;
+            rules::check_tool_id(&tool)?;
+            rules::save_rule(&connect(&remote)?, &profile, &tool, Some(rule)).await?;
+            println!("rule of {tool} in {profile} saved");
+        }
+        Command::RuleRemove { remote, profile, tool } => {
+            rules::save_rule(&connect(&remote)?, &profile, &tool, None).await?;
+            println!("rule of {tool} in {profile} removed");
+        }
+        Command::ResolveUnknown {
+            remote,
+            profile,
+            inbox_id,
+            resolution,
+        } => {
+            let resolution: bunsin_api::Resolution =
+                serde_json::from_value(serde_json::Value::String(resolution)).map_err(|e| e.to_string())?;
+            let engine = connect(&remote)?;
+            match engine
+                .resolve_unknown(&profile, inbox_id, resolution)
+                .await
+                .map_err(text)?
+            {
+                Some(outcome) => println!("{}", json(&outcome)),
+                None => println!("item {inbox_id} resolved"),
+            }
+        }
+        Command::Corrections { remote, profile } => {
+            for record in connect(&remote)?.corrections(&profile).await.map_err(text)? {
+                print!("{}", correction_text(&record));
+            }
+        }
+        Command::RetireCorrection { remote, profile, id } => {
+            connect(&remote)?.retire_correction(&profile, id).await.map_err(text)?;
+            println!("correction {id} retired");
+        }
+        Command::Autonomy { remote, profile } => {
+            for line in autonomy_lines(&connect(&remote)?.autonomy(&profile).await.map_err(text)?) {
+                println!("{line}");
+            }
+        }
+        Command::ReportAutonomous {
+            remote,
+            profile,
+            inbox_id,
+        } => {
+            connect(&remote)?
+                .report_autonomous(&profile, inbox_id)
+                .await
+                .map_err(text)?;
+            println!("item {inbox_id} reported; its tool asks you until you clear the hold");
+        }
+        Command::ClearAutonomyHold { remote, profile, tool } => {
+            connect(&remote)?
+                .clear_autonomy_hold(&profile, &tool)
+                .await
+                .map_err(text)?;
+            println!("hold of {tool} cleared");
+        }
+        Command::AddReplayCases { remote, profile, file } => {
+            let content = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            let cases: Vec<bunsin_api::ReplayCase> = serde_json::from_str(&content)
+                .map_err(|e| format!("{} is not a list of replay cases: {e}", file.display()))?;
+            let ids = connect(&remote)?
+                .add_replay_cases(&profile, cases)
+                .await
+                .map_err(text)?;
+            let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+            println!("{} case(s) added: {}", ids.len(), ids.join(" "));
+        }
+        Command::ReplayCases { remote, profile } => {
+            for case in connect(&remote)?.replay_cases(&profile).await.map_err(text)? {
+                print!("{}", case_text(&case));
+            }
+        }
+        Command::DeleteReplayCase { remote, profile, id } => {
+            connect(&remote)?.delete_replay_case(&profile, id).await.map_err(text)?;
+            println!("replay case {id} deleted");
+        }
+        Command::StartEval { remote, profile } => {
+            let run = connect(&remote)?.start_eval(&profile).await.map_err(text)?;
+            println!("evaluation run {run} started; see it with eval-report");
+        }
+        Command::EvalReport { remote, profile } => {
+            for line in eval_lines(&connect(&remote)?.eval_report(&profile).await.map_err(text)?) {
+                println!("{line}");
+            }
+        }
+        Command::ExtractPrinciples {
+            remote,
+            profile,
+            from,
+            tool,
+            args,
+        } => {
+            let source = principle_source(&from, tool, args)?;
+            let found = connect(&remote)?
+                .extract_principles(&profile, source)
+                .await
+                .map_err(text)?;
+            println!("{} new candidate(s)", found.len());
+            for candidate in &found {
+                print!("{}", candidate_text(candidate));
+            }
+        }
+        Command::PrincipleCandidates { remote, profile } => {
+            for candidate in connect(&remote)?.principle_candidates(&profile).await.map_err(text)? {
+                print!("{}", candidate_text(&candidate));
+            }
+        }
+        Command::AdoptPrinciple {
+            remote,
+            profile,
+            id,
+            text: edit,
+        } => {
+            let engine = connect(&remote)?;
+            // The adoption appends to the principles read here. A change meanwhile is refused.
+            let principles = engine.principles(&profile).await.map_err(text)?;
+            let adoption = bunsin_api::AdoptPrinciple {
+                id,
+                text: edit,
+                expected: bunsin_api::Expected::Value(principles),
+            };
+            engine.adopt_principle(&profile, adoption).await.map_err(text)?;
+            println!("candidate {id} added to the principles");
+        }
+        Command::DismissPrinciple { remote, profile, id } => {
+            connect(&remote)?.dismiss_principle(&profile, id).await.map_err(text)?;
+            println!("candidate {id} dismissed");
+        }
+        Command::Callers { remote, profile } => {
+            for caller in connect(&remote)?.caller_tokens(&profile).await.map_err(text)? {
+                let state = match caller.revoked_at {
+                    Some(_) => "revoked",
+                    None => "valid",
+                };
+                println!("{}\t{state}\t{}", caller.id, caller.label);
+            }
+        }
+        Command::Inbound { remote, profile } => {
+            let status = connect(&remote)?.inbound_status(&profile).await.map_err(text)?;
+            let word = |scope: &bunsin_core::inbound::InboundScope| json(scope).trim_matches('"').to_owned();
+            let state = if status.enabled { "on" } else { "off" };
+            println!("endpoint\t{state}\t{}", word(&status.scope));
+            for endpoint in &status.endpoints {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    word(&endpoint.listener),
+                    endpoint.mcp_url,
+                    endpoint.card_url,
+                    endpoint.catalog_url
+                );
+                if let (Some(a2a), Some(card)) = (&endpoint.a2a_url, &endpoint.agent_card_url) {
+                    println!("a2a\t{}\t{a2a}\t{card}", word(&endpoint.listener));
+                }
+            }
+            for hook in &status.webhooks {
+                let secret = if hook.secret_stored {
+                    "secret stored"
+                } else {
+                    "no secret"
+                };
+                println!(
+                    "webhook\t{}\t{}\t{secret}\t{}",
+                    hook.name,
+                    hook.connector,
+                    hook.urls.join(" ")
+                );
+            }
+            if status.ard.is_empty() {
+                println!("ard\tnot listed");
+            }
+            // One block for each entry: the MCP entry, then the A2A entry.
+            for ard in &status.ard {
+                let listed: Vec<String> = ard.listed_on.iter().map(word).collect();
+                let identifier = ard.identifier.as_deref().unwrap_or("-");
+                println!("ard\t{identifier}\tlisted on: {}", listed.join(", "));
+                for reason in &ard.refused {
+                    println!("refused\t{reason}");
+                }
+                for warning in &ard.warnings {
+                    println!("warning\t{warning}");
+                }
+            }
+            for record in &status.dns_records {
+                println!("dns\t{record}");
+            }
+        }
+        Command::WebhookSecret { remote, profile, name } => {
+            let mut secret = String::new();
+            std::io::stdin()
+                .read_line(&mut secret)
+                .map_err(|e| format!("cannot read the secret: {e}"))?;
+            connect(&remote)?
+                .set_webhook_secret(&profile, &name, secret.trim().to_owned())
+                .await
+                .map_err(text)?;
+            println!("the signing secret of webhook {name} of {profile} is stored");
+        }
+        Command::CallerAdd { remote, profile, label } => {
+            let created = connect(&remote)?
+                .add_caller_token(&profile, &label)
+                .await
+                .map_err(text)?;
+            println!("{}", created.token);
+            eprintln!(
+                "Caller token {} lets its holder ask the agent of {profile}. It is shown once and is not stored.",
+                created.id
+            );
+        }
+        Command::CallerRevoke { remote, profile, id } => {
+            connect(&remote)?
+                .revoke_caller_token(&profile, id)
+                .await
+                .map_err(text)?;
+            println!("caller token {id} revoked");
         }
         Command::Reject {
             remote,

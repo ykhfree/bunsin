@@ -3,8 +3,9 @@
 [한국어](README.ko.md)
 
 Bunsin hosts persona AI agents. Each agent holds one person's work principles and
-acts for that person in Slack, Jira and Confluence through MCP servers.
-One server holds several isolated agent profiles.
+acts for that person in Slack, Jira and Confluence through MCP servers or their REST APIs.
+One server can hold several isolated agent profiles. To let other agents find an agent by its
+address alone, run one server per agent (see [Run one agent per server](#run-one-agent-per-server)).
 
 The LLM only proposes. The harness decides what runs:
 
@@ -18,24 +19,38 @@ The LLM only proposes. The harness decides what runs:
 
 Bunsin is in early development. Read this list before you use it.
 
-- **Finding events depends on your MCP servers.** The server repeats a search tool that
-  you name in the settings (see [Find events](#find-events-polling)). It has run only
-  against test servers. There is no webhook intake.
+- **Finding events depends on your connectors.** The server repeats a search tool that
+  you name in the settings (see [Find events](#find-events-polling)), or Slack and Jira Cloud
+  send events to a webhook (see [Webhooks](#webhooks)). Both have run only against test servers.
 - **The agent reads only through the tools you allow.** Before it proposes, it can call
   tools with the class `read` (for example a search) up to five times, and read up to
-  five pages of its notes, and use the results. Facts it keeps go into its notes, which you approve page by page (see
-  [Notes](#notes)). Nothing is loaded in advance: the notes fill only with what the
-  agent read while it handled events, and the search quality depends on your MCP servers.
-- **The privacy filter works on patterns.** It finds email addresses, phone numbers and
-  the other listed forms. It does not find names or postal addresses.
-- **There is no setup wizard.** The window and the command line set the connections and
-  the privacy filter. The window also sets the permission rules. Principles and polls are
-  edited as a JSON file.
-- **Not built yet:** full-text search of the notes, ARD publishing and search, the REST API
-  connector, OAuth for MCP servers, the scoring of replay evaluation.
-- **Tested only against local test servers.** No test runs against a real LLM endpoint or
-  a real MCP server.
-- **The desktop window is tested headlessly.** The Keychain storage has no test.
+  five pages of its notes, and use the results. A call of an ARD tool (see [Find agents and tools with ARD](#find-agents-and-tools-with-ard)) counts as a tool read. Facts it keeps go into its notes, which you approve page by page (see
+  [Notes](#notes)). The notes fill with what the agent read while it handled events, and
+  with reads that you start yourself. The search quality depends on your MCP servers.
+- **The privacy filter works on patterns and on your list of terms.** It finds email
+  addresses, phone numbers and the other listed forms. It finds names and postal
+  addresses only if you list them as terms.
+- **The setup wizard is in the window only.** It uses the same calls as the other views and
+  stores nothing of its own. The command line has no wizard; [Set up an agent](#set-up-an-agent-profile-owner)
+  lists the commands in the same order.
+- **OAuth for MCP servers is turned on in the settings file only.** The window and the
+  command line then sign in (see [LLM endpoint and connectors](#llm-endpoint-and-connectors)).
+- **Tested only against local test servers.** No test runs against a real LLM endpoint,
+  a real MCP server, a real OAuth provider, a real ARD registry or publisher, a real A2A client,
+  or the real Slack, Jira or Confluence API. No test runs a real coding CLI (Claude Code, Codex); the coding tests use
+  `/bin/sh` and temporary git repositories.
+- **The desktop window is tested headlessly.** Tests drive the views without a screen, and the
+  pictures in `docs/screens` are drawn offscreen. Nobody has opened the real window and used it.
+  The Keychain storage has no test. `Bunsin.app` is not signed.
+- **Linux runs only in CI.** CI builds and tests the server on Ubuntu and builds the server
+  package. Nobody has run the server on a Linux machine or started its systemd unit.
+- **Not built yet:** OAuth for callers of the inbound endpoint (they use caller tokens), the LLM
+  usage in the window (`bunsind llm-usage` only), a command-line setup wizard, turning OAuth for
+  MCP servers on outside the settings file, and a check of a note page when you lose access to its source.
+  From ARD: DNS lookups of `_entries._agents`, the old `ai-catalog.json` path, following registry
+  referrals (federation stays `none`), full JSON-LD processing (only top-level keys are expanded),
+  signature checks of a trust manifest, and search as an MCP tool or A2A skill (§5.3.5).
+  From A2A: streaming, push notifications, the extended Agent Card, and follow-up messages in a task.
 - **The server operator can read profile data.** Profiles are isolated from each other,
   not from a person with access to the server's files.
 
@@ -48,7 +63,7 @@ and [docs/PLAN.md](docs/PLAN.md) has the plan (both in Korean).
 |---|---|---|
 | `bunsind serve` | The server. It runs the agents and stores their data. | Linux or macOS |
 | `bunsind <command>` | The command line of an operator or a profile owner. | Linux or macOS |
-| `bunsin-app` | The desktop window: approval inbox, audit log, kill switch, notes, settings. | macOS |
+| `bunsin-app` | The desktop window: approval inbox, audit log, kill switch, notes, permissions, agent settings, learning, settings, setup. | macOS |
 
 ## Build and test
 
@@ -59,6 +74,22 @@ cargo test --workspace
 ```
 
 `rust-toolchain.toml` pins the Rust version. rustup installs it on first use.
+
+### Packages
+
+```sh
+packaging/linux/build-tarball.sh   # target/package/bunsin-server-<version>-<target>.tar.gz and its .sha256
+packaging/macos/build-app.sh       # target/package/Bunsin.app (macOS only)
+```
+
+- The server tarball holds `bunsind`, a systemd unit, a sysusers file, an environment template
+  without secret values, `INSTALL.md`, LICENSE and this README. [`packaging/linux/INSTALL.md`](packaging/linux/INSTALL.md)
+  says how to install it and which hardening options to change for `--allow-stdio-connectors`
+  and `--allow-coding`. The unit waits 330 seconds at a stop, so the server's 300-second drain is
+  not cut. CI builds the tarball on Ubuntu and keeps it as an artifact of the run; nothing is
+  published. Nobody has installed it on a real Linux server yet.
+- `Bunsin.app` is not signed with a Developer ID and has no icon (the repository has none).
+  [`packaging/macos/README.md`](packaging/macos/README.md) lists the manual steps to sign and notarize it.
 On Linux, build and test without the window: `cargo test --workspace --exclude bunsin-app`.
 The window uses GPUI through the `gpui-kit` crate.
 
@@ -195,8 +226,137 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   start any program, in the window or in the settings file. The program runs as the user
   of the server, so it can read the data of the other profiles and the key file. Use the
   flag only on a server whose profile owners you all trust, such as a server for yourself.
+- **Coding jobs.** A profile can start coding jobs (see [Delegate coding](#delegate-coding))
+  only if the server runs with `--allow-coding --coding-repo-root <dir>`, and only with a
+  program that you name: `--coding-program claude-code=<absolute path>` and
+  `--coding-program codex=<absolute path>`. A profile picks only the backend and a repository.
+  Each repository must be a git repository under the root; the server checks it, after it
+  follows links, when the settings are saved and again when a job starts. The same holds for
+  every check below.
+- **Coding commands.** A profile's own program (the backend `command`) and a test command run
+  only with `--allow-coding-commands`. This flag gives every profile owner the same power as
+  `--allow-stdio-connectors`: they can run any program as the user of the server, and that
+  program can read the data of the other profiles and the key file. Use it only on a server
+  whose profile owners you all trust.
+- **No sandbox.** A coding job runs as the user of the server. The coding CLI keeps its own
+  permission settings: Bunsin passes no flag that turns off its prompts or its sandbox, and
+  adds no sandbox of its own. A job keeps its worktree and transcript in
+  `<data dir>/coding/<profile>/`; the server does not remove the worktrees.
+- **Listeners for other callers.** `--internal-listen <addr> --internal-url <address>` opens
+  a second listener for callers in your own network, and `--public-listen <addr> --public-url
+  <address>` a third one for callers on the internet. The URL is the address that callers use,
+  for example `https://agents.example.com`; it can differ from the listen address behind a
+  proxy. These listeners have no control API: an access token does nothing there, and the
+  control API is not reachable through them. Each needs TLS on a public address
+  (`--internal-tls-cert`/`--internal-tls-key`, `--public-tls-cert`/`--public-tls-key`), and no
+  two listeners may share an address. The server checks all of this before it reads the key.
+  They serve the inbound endpoints of the profiles that turn them on (see
+  [Let others ask your agent](#let-others-ask-your-agent)): the internal listener serves the
+  scopes `internal` and `public`, the public listener only `public`.
+- **ARD publishing.** `--ard-publisher-domain acme.com` (repeat it for more) names the
+  domains that profiles may publish their endpoint under. Without it, no profile is published,
+  and the server refuses settings with `inbound.ard`. A listener for callers serves the ARD
+  catalog `/.well-known/ard.json` of the profiles it serves.
+- **A2A root card.** `--a2a-root-profile kim` serves the A2A Agent Card of `kim` at
+  `/.well-known/agent-card.json` on the listeners for callers. A stock A2A card resolver then finds
+  the agent from the listener address alone (A2A §8.2). That address holds one card, so run one
+  agent per server process for this: each process with its own data directory and its own address,
+  for example `https://kim.agents.acme.com`. The card is served only where the profile's A2A
+  endpoint is served; elsewhere the address is 404. At start, `bunsind` says on stderr whether each
+  listener serves it. The flag needs a listener for callers and a profile in the data directory.
+  The card shows the profile ID to anyone who reaches the listener, also without an ARD listing.
+- **ARD registry.** `--ard-registry internal` makes the internal listener an ARD registry,
+  and `--ard-registry public` makes both listeners one. Without the flag the registry routes
+  do not exist (404). A registry listener answers `POST /search`, `POST /explore` and
+  `GET /agents` at its root, so its base URL is its `--*-url`. The registry needs no token.
+  - **What it indexes.** This server's own catalogs, every 60 seconds, and the domains that you
+    name as seeds. All of it is in `<data dir>/registry.db`.
+  - **Seeds.** `--ard-registry-source <seed>` adds a domain for the internal listener, and
+    `--ard-registry-public-source <seed>` one for both listeners (only with
+    `--ard-registry public`). Repeat them, at most 200 seeds. A seed is `<domain>`, which the
+    registry resolves through `/.well-known/ard.json`, `rel="ard"` links and `Agentmap` lines,
+    or `<domain>=<URL>`, which reads only that one catalog address. Either way, an entry is kept
+    only if its URN names that domain. The server checks every seed address with the upstream
+    rules (`--allow-upstream-host`) and does not start if one fails or a seed is given twice.
+  - **Schedule.** The registry reads one seed at a time. A read succeeds only if every entry
+    source of the seed reads. A page that is no JSON manifest and has no entry markup (for example
+    a maintenance page) is a failed read, and so is a source that lists more than 1,000 entries.
+    For a plain domain, `/.well-known/ard.json` that answers 404 or 410 is no source, so a domain
+    may publish only through `rel="ard"` links or `Agentmap` lines. A domain with no source at all
+    is a failed read. If `https://<domain>/` or its `robots.txt` answers another error (no answer,
+    a 5xx, a 403, a body over 1 MiB), the sources that it announces are unknown, so the read
+    fails too. It reads a seed again 1 hour after a success. After the n-th failure in a row it
+    waits 1 hour × 2^(n−1), at most 24 hours, and keeps the entries. A seed without a success for 7 days loses its entries until it is read
+    again.
+  - **What each listener sees.** The public listener sees only public entries. It ranks and
+    counts only those entries, so its answers say nothing about internal entries.
+  - **Limits.** Each listener answers 600 requests a minute; more get 429. A request body is
+    at most 64 KiB. The filter of `/search` and `/explore` has at most 20 keys and 50 values for a
+    key; more get 400. A page has at most 100 results, and a page token reaches at most the
+    1,000th result. The seeds hold at most 10,000 entries together, and 500 for one seed. The
+    server's own catalogs do not count against the 10,000. A result shows no `score` or `source`
+    of a crawled entry's own; `/search` adds the registry's. Every `federation` mode searches
+    only this index, and no answer has `referrals`.
+  - **Its own entry.** A registry listener lists the registry in its `ard.json` as
+    `urn:air:<domain>:registry:bunsin`. `<domain>` is the longest `--ard-publisher-domain`
+    that is the listener host or ends it, for example `acme.com` for `agents.acme.com`.
+    Without such a domain, the listener lists no registry entry.
+  - **DNS.** On start, the server writes one line to stderr for each such listener, for
+    example `_search._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.` Add it to your DNS
+    zone. The server does not write DNS records.
+  - **Status.** `bunsind registry-status` reads `registry.db` on this machine, also while the
+    server runs. For each source it shows the entry count, the last successful read, the next
+    read, the failures, the last error, and the refused entries by reason, such as
+    `other_publisher` or `too_large`.
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
+
+### Run one agent per server
+
+A stock A2A client finds an agent at `<address>/.well-known/agent-card.json`, and one address
+holds one card. So, to let other agents find each of your agents by its address alone, run one
+`bunsind serve` per agent. Each server then also keeps its own data, key and limits.
+
+Each server needs its own:
+
+- **data directory** (`--data-dir` or `BUNSIN_DATA_DIR`), with the one profile of that agent;
+- **control address** (`--listen`) and access tokens;
+- **listener address** for callers, best a host name of its own such as
+  `https://kim.agents.acme.com` behind your TLS proxy;
+- **`--a2a-root-profile`** that names the profile of that agent.
+
+```sh
+# Kim's agent
+export BUNSIN_DATA_DIR=/var/lib/bunsin-kim
+bunsind profile-add kim --owner "Kim"
+bunsind token-add kim --label "Kim's laptop"
+bunsind serve --listen 127.0.0.1:8787 \
+  --internal-listen 127.0.0.1:9001 --internal-url https://kim.agents.acme.com \
+  --ard-publisher-domain acme.com --a2a-root-profile kim
+
+# Lee's agent: another data directory, other ports, another host name
+export BUNSIN_DATA_DIR=/var/lib/bunsin-lee
+bunsind profile-add lee --owner "Lee"
+bunsind token-add lee --label "Lee's laptop"
+bunsind serve --listen 127.0.0.1:8788 \
+  --internal-listen 127.0.0.1:9002 --internal-url https://lee.agents.acme.com \
+  --ard-publisher-domain acme.com --a2a-root-profile lee
+```
+
+- **Owners.** Each owner connects the window or the command line (`BUNSIN_SERVER`,
+  `BUNSIN_TOKEN`) to the server of their agent.
+- **The key.** The key belongs to the data directory: `master.key` in it, or, on macOS, a
+  Keychain item named by its `keychain-id` file. Each server has its own.
+- **ARD.** Each server publishes the catalog of its own agent at its own address. Two servers do
+  not see each other, so give each agent its own `agent_name` (the identifier must be unique). To
+  search all of them in one place, run one server with `--ard-registry` and name the others as
+  seeds, for example `--ard-registry-source acme.com=https://lee.agents.acme.com/.well-known/ard.json`.
+- **systemd.** The packaged unit (`packaging/linux/bunsind.service`) runs one server with
+  `/etc/bunsin/bunsind.env` and `/var/lib/bunsin`. For a second agent, copy it under a new name,
+  for example `bunsind-lee.service`, and change its `EnvironmentFile`, `StateDirectory`,
+  `WorkingDirectory` and the data directory in its environment file.
+- One server can still hold several profiles. Then only the profile of `--a2a-root-profile` is
+  found at the address; the others are found through ARD or by the full card address.
 
 ## Set up an agent (profile owner)
 
@@ -213,6 +373,54 @@ For a server with a private CA, set `BUNSIN_CA_CERT` to the CA certificate file.
 A new profile can do nothing. Its settings must name an LLM endpoint, connectors,
 approved tools and permission rules.
 
+### The setup, step by step
+
+The window opens a **setup** by itself for a profile that has no LLM endpoint or no
+connector, and no approved tool. The button "Set up the agent" in the Agent view opens it
+again. It has seven steps. Each step shows the controls that the other views have for it:
+
+1. **LLM endpoint**: save the address, the model and the token, then press Test. Next
+   needs a test that works.
+2. **Connect services**: an MCP server at an address, a REST API, or a command that the
+   server runs if its operator allows it. Check connects and lists the tools.
+3. **Tools and rules**: list the tools of each connector, read the names and descriptions,
+   and approve the list. Then give each tool a rule. No tool gets a class by itself. A new
+   Write or Delete rule starts at Approve, and you choose where its text for other people
+   is. The setup offers only Observe and Approve.
+4. **Knowledge** (optional): one read into the notes from a tool with a read rule.
+5. **Principles**: candidates from one read (for example a search of your sent messages),
+   from your corrections or from your replay cases. Adopt, edit or dismiss each one.
+6. **Evaluation**: add replay cases as a JSON array, if you have them, and run the first
+   evaluation. The step shows the rates.
+7. **Finish**: a summary. The setup ends only when every write and delete rule is at
+   Observe or Approve. "Set them to Approve" moves the others there.
+
+Each step has Skip. "Leave the setup" goes to the Agent view, and the window keeps the
+step until it closes. A new window starts at the first step whose result the server does
+not show, for example Connect services when only the LLM endpoint is saved.
+
+![The tools step of the setup](docs/screens/setup-tools-light.png)
+
+On the command line, the same steps are these commands, in this order:
+
+```sh
+bunsind llm-set kim --token-stdin                 # 1. the LLM endpoint
+bunsind llm-test kim
+bunsind connector-set kim slack --url https://mcp.example.com/slack --token-stdin   # 2.
+bunsind tools kim slack                           # 3. the check and the tool list
+bunsind tools kim slack --approve
+bunsind rule-set kim slack/search --class read
+bunsind rule-set kim slack/post --class write --text text
+bunsind preload-notes kim --tool slack/search --args '{"query": "deploy"}'           # 4.
+bunsind extract-principles kim --from read --tool slack/search --args '{"query":"from:me"}'  # 5.
+bunsind principle-candidates kim
+bunsind adopt-principle kim 1
+bunsind add-replay-cases kim cases.json           # 6.
+bunsind start-eval kim
+bunsind eval-report kim
+bunsind rules kim                                 # 7. no write rule above approve
+```
+
 ### LLM endpoint and connectors
 
 Enter these in the desktop window (section "Connections"), or on the command line:
@@ -226,9 +434,14 @@ bunsind connector-set kim jira --url https://mcp.example.com/jira --token-stdin
 bunsind connector-set kim wiki --url https://mcp.example.com/wiki     # an MCP server that needs no token
 bunsind connector-set kim crm --url https://mcp.example.com/crm \
     --token-header X-API-Key --token-stdin       # the token goes as `X-API-Key: <token>`
+bunsind connector-set kim slack-api --api slack --url https://slack.com/api --token-stdin
+bunsind connector-set kim jira-api --api jira --url https://your-domain.atlassian.net \
+    --auth basic --email you@example.com --token-stdin   # an Atlassian API token
 bunsind llm-test kim                             # one test request to the saved LLM endpoint
+bunsind llm-usage kim                            # LLM calls and tokens of the last 90 days
 bunsind connections kim                          # addresses and where each token comes from
 bunsind tools kim slack                          # connects and lists the tools: the check that it works
+bunsind connector-oauth kim docs                 # signs in to an MCP server that uses OAuth (see below)
 bunsind connector-remove kim jira                # removes the connector and its token
 ```
 
@@ -241,18 +454,70 @@ bunsind connector-remove kim jira                # removes the connector and its
   request has the reply form and the output limit of a real request, and no data of your
   profile. It costs tokens at the endpoint. The test passes if the reply has the form the
   agent needs.
+- `llm-usage` adds up the LLM calls of the last 90 days by UTC day and purpose (`event`,
+  `replay`, `llm_test`): calls, failed calls, input and output tokens, and the average time.
+  The server records every call with its time, tokens and how it ended. It stores no text
+  of the request or the reply, and no error message.
 - A connector needs no token: leave the token out. A token goes as `Authorization: Bearer
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every
   `connector-set` of that connector: a call without it sets `Authorization: Bearer` again.
-- In the window, **Copy the token from the Keychain** reads the LLM token from an item
-  that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
+- A tool call of an MCP connector must end in 2 minutes, and so must the list of its tools
+  that the server asks for before each call. A call that runs longer is cancelled, but the
+  MCP server may have done it anyway. So an approved write or delete that runs out of time
+  becomes `unknown`, not `failed` (see "A call cut by a stop or without an answer" below).
+- **OAuth.** An MCP server at an address can take a sign-in with OAuth instead of a token.
+  Turn it on in the settings file: give the connector `"oauth": {}` and no token, then
+  `config-set`. For example:
+  `"docs": {"mcp": {"transport": "http", "url": "https://mcp.example.com/docs"}, "oauth": {}}`.
+  The window and `connector-set` keep the `oauth` of a connector they save, but cannot turn
+  it on or off. In `oauth`, `"client_id"` names a client that the authorization server gave
+  you for Bunsin. Without it, the server registers a client by itself (dynamic client
+  registration). `"scopes"` lists the scopes to ask for. Without it, the server asks for the
+  scopes that the MCP server names.
+- To sign in, click **Sign in** in the row of the connector in the window. The window opens
+  the sign-in page in the browser and takes the browser's return on a free port of
+  127.0.0.1. On the command line, `connector-oauth` prints the address of the page. Open it,
+  sign in, then paste the address that the browser goes to; that page does not load.
+- The MCP server's metadata sets the address of the sign-in page. The server and the window
+  accept only an `https` address, or `http` on 127.0.0.1, ::1 or localhost. Another scheme,
+  for example `smb:` or `file:`, is refused, because opening it would start a program on your Mac.
+  `--redirect-uri` sets that address (default `http://127.0.0.1:8976/callback`). A client ID
+  that was registered with one fixed address may need it. A sign-in waits 10 minutes. A
+  profile can have 3 sign-ins waiting, and a restart of the server forgets them.
+- The server seals the OAuth tokens and binds them to the origin of the MCP server's address.
+  It renews the access token with the refresh token by itself. `connections` and the window
+  show `signed in with OAuth` or `OAuth sign-in needed`. You must sign in again after the
+  address moves to another origin, after the authorization server refuses the refresh
+  token, or when the access token has expired and there is no refresh token. Removing
+  `oauth` or the connector deletes the tokens. Each request of the sign-in passes the address
+  rules, follows no redirect and must end in 30 seconds. The sign-in ran only against a
+  local test server.
+- With `--api slack|jira|confluence` (in the window: the kind **REST API**), the server calls
+  the service's REST API itself instead of an MCP server. The tools are fixed in the code:
+  Slack `search_messages`, `get_thread`, `post_message`; Jira `search_issues`, `get_issue`,
+  `add_comment`; Confluence `search_pages`, `get_page`, `create_page`. No tool deletes.
+  `--url` is the base URL: `https://slack.com/api`, or your Atlassian site. Slack takes a
+  bearer token. Jira and Confluence take a bearer token, or `--auth basic --email <account>`
+  with an Atlassian API token. A REST API connector needs a token and takes no
+  `--token-header`. You approve its tools and give each a rule, as for an MCP server; the
+  AI marker goes where the rule names the text, for example `{"arg": "text"}`. The address
+  rules and the binding of the token to the origin apply to the base URL. The request
+  shapes follow the official API docs; no test ran against the real services. Each request
+  must end in 30 seconds; a service that does not answer in time gives an error. If the
+  request reached the service before the error, an approved write or delete becomes
+  `unknown`. A write that gets HTTP 2xx with a body that is not JSON (for example a login
+  page) also becomes `unknown`: the service accepted it. A read with such a body fails.
+  A request that never connected, and a clean refusal such as HTTP 4xx, fail.
+- In the window, **Copy the token from the Keychain** reads the LLM token or the token of
+  an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
   Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
   The token is copied once to the server: a later change in the Keychain does not reach
   it. macOS can ask you to allow the access if another app made the item. The window
   does not respond while macOS asks. The read finds application passwords of the login
   Keychain only: not "Internet password" items, and not items of iCloud Keychain or the
-  Passwords app. Only the LLM token has this feature.
+  Passwords app. One set of Keychain fields is open at a time, under the token it fills.
+  A read that fails empties that token field, so Save does not send an earlier token.
 - With `--wire openai-chat` or `openai-responses`, `llm-set` needs `--base-url` and `--model`.
   Only the Claude format has defaults.
 - A Claude API key that is not scoped to one workspace also needs a workspace ID. Set
@@ -261,7 +526,8 @@ bunsind connector-remove kim jira                # removes the connector and its
   only "token stored on the server", "token from the server's environment" or "no token".
 - Without `--token-stdin` the stored token is kept. `--clear-token` removes it.
 - If someone else changed the same settings after the window loaded them, the window
-  warns before it overwrites. The command line and `config-set` do not check.
+  warns before it overwrites. The command line and `config-set` do not check, except
+  the rule commands (`rule-set`, `rule-remove`).
 - A token belongs to the address it was entered for. If you move a connection to another
   host or port, enter the token again; the server refuses to keep it.
 - A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
@@ -312,22 +578,102 @@ bunsind connector-remove kim jira                # removes the connector and its
 `principles` go into every prompt as instructions. All other text the agent reads
 (messages, pages, tool descriptions) is quoted as data.
 
+In the window, the **Agent** view lists the principles. You add, change, move up or down,
+and remove them, then Save sends the list. If someone saved other principles meanwhile, the
+view warns and offers "Load the server's version" and "Save anyway".
+
+![The principles in the agent view](docs/screens/agent-light.png)
+
+- At most 50 principles, each 1 to 1,000 characters. The space around a principle is removed.
+- Principles are your own instructions, so the privacy filter does not change them.
+- The audit log records the counts of a change, not the text.
+
+#### Principle candidates from your past texts
+
+The server can ask the LLM which rules your past texts follow. It proposes candidates only.
+Nothing becomes a principle until you adopt it.
+
+```sh
+bunsind extract-principles kim --from corrections     # your edits of drafts and your reasons
+bunsind extract-principles kim --from replay-cases    # the real replies of your replay cases
+bunsind extract-principles kim --from read --tool slack/search --args '{"query":"from:me"}'
+bunsind principle-candidates kim
+bunsind adopt-principle kim 4                          # add candidate 4 to the end of the principles
+bunsind adopt-principle kim 5 --text "Answer in one line."   # add your edit of it instead
+bunsind dismiss-principle kim 6
+```
+
+- The texts reach the LLM as quoted data after the privacy filter. A `read` source calls one
+  tool that has a `read` rule, with the same checks as a poll.
+- The server keeps at most 10 candidates per request. It drops a candidate that has more than
+  300 characters, holds a `[REDACTED:...]` placeholder, or quotes as its evidence something
+  that is not in your texts. It also drops a text that is a principle or a candidate already,
+  so a dismissed candidate does not come back.
+- An adoption appends one text through the same save as the principles, with the same limits.
+  If the principles changed since you read them, the adoption is refused (HTTP 412).
+
 ### Permission rules
 
 In the window, the **Permissions** view lists each approved tool and sets its rule with
-buttons: Off, Read, Write or Delete, then the step and the argument that holds the text
-for other people. Nothing is chosen for you from a tool's name or description. A write
-or delete rule cannot be saved until you say where its text is, or that it sends none.
+buttons: Off, Read, Write or Delete, then the step and the arguments that hold the text
+for other people. A click on an argument adds or removes it, so you can choose several.
+Nothing is chosen for you from a tool's name or description. A write or delete rule
+cannot be saved until you say where its text is, or that it sends none.
 Save sends the whole table, and the view lists each change before you save.
 
 ![The permissions view of the window](docs/screens/permissions-light.png)
 
 - The buttons offer the text arguments at the top of a tool's input. If the text is
-  inside another value, write the rule in the settings file. The view shows such a rule
-  as it is and keeps its argument as one of the choices.
+  inside another value, set the rule with `bunsind rule-set` or in the settings file.
+  The view shows such a rule as it is, keeps it on save, and keeps it as one of the choices.
 - A rule change also applies to items that already wait in the inbox: at approval the
   server adds the AI marker by the rule in force at that time.
 - A rule that a poll needs cannot be removed. The view shows the server's reason.
+
+#### Raise a step on evidence, and hold a tool that went wrong
+
+The server counts your decisions about each write or delete tool: calls you approved
+unchanged, edited or dismissed, and calls that ran without asking (and how many failed).
+The Permissions view shows the counts under each tool.
+
+- **Suggestions.** Set thresholds in the settings file or in the **Autonomy suggestions** card of the
+  Learning view. Without them nothing is suggested.
+
+  ```json
+  { "autonomy": { "min_reviewed": 20, "min_unchanged_percent": 90, "window_days": 30 } }
+  ```
+
+  A write tool at `approve` with at least `min_reviewed` decisions in the last `window_days`
+  days, of which at least `min_unchanged_percent` % were approved unchanged, gets the badge
+  "Suggested: Autonomous". The server never raises a step. You raise it and press Save.
+  A delete tool and the coding tool are never suggested.
+- **Holds.** If you dismiss a waiting call of a tool at `autonomous`, or press "Report a problem"
+  on a call that ran without asking, the server holds the tool at approval: each of its calls
+  waits for you, whatever its step says. A call that the server approved by itself but did
+  not run before a stop waits too. The hold is stored apart from the settings, so a settings file or "Save anyway"
+  cannot end it. Only "Clear the hold" in the Permissions view, or `bunsind clear-autonomy-hold`,
+  ends it. A hold starts the counts of the tool again.
+
+```sh
+bunsind autonomy kim                          # counts, holds and suggestions, one line per tool
+bunsind report-autonomous kim 42              # report inbox item 42, which ran without asking
+bunsind clear-autonomy-hold kim slack/post_message
+```
+
+On the command line, one rule at a time:
+
+```sh
+bunsind rules kim                                   # one line per rule; "off" for an approved tool without one
+bunsind rule-set kim slack/search --class read
+bunsind rule-set kim slack/post --class write --text text --text 'blocks.*.text.text'
+bunsind rule-set kim slack/delete --class delete --tier approve --no-text
+bunsind rule-remove kim slack/search
+```
+
+- A write or delete rule needs `--text <place>` (repeat it for more places) or `--no-text`.
+  `--tier` defaults to `approve`. A delete cannot be `autonomous`.
+- The command reads the table, changes one rule and sends the table with what it read.
+  If someone changed the rules in between, the server refuses and nothing is saved.
 
 The same rules as a settings file:
 
@@ -383,7 +729,12 @@ The same rules as a settings file:
 
 - **`outgoing_text`** is required in every rule. `{ "arg": "text" }` names the argument
   that other people will read; the server appends `ai_marker` to it. `"none"` means the
-  tool sends no text to other people. The marker covers one string argument only.
+  tool sends no text to other people.
+  `{ "paths": ["text", "blocks.*.text.text"] }` names several places. A path joins argument
+  names with `.`, and `*` means every item of a list. The server appends the marker to each place.
+  If a call lacks one of the places, or one item of a list lacks the rest of the path,
+  the server does not make the call. So a Slack message with a divider block is refused
+  by the rule above.
 
 ### Find events (polling)
 
@@ -405,7 +756,14 @@ The same rules as a settings file:
 The server calls the tool every `every_secs` seconds (30 at least) and hands each new
 item to the agent.
 
-- The tool must have a rule with the class `read` and must be in the approved list.
+In the window, the **Agent** view lists the polls with the last run of each. You add,
+change and remove a poll in its fields (the arguments as a JSON object, the mapping as dot
+paths, the authors to skip one in each line), then Save sends the list. The server refuses a
+poll that it would not run and the view shows the reason. **Test** runs a saved poll once and
+shows the events it would hand over, after the privacy filter, like `bunsind poll-test`.
+
+- The tool must have a rule with the class `read` and must be in the approved list. The window's
+  save checks both. A settings file is checked for the rule; an unapproved tool fails at each run.
 - The example above is an illustration. Fit `args` and `mapping` to what your MCP
   server's search tool takes and returns.
 - `mapping` says where the fields are in the tool's result, as dot paths such as
@@ -425,6 +783,50 @@ item to the agent.
 - `bunsind status kim` shows the last result of each poll. "none usable" means the
   mapping does not fit the result.
 
+### Webhooks
+
+Slack (Events API) and Jira Cloud can send events to the server instead of a poll. A webhook
+belongs to a REST API connector of the same service (see
+[LLM endpoint and connectors](#llm-endpoint-and-connectors)); its events have that connector
+as their source.
+
+```json
+"webhooks": {
+  "slack-events": {"connector": "slack-api", "scope": "public", "skip_authors": ["U012AB3CD"]},
+  "jira-events": {"connector": "jira-api", "scope": "public"}
+}
+```
+
+```sh
+bunsind webhook-secret kim slack-events      # type or pipe the signing secret, then Enter
+bunsind inbound kim                          # the address of each webhook, and whether its secret is stored
+```
+
+- The address is `<listener URL>/hooks/<profile>/<name>`. `scope` (default `internal`) picks
+  the listeners as for the inbound endpoint: the internal listener takes both scopes, the public
+  listener only `public`. Slack and Jira Cloud need a public listener.
+- Give Slack the signing secret of the app, and Jira the secret of the webhook, with
+  `webhook-secret`. The server stores it encrypted and never sends it back. A removed webhook
+  loses its secret. Without a secret, every delivery is refused.
+- The server checks the signature over the raw body first (Slack `v0`, Jira `X-Hub-Signature:
+  sha256=`). Slack's timestamp must be within 5 minutes; a Jira body's `timestamp` within 2 hours.
+  Every refusal of the profile, the webhook, the listener and the signature is the same `401`.
+  A body over 1 MiB gets `413`. A signed Slack `url_verification` gets its challenge back.
+- Slack takes `message` (new messages, thread replies, file shares, bot messages) and
+  `app_mention`; Jira takes `comment_created`, `comment_updated`, `jira:issue_created` and
+  `jira:issue_updated`. Other events get `200` and are dropped.
+- The server answers `200` at once and hands the event to the agent later, like a question of
+  an inbound caller. A delivery is stored once by its ID (Slack `event_id`, Jira
+  `X-Atlassian-Webhook-Identifier`); a repeated delivery gets `200`. Handled deliveries are kept
+  for 7 days. One Slack message that arrives as `message` and as `app_mention` is handled once.
+- The agent's own posts (with the AI marker) and the authors in `skip_authors` are dropped.
+- A webhook event is from outside: anyone who writes in the channel or the project can steer it.
+  A page change from it always waits for you, also with `notes.auto_apply`.
+- A connector cannot have a poll and a webhook: their event IDs differ, so one message would be
+  handled twice. The server refuses such settings.
+- In the window, the **Webhooks** card of the Agent view does the same as the settings file and
+  `webhook-secret` (see [Desktop window](#desktop-window-macos)).
+
 ### Privacy filter
 
 ```json
@@ -434,7 +836,8 @@ item to the agent.
     "phone": true,
     "resident_number": true,
     "card_number": true,
-    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }]
+    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }],
+    "terms": ["Park Jiwon", "박지원", "12 Teheran-ro"]
   }
 }
 ```
@@ -447,6 +850,11 @@ file or log; the audit log holds counts only.
   resident registration number. A card number counts only if its check digit is right.
 - `custom` patterns use the syntax of the Rust [`regex`](https://docs.rs/regex) crate.
   The server refuses a pattern that does not compile or that matches empty text.
+- `terms` are literal texts, for example names of colleagues or addresses. Each match
+  becomes `[REDACTED:TERM]`. A term matches anywhere and in any case, so `Kim` also removes
+  the start of `Kimball`, and `박지원` also matches in `박지원님`. Spaces around a term do not count.
+  At most 200 terms of 2 to 100 characters. The terms themselves are stored in the profile
+  settings on the server; an error names a term by its position only.
 - The desktop window has a form for these settings.
 - Your own `principles` and your own edits are not filtered.
 
@@ -460,7 +868,11 @@ and the sources of its facts. It works like a small wiki that the agent writes.
   `note <page> (new page)` or `(change)`, with the new text, its sources and the text it
   replaces. Nothing is kept until you approve it.
 - In later events the agent sees the list of pages and reads the ones it needs before it
-  searches again.
+  searches again. The list shows the pages that share rare words with the message first,
+  then the newest pages, and at most 60 lines. The agent can also search its notes by
+  words (`bunsin.wiki/search`): it gets up to 10 pages with their titles and summaries.
+  A search counts toward the five reads of the notes, and it is never the source of a new
+  fact.
 - A page is reference material. Whatever a page says, the permission table decides what
   the agent may do.
 - The agent proposes a page only from something it read in that event, changes an
@@ -468,10 +880,25 @@ and the sources of its facts. It works like a small wiki that the agent writes.
 - You can read, write and delete pages yourself. In the window, the **Notes** view lists
   the pages. Select a page to read and edit it, or make a new page. Save warns you if the
   page changed on the server meanwhile. Delete asks once before it deletes.
+- **Search** above the list of pages finds pages by words. The list then shows only the
+  pages that match, best first, ranked as the agent's search ranks them; **Show all** brings
+  back every page. The search finds a part of a word of three or more letters or digits,
+  and a Korean word of two syllables. It drops one particle from a longer Korean word
+  ("금요일은" finds "금요일에"). A word that more than a quarter of the pages share (and more
+  than two pages) finds nothing by itself; add a rarer word. Unlike the agent, you get every
+  match, not only 10.
+- **History** lists the revisions of the open page, newest first. Choose one to read its
+  text; nothing in it can be edited. "Put this text into the fields" copies the old text
+  into the fields, and Save stores it as a new revision with the usual check. It does not
+  replace text that you typed and did not save.
+
+![The history of a page](docs/screens/notes-history-light.png)
+
 - The same on the command line:
 
 ```sh
 bunsind wiki-list kim
+bunsind wiki-search kim "deploy friday"   # matching pages, best first
 bunsind wiki-show kim deploy-schedule
 bunsind wiki-set kim team --title "Team" --summary "Who does what" --body-file team.md
 bunsind wiki-delete kim team
@@ -479,9 +906,408 @@ bunsind wiki-history kim team          # every change; --revision N prints an ol
 bunsind wiki-export kim ./notes        # index.md and pages/*.md
 ```
 
-Not built yet: a periodic check for stale or conflicting pages, applying changes without
-approval, loading a Confluence space in advance, full-text search, and the page history
-in the window (use `wiki-history`).
+#### Checks of the notes
+
+A check reports pages to look at. It never changes a page. The settings `notes` say what
+it looks for; everything is off by default:
+
+```json
+"notes": {"stale_days": 30, "lint_every_hours": 24, "lint_conflicts": true}
+```
+
+- `stale_days`: a page that nobody changed for more than this many days is **old**. A page
+  that no other page names (its name as a whole word) and that the agent did not read for
+  more than this many days is **not named**. A page the agent never read counts from its
+  last change.
+- `lint_conflicts`: the check also asks the LLM, once, about at most 10 pairs of pages that
+  share two or more rare words. The pages go to the LLM as quoted data after the privacy
+  filter. A finding about a pair that was not sent is dropped. Without this setting a check
+  calls no LLM.
+- `lint_every_hours`: the server checks this often. Without it, only you start a check.
+- A check replaces the findings of the last one. Dismiss a finding, and later checks do not
+  report the same kind for the same pages again. If the conflict check fails, the last
+  findings stay.
+- In the window, the **Checks** card of the Notes view has **Check now** and a **Dismiss**
+  button for each finding. On the command line:
+
+```sh
+bunsind lint-notes kim         # check now
+bunsind lint-findings kim      # the findings you have not dismissed
+bunsind dismiss-finding kim 3
+```
+
+![The notes view with the findings of a check](docs/screens/notes-light.png)
+
+#### Changes without approval
+
+With `"notes": {"auto_apply": true}` (off by default) the server stores a page change of the
+agent at once, without your approval, but only if all of these hold:
+
+- the page is new, or the agent wrote it last. A page that you wrote or edited always waits for you;
+- the kill switch is off;
+- the event came through your own channel: an event you handed in with your access token. The
+  server sets this mark itself. Every other event counts as `outside`: a poll, a webhook, an
+  inbound caller, and any event whose mark comes from the request or from storage. Its changes
+  always wait for you, because other people wrote such an event and can write it to steer the agent.
+  A poll counts as outside too: you set up the search, but other people wrote the messages it finds.
+
+The change still needs a source and still shows in the inbox, as done. The audit entry
+`wiki_change_applied` says `"auto": true`. A change that cannot be stored stays pending.
+The **Notes** card of the window's Settings view sets `auto_apply` and the checks above.
+
+#### Read into the notes
+
+You can fill the notes from one read that you choose, for example a search of a Confluence space:
+
+```sh
+bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"}'
+```
+
+- The tool needs a rule with the class `read`, and its tool list must be the approved one, as for a poll.
+  Bunsin calls it once with your arguments.
+- The agent gets the result after the privacy filter, as quoted data, and proposes pages. It may
+  read more tools and pages, with the usual limits. The changes go to the inbox like other page
+  changes, with the read as their source. They always wait for you, also with `notes.auto_apply`:
+  you started the read, but other people wrote what it found.
+- Whatever else the agent proposes (a reply, an escalation) is not run. The audit log records it.
+- In the window, the **Read into the notes** card of the Notes view does the same.
+
+Not built yet: a check of a page when you lose access to its source.
+
+### Find agents and tools with ARD
+
+The agent can look for other agents and tools with ARD (Agentic Resource Discovery). It asks
+the registries and reads the domains that you name in the settings:
+
+```json
+"ard_registries": [{"name": "corp", "url": "https://registry.corp.example/v1"}],
+"ard_domains": [
+  "acme.com",
+  {"domain": "partner.example", "catalog": "https://agents.partner.example/.well-known/ard.json"}
+]
+```
+
+**Registries.** With a registry, the agent sees three built-in read tools. Each one asks the
+named registry, or the first one.
+
+- `bunsin.ard/search {text, registry?, filter?, context?, page_token?}` sends
+  `POST <url>/search` with `federation: "none"` and `pageSize: 5`. `filter` maps a term path to
+  the values it accepts: at most 10 keys with at most 10 values, each value at most 200
+  characters. `context` maps a prefix to a namespace IRI, for a prefixed filter key such as
+  `okf:taxonomy` (at most 10). `page_token` asks for the next page; each result gives the next
+  token.
+- `bunsin.ard/explore {facets, registry?, text?, filter?, context?}` sends `POST <url>/explore`
+  and gets the counts of the values of 1 to 5 terms, for example which types a registry has.
+  A registry without Explore answers 501, and the agent reads that as an error.
+- `bunsin.ard/list {registry?, type?, publisher?, display_name?, created_after?, updated_after?,
+  order_by?, page_token?}` sends `GET <url>/agents` with `pageSize=5`. Bunsin writes the filter
+  expression of ARD Appendix A, such as `type = 'a,b' AND publisherId = 'acme.com'`. A value with
+  `'` or `,` is refused, because it would change the expression.
+- The search follows no referral: a referral names a registry that the registry chose, not
+  you. A registry request does not follow a redirect either.
+
+**Domains.** With a domain, the agent sees `bunsin.ard/resolve {domain}`. `domain` must be one of
+your domains. The agent cannot name another domain or an address, because a read that fetches an
+address you do not control can carry read text out of the server.
+
+- A plain domain is resolved by the ARD rules. Bunsin reads `https://<domain>/.well-known/ard.json`,
+  the `Link` headers and `<link rel="ard">` tags of `https://<domain>/`, and the `Agentmap:` lines
+  of `https://<domain>/robots.txt`. Then it fetches at most 10 of the announced addresses. A JSON
+  answer is a manifest. From a page, Bunsin takes the entries in its JSON-LD blocks.
+  A missing `ard.json` (404 or 410) is no source. A source that lists more than 1,000 entries is
+  not read. If the root page or `robots.txt` answers another error, `resolve` fails with that
+  error, because the announced sources are unknown.
+- A domain with `catalog` fetches only that address. Use it when another host serves the entries
+  of the domain. For example, a Bunsin server with the listener `agents.acme.com` publishes the
+  entries of `acme.com`: write `{"domain": "acme.com", "catalog": "https://agents.acme.com/.well-known/ard.json"}`.
+- **The binding rule.** Bunsin reads an entry only if the publisher in its identifier
+  (`urn:air:<publisher>:...`) is the domain, in any letter case. The host that served the entry
+  does not count, so a catalog on a CDN works. The cost: an entry for another domain is refused,
+  even a correct one. If you write `agents.acme.com` and the entries name `acme.com`, all of them
+  are refused. Write `acme.com`, or give its catalog in the object form. A parent domain does not
+  count either: without a list of public suffixes, `evil.github.io` could claim
+  `urn:air:github.io:...`. The rule replaces the trust check of ARD §4.5.1 with the domain that TLS
+  confirmed.
+- Bunsin also refuses an entry that breaks a MUST rule of ARD, an entry larger than 64 KiB, and an
+  entry whose `@context` it does not support: a remote context other than the ARD base context,
+  `@vocab`, `@base`, `@import`, `@protected`, a new definition of a core term, or a core term
+  written another way, such as `ard:trustManifest`. The entry rules read a core term by its own
+  name, so another spelling would pass by them.
+- The agent sees at most 20 entries. Each one has its core terms, its `publisher`, its trust
+  identity marked "not verified", and its terms of other namespaces under their full IRI. A
+  publisher's prefix therefore cannot pass as a core term. A refused entry shows only its
+  identifier and the reason. A value longer than 500 characters is cut.
+- Not done: `/.well-known/ai-catalog.json`, the older name that ARD makes optional, and DNS records
+  such as `_entries._agents`, because a record names a host but not the address of an entry
+  source. Bunsin does not verify a trust manifest: ARD defines no procedure for it.
+
+**Addresses and limits.**
+
+- The registry addresses, `https://<domain>/` and each catalog pass the same address rules as the
+  LLM and connector addresses, at every save and every build. A registry name is 1 to 32 of a-z,
+  0-9 and `-`. A domain is a domain name in lower case. The list holds at most 20 domains, each
+  once.
+- The publisher chooses the addresses that a domain announces. So every request and every
+  redirect passes the address rules, with at most 3 redirects. Without `--allow-upstream-host`,
+  Bunsin also drops internal addresses when it looks up a name, and these requests use no proxy.
+  Each request has 10 s and 1 MiB. One `resolve` has 30 s.
+
+**For all four tools.**
+
+- They need no permission rule, and each call counts toward the five reads of an event.
+- The results are text written by others. They pass the privacy filter and reach the LLM as
+  quoted data. From `search` and `list`, the agent gets the identifier, name, type, URL,
+  description and capabilities of each result, and from `search` also its score and source;
+  nothing else. The `score` is only text for the LLM: no decision of the server uses it.
+- The agent cannot call what it found. You add a found agent or tool as a connector, approve
+  its tools and give each a rule.
+- In the window, the **ARD registries** card of the Agent view edits the registries. The window
+  does not edit `ard_domains` yet: use `bunsind config-set`.
+
+### Delegate coding
+
+The agent can hand a code change to a coding agent CLI (Claude Code, Codex, or a command you
+name). It never writes code itself and never merges. Set it up in the settings file:
+
+```json
+"coding": {
+  "backend": "claude_code",
+  "timeout_secs": 1800,
+  "repos": {"web-app": {"path": "/srv/code/web-app"}}
+},
+"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
+```
+
+- `backend` is `claude_code` or `codex`; the server operator names the program of each
+  (`--coding-program`), and a profile cannot. On a server with `--allow-coding-commands`, the
+  backend `command` with `"command": ["/abs/program", "arg", ...]` and a repository's
+  `"test_command": ["/usr/bin/make", "test"]` are allowed too. The instructions go to the
+  program on stdin.
+- The agent sees the built-in tool `bunsin.coding/start` only with these settings and the rule.
+  It sees a fixed description and the repository names, never a path, the program or the test
+  command. It chooses the repository, a base (default `HEAD`) and the instructions.
+- **Every job waits for you**, also with the tier `autonomous`, like a delete. The rule must be
+  a `write` with `"outgoing_text": "none"`. The inbox card says "Approve and start the job".
+- After approval the server runs the job in the background. It makes a git worktree and the
+  branch `agent/b<item>-<profile>`, runs the coding agent and then the test command, and keeps
+  the diff summary, the test output and the transcript as artifacts, after the privacy filter.
+- When the job ends, the call becomes done (the coding agent ended with exit code 0) or failed,
+  and a new item in the inbox names the branch, the changes and the test result. **Review the
+  branch and merge it yourself.**
+- If the server stops while a job runs, the call becomes `unknown`, like any cut call.
+- Limits: no test runs a real Claude Code or Codex CLI; the tests use `/bin/sh` as the coding
+  agent. In their default modes both CLIs may ask before they edit a file and, with no one to
+  answer, change nothing: the job then ends with no change. Bunsin adds no flag to bypass that;
+  set the CLI's own configuration on the server if you want it to edit.
+
+![A coding call and the result of a job in the inbox](docs/screens/inbox-coding-light.png)
+
+### Let others ask your agent
+
+Other people's agents can ask your agent questions through its inbound endpoint. Each caller
+gets its own caller token from you:
+
+```sh
+bunsind caller-add kim --label "Team Lee's bot"   # prints the caller token once: bsc_...
+bunsind callers kim                                # 1	valid	Team Lee's bot
+bunsind caller-revoke kim 1                        # the next request with it is refused
+```
+
+- A caller token opens only the inbound endpoint of your profile. It opens nothing of the
+  control API, and an access token opens nothing of the inbound endpoint.
+- The server keeps only the hash of a caller token. A revoked token stays in the list with
+  the time of its revocation.
+- The window lists the caller tokens in the Agent view. There you create one (the window
+  shows it once) and revoke one with two clicks.
+
+  ![The callers card in the agent view](docs/screens/agent-callers-light.png)
+- Turn the endpoint on in the settings file, or in the **Inbound endpoint and ARD listing** card of
+  the Agent view. Turning it on adds the rule of the reply tool:
+
+  ```json
+  "inbound": {"enabled": true, "scope": "internal", "title": "Kim's agent",
+              "description": "Questions about the deploy schedule."}
+  ```
+
+  `description` (1 to 100 characters) is required while the endpoint is on.
+- A question waits on the server; the agent handles it in the background and answers with the
+  built-in tool `bunsin.inbound/reply`. **Every answer waits for your approval**, also with the
+  tier `autonomous`, which the server refuses for this tool. The answer gets the AI marker, and
+  your edit is kept as a correction. Only questions from callers see this tool.
+- **A question never changes anything without you.** If the agent proposes another write or
+  delete while it handles a question, the call waits for your approval, also when its rule is
+  `autonomous`. Reads run by their rules; what the agent read reaches the caller only in an
+  answer that you approved.
+- Limits per profile: 20 questions an hour per caller, 50 open questions, 4,000 characters per
+  question. The counts come from the stored questions, so a restart does not reset them. A
+  question is stored after the privacy filter. With the kill switch on, questions wait.
+- A question that fails three times ends as failed, with a note in your inbox.
+- A page change the agent proposes while it handles a question always waits for you, also with
+  `notes.auto_apply`.
+- **The endpoint** is an MCP server (streamable HTTP, stateless) at
+  `<listener URL>/agents/<profile>/mcp`, with two tools: `ask {question}` returns
+  `{request_id, pending_approval: true}` at once, and `get_request {request_id}` returns
+  `{request_id, status, answer?}` with the status `working`, `pending_approval`, `answered`,
+  `declined`, `failed` or `canceled` (the caller canceled it over A2A). The caller sends
+  `Authorization: Bearer <caller token>`.
+  The caller sees only your decisions: `declined` means that you dismissed the item, `failed`
+  that an answer you approved could not be delivered. If the agent gives no answer, you get an
+  item to dismiss, and the caller sees `pending_approval` until you do. Otherwise a question
+  could make the agent's choice depend on what it read, and the caller would learn it.
+- Every refusal of the token, the profile or the listener is the same `401`. A `Host` other than
+  the listener's URL gets `403`, a body over 64 KiB `413`, and more than 64 requests at once on a
+  listener `503`. A caller may call `get_request` 120 times a minute; this count is in memory.
+- **The server card** of the endpoint is at `<listener URL>/agents/<profile>/mcp/server-card`
+  (`application/mcp-server-card+json`, no token needed). It holds the title, the description and
+  the endpoint URL, never a token or the owner's name. A listener that does not serve the
+  profile answers `404`.
+- **ARD catalog.** Add `ard` to `inbound` to list the endpoint in the catalog
+  `<listener URL>/.well-known/ard.json` (Agentic Resource Discovery, v0.91):
+
+  ```json
+  "ard": {"publisher": "acme.com", "namespace": "team", "agent_name": "kim",
+          "representative_queries": ["When do we deploy?", "Who reviews a release?"],
+          "tags": ["deploys", "releases"]}
+  ```
+
+  The entry's identifier is `urn:air:acme.com:team:kim`, its type
+  `application/mcp-server-card+json`, and its `url` the server card on the same listener. Its
+  display name is `title` (or `agent_name`), and its description is `description`. The
+  internal listener lists the scopes `internal` and `public`, the public listener only
+  `public`: a catalog lists exactly the endpoints that its listener serves. The publisher must
+  be a domain that the server operator allows. The server refuses settings whose entry breaks a
+  rule of ARD that an entry must follow. ARD asks for 2 to 5 representative queries; another
+  count is listed with a warning. If two entries have the same identifier, no catalog lists
+  either of them.
+- **Terms of each entry.** Every entry has the ARD base context
+  (`"@context": "https://agenticresourcediscovery.org/context/v1"`), `capabilities` (the tools a
+  caller uses: `["ask", "get_request"]`), and `version` (the server version). It has `updatedAt`
+  after you save a change of `inbound`: the server stores the time of that save. `tags` are
+  optional: 0 to 10 tags, each 1 to 40 characters on one line.
+- **The A2A entry.** With `"a2a": true` in `inbound`, each catalog that lists the endpoint also
+  lists an A2A entry: the identifier `urn:air:acme.com:team:a2a:kim`, the type
+  `application/a2a-agent-card+json`, the Agent Card on the same listener as `url`, and the
+  display name with ` (A2A)` after it. Its `capabilities` are `["ask"]`.
+- **Trust manifest.** Add `trust_manifest` to `ard` to put an ARD `trustManifest` (§4.5) on
+  both entries. Write it with the member names of ARD:
+
+  ```json
+  "trust_manifest": {"identity": "spiffe://acme.com/ns/agents/kim",
+                     "attestations": [{"type": "SOC2-Type2", "uri": "https://acme.com/soc2.pdf"}]}
+  ```
+
+  `identity` is required. Its domain must be the publisher domain: a `spiffe://`, `https://` or
+  `did:web:` identity of `acme.com` for the publisher `acme.com`. The server refuses another
+  domain, an identity without a domain (such as `did:key:`), a member that ARD names in another
+  shape (for example an attestation without `type` and `uri`), and more than 16 KiB. Other
+  members are kept as they are. Bunsin does not check the signature: ARD leaves that to the
+  trust framework (§4.5.2). The window keeps the trust manifest that it loads, but does not show
+  it; set it in the settings file.
+- **Other ways to find the catalog.** Each listener for callers also serves `/robots.txt` with
+  the line `Agentmap: <listener URL>/.well-known/ard.json`. Every response of that listener,
+  a `404` too, has the header `Link: <<listener URL>/.well-known/ard.json>; rel="ard"`.
+- **DNS.** ARD also names a DNS record for the catalog. The server does not write DNS; it shows
+  the text for your zone, one line for each listener that lists an entry:
+
+  ```
+  _entries._agents.acme.com. 3600 IN SVCB 1 agents.acme.com.
+  ```
+
+  A port other than 443 adds ` port=<port>`. SVCB holds a host and a port, not a path, so a
+  listener URL with a path (or an IP address) gets a line that starts with `;` and says why.
+- **Conformance.** The tests check every catalog entry against the JSON schema of the ARD
+  specification (`crates/ard/tests/schema.rs`). The specification project also has an official
+  conformance tool. It needs only Python 3. It checks a saved manifest without a network, and a
+  running registry by its base URL:
+
+  ```sh
+  git clone https://github.com/ards-project/ard-spec
+  curl -s https://agents.example.com/.well-known/ard.json > ard.json   # your --public-url or --internal-url
+  python3 ard-spec/conformance/bin/conformance-test manifest ard.json
+  python3 ard-spec/conformance/bin/conformance-test registry https://agents.example.com   # with --ard-registry
+  ```
+
+  It also checks the schema if the Python package `jsonschema` is installed. On 2026-11-21 the
+  tool (ard-spec `main` f073b1e, CLI v0.9.1) passed both modes against a local `bunsind` with an
+  MCP and an A2A entry, with no errors and no warnings. That run had no `jsonschema`, so the tool
+  skipped its schema check; Bunsin's own tests run that check. The registry mode checks only the
+  basic shapes of `GET /agents`, `POST /search` and `POST /explore`. The specification names the trust envelope `trustManifest`, and its schema file
+  `TrustManifest`. Bunsin follows the specification, and its tests check each `trustManifest`
+  against the `TrustManifest` definition of the schema.
+- `bunsind inbound kim` shows the addresses of the endpoint and the catalog on each listener
+  (with the A2A addresses if A2A is on), and for each entry the identifier, the listeners whose
+  catalog lists it, and why a catalog leaves it out (for example a publisher domain that the
+  operator no longer allows), with the warnings. The `dns` lines hold the DNS text.
+- Not built yet: OAuth for callers.
+
+#### Over A2A
+
+The endpoint can also speak A2A v1.0 (the JSON-RPC binding). It is off by default. Turn it on
+with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then serve A2A too.
+
+- **Address:** `POST <listener URL>/agents/<profile>/a2a`. The caller sends the same caller
+  token: `Authorization: Bearer <caller token>`.
+- **Agent Card:** `GET <listener URL>/agents/<profile>/a2a/agent-card.json` (`application/json`,
+  no token needed). It holds the title (or the profile ID), the description, the endpoint URL,
+  the security scheme `callerToken` (HTTP Bearer) and one skill `ask`. The skill's examples are
+  the representative queries of the ARD listing. It never holds a token or the owner's name.
+  `/.well-known/agent-card.json` holds the card only when the operator names this profile with
+  `--a2a-root-profile` (one agent per server process). Without it, find the card through the ARD
+  entry's `url` or the address the owner gives you, and pass the card to your client. A card answer
+  has an `ETag`; the same tag in `If-None-Match` gets `304 Not Modified`.
+- **Version:** send the header `A2A-Version: 1.0`, or the query parameter `A2A-Version=1.0`.
+  Only 1.0 is accepted; a patch number such as `1.0.2` does not count. No version means 0.3
+  (A2A §3.6.2), so a call without it gets `-32009`.
+- **SendMessage needs `"configuration": {"returnImmediately": true}`.** A client that does not
+  send it gets `-32004` (UnsupportedOperationError). Without the flag, A2A requires the call to
+  wait until the task ends (§3.2.2), and your approval can take days. So send the flag, then poll
+  `GetTask`:
+
+  ```json
+  {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+    "message": {"role": "ROLE_USER", "messageId": "msg-1", "parts": [{"text": "When do we deploy?"}]},
+    "configuration": {"returnImmediately": true}}}
+  ```
+
+- **The message:** role `ROLE_USER`, a `messageId`, and text parts only (no media type, or
+  `text/*`). The server joins the text parts with line breaks. Another part gets `-32005`, and
+  the server never fetches a `url` part. A `messageId` is required and a `contextId` is
+  optional, each 1 to 128 visible ASCII characters. Without one, the context is the task ID. The agent does not see the earlier
+  questions of the same context. A message with a `taskId` gets `-32004`: text added to a waiting
+  question would change the question that you approve. The same `messageId` from the same caller
+  returns the first task and counts once.
+- **Task states** show only your decisions, like `get_request`:
+
+  | Request status | Task state | The task holds |
+  |---|---|---|
+  | `working`, `pending_approval` | `TASK_STATE_WORKING` | the fixed text "The owner of this agent approves every answer. Poll GetTask." and the time the question arrived |
+  | `answered` | `TASK_STATE_COMPLETED` | the artifact `answer`: the text you approved, with the AI marker and your edit |
+  | `declined` | `TASK_STATE_REJECTED` | a fixed text and the time of your decision |
+  | `failed` | `TASK_STATE_FAILED` | a fixed text |
+  | `canceled` | `TASK_STATE_CANCELED` | the time of the cancel |
+
+  A task has no history and no text of the agent. Until you decide, its time stays the time the
+  question arrived. The server never uses `INPUT_REQUIRED` or `AUTH_REQUIRED`: both ask the
+  client to act, and your approval is work inside the agent.
+- **Methods:** `SendMessage`, `GetTask`, `ListTasks` and `CancelTask`. `ListTasks` shows only the
+  caller's own tasks, also the questions it asked over MCP (the newest 500), newest status
+  first. It takes `pageSize` (1 to 100, default 50), `pageToken`, `status`, `contextId`,
+  `statusTimestampAfter` and `includeArtifacts`. `SendStreamingMessage`, `SubscribeToTask` and
+  `GetExtendedAgentCard` get `-32004`, the four push notification methods `-32003`, and other
+  methods `-32601`.
+- **CancelTask** withdraws the waiting items of the question from your inbox. This does not count
+  as your rejection. Canceling a canceled task returns the same task. A completed, rejected or
+  failed task gets `-32002`. If you approve the answer at the same moment, the cancel wins, and
+  the server sends no answer.
+- **Limits** are the ones of MCP. `SendMessage` counts like `ask` (20 an hour per caller, 50 open
+  questions). `SendMessage`, `GetTask`, `ListTasks` and `CancelTask` share the 120 reads a minute
+  of `get_request`: a repeated `messageId` returns the task, like `GetTask`. A limit gets `-32000`
+  with the reason `RATE_LIMIT_EXCEEDED`. The token, `Host`, body size and concurrency checks are
+  those of MCP (`401`, `403`, `413`, `503`). A JSON-RPC error comes with HTTP 200. A missing task
+  and another caller's task get the same `-32001`.
+- **A refused token** gets HTTP `401` with `WWW-Authenticate: Bearer` and a JSON-RPC error body:
+  `id` null, code `-32000`, reason `UNAUTHENTICATED`. A2A names no code for this (§3.3.2). Every
+  refusal of the token, the profile or the listener is this same answer.
 
 ### Work with the agent
 
@@ -492,11 +1318,78 @@ bunsind status kim                 # the kill switch, the polls and the inbox
 bunsind approve kim 1              # run pending item 1
 bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
 bunsind reject kim 1 --reason "not needed"
+bunsind resolve-unknown kim 1 drop # an item cut by a stop: done, drop or retry
+bunsind corrections kim            # your stored edits of the agent's drafts
+bunsind retire-correction kim 3    # keep correction 3, but stop giving it to the agent
 bunsind stop kim on                # the kill switch: stops all writes of this profile
 ```
 
-An edit with a reason is stored as a correction. The agent sees recent corrections in
-its next prompts.
+An edit of a pending call is stored as a correction: the text of the draft and of your
+edit without the AI marker, your reason, and the message the call answered. All of it
+passes the privacy filter before it is stored. When a new message comes in, the agent gets
+up to five corrections of similar past messages. The server finds them by the words they
+share, and a rare word counts more than a common one. It uses no embeddings. A replay gets
+no corrections: one of them can hold the real reply. A retired correction stays stored
+and reaches no prompt.
+
+If the server stops while it runs an approved call, the next start does not run that call
+again: it may have reached its tool already. `status` shows it as `unknown`. The same
+happens when an approved call gets no answer: the connector's time limit ended it, or the
+connection broke after the request was sent. Bunsin never sends such a call again by
+itself. A failed read is different: the agent gets the error as data. Check the
+target system, then resolve it with `resolve-unknown` or in the window: `done` if the call
+reached its tool, `drop` if it did not, or `retry` to run a copy now as a new item.
+A retry checks the permission rules again. If the first call reached its tool, a retry
+sends it twice. A call that
+was approved but had not started runs at the next start, but only if the permission rules
+and the kill switch still allow it. Otherwise it is marked `failed`, and a pending copy
+waits for your approval.
+
+### Evaluate the agent on past cases
+
+Collect past messages together with the reply you really gave. The agent answers them
+again without seeing your reply, and the server compares the two. A replay runs no tool
+and gets no notes and no corrections: they hold facts from after the message, and a
+correction can hold your real reply.
+
+```sh
+bunsind add-replay-cases kim cases.json   # store cases; personal data is filtered first
+bunsind replay-cases kim                  # list the stored cases
+bunsind start-eval kim                    # replay every case in the background
+bunsind eval-report kim                   # the rates, your pass mark, one line per case
+bunsind delete-replay-case kim 3          # the results of earlier runs stay
+```
+
+`cases.json` is a list. Each case has `event` (`source`, `external_id`, `thread`, `author`,
+`text`), `actual_reply`, and `expect`: `reply` (the default), `escalate` (the agent must
+hand the message to you) or `ignore`.
+
+The server scores each draft without an LLM:
+
+- **kind**: the draft does what the case expects. A reply is a call of a write tool.
+  A draft that stops at a tool that reads counts as wrong, and the report shows its share as `read`.
+- **overlap**: for a `reply` case, how much the draft's text shares with your reply
+  (the Dice coefficient of character 3-grams, without the AI marker). A draft that is no reply shares nothing.
+- **boundary**: of the `escalate` cases, the share that the agent escalated.
+- **over-escalation**: of the `reply` cases, the share that the agent escalated.
+
+The server replays three cases about every five seconds. It also does this while the kill
+switch is on, because a replay sends nothing. One run runs at a time. The pass mark is
+yours to set in the settings file or in the **Evaluation** card of the window's Settings view:
+
+```json
+{ "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
+```
+
+A finished run passes only if every rate meets its mark and no case failed. A rate without
+cases, for example with no `escalate` case, does not meet its mark. Without a pass mark,
+the report shows the rates only.
+
+An LLM judge is off by default. With `"eval": {"judge": true}` the server asks the LLM once
+for each `reply` case that the agent answered with a reply: is the draft the same as your
+reply, part of it, or different? Both texts reach the LLM as quoted data after the privacy
+filter. The report shows the verdict next to the scores. No rate, no pass mark and no
+suggestion of the Permissions view takes it.
 
 ## Desktop window (macOS)
 
@@ -511,12 +1404,76 @@ macOS Keychain.
 
 ![The inbox of the window](docs/screens/inbox-light.png)
 
-The window has four views. **Inbox** shows the approval inbox with every argument of each
+The window has six views and the setup (see [The setup, step by step](#the-setup-step-by-step)). **Inbox** shows the approval inbox with every argument of each
 call, the audit log and the kill switch. **Notes** lists the pages of the notes and lets
 you read, edit, make and delete a page. **Permissions** sets what the agent may do with
-each approved tool (see [Permission rules](#permission-rules)). **Settings** has the connections (LLM endpoint,
-connectors, tokens, a check that lists a connector's tools) and the privacy filter. It reloads from the server every 5 seconds. An edit before
-approval is available on the command line only.
+each approved tool (see [Permission rules](#permission-rules)). **Agent** holds your
+principles and polls (see [Principles](#principles) and [Find events](#find-events-polling)), the caller tokens,
+the inbound endpoint with its ARD listing, the webhooks and the ARD registries (see below).
+**Learning** shows what the agent learns from you and how you check it (see below). **Settings** has the connections (LLM endpoint,
+connectors, tokens, a check that lists a connector's tools, the OAuth sign-in), the privacy filter,
+and the settings of the notes and of the evaluation. It reloads from the server every 5 seconds.
+
+**Settings that each card saves alone.** The cards for the inbound endpoint, the webhooks, the ARD
+registries, the notes and the evaluation each save only their own part of the settings, with a
+conflict check: if the part changed on the server since the card loaded it, nothing is saved, and
+the card offers "Load the server's version" and "Save anyway". A save passes the same checks and
+server rules as a settings file, for example the operator's list of ARD publisher domains and the
+address rules. The settings file and these cards change the same settings.
+
+- **Inbound endpoint and ARD listing** (Agent view): on or off, the public listener, A2A, the
+  description and title of the server card, and the ARD listing (publisher domain, namespace,
+  agent name, the questions it answers well, one per line, and the tags, with commas). Above the
+  form the card shows the addresses of the endpoint on each listener, for each entry the
+  identifier, the catalogs that list it, and each reason why a catalog leaves it out, and the DNS
+  text (the same as `bunsind inbound`). The card keeps the trust manifest of the settings file.
+- **Webhooks** (Agent view): add and remove webhooks, see the address of each and whether its
+  signing secret is stored, and store the secret in a masked field. The window never shows a stored
+  secret, and no label holds a typed one.
+- **ARD registries** (Agent view): add and remove registries.
+- **Notes** (Settings view): auto-apply, the days until a page is stale, how often the server checks
+  the notes, and the check for pages that disagree. The card says what auto-apply never does: it
+  never applies a change from a pre-load, an inbound question or a webhook event, and it never
+  overwrites a page that you wrote.
+- **Evaluation** (Settings view): the pass mark (three fields, or three empty fields for none) and the LLM judge.
+
+![The inbound endpoint card](docs/screens/agent-publishing-light.png)
+
+![The webhooks and the ARD registries](docs/screens/agent-webhooks-light.png)
+
+![The notes and the evaluation settings](docs/screens/settings-checks-light.png)
+
+**Edit before approval.** A waiting call whose rule names places of text has the button
+"Edit the text". It opens one text field for each place: one for `{ "arg": "text" }`, one for each
+item of a list for `blocks.*.text`. The other arguments stay as the card shows them.
+"Approve and run with this text" sends the new text with an optional reason, and the call runs.
+The server adds the AI marker after the edit, so the field shows the text without the marker,
+and the marker is fixed text below it. An unchanged text is a plain approval. A call whose rule
+sends no text has no Edit button.
+
+**A call that ran without asking** has the button "Report a problem". A report holds its
+tool at approval (see [Permission rules](#permission-rules)).
+
+**A call cut by a stop or without an answer.** An `unknown` item has three buttons: "It ran: mark done", "It did not
+run: drop" and "Run again". A note under them says that a second run can send the call twice.
+"Run again" asks first: its label becomes "Yes, run it again", and a second click on the same
+item runs the call.
+
+![The edit of a waiting call](docs/screens/inbox-edit-light.png)
+
+**Learning.** Four cards:
+
+- **Corrections**: your edits of drafts, newest first. "Retire" stops giving one to the agent.
+- **Principle candidates**: "Find in my corrections" and "Find in my replay cases" ask the LLM.
+  Each new candidate shows its quote and has "Adopt", "Edit, then adopt" and "Dismiss".
+  An adoption expects the principles that the window shows. If they changed on the server
+  meanwhile, nothing is added and the window shows the refusal.
+- **Evaluation**: the replay cases (add them with `bunsind add-replay-cases` or in step 6 of the setup), "Run the
+  evaluation", the state of the run, the rates, the pass mark and one line per case.
+- **Autonomy suggestions**: the thresholds of the suggestions in the permissions view, saved
+  alone with a conflict check. Three empty fields, or "Turn suggestions off", turn them off.
+
+![The learning view](docs/screens/learning-light.png)
 
 The window uses the light or the dark colors of the system. More pictures are in
 [`docs/screens`](docs/screens): the inbox in the dark mode, the notes and the settings.

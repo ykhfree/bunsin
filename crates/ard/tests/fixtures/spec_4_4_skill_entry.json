@@ -1,0 +1,11 @@
+{
+  "identifier": "urn:air:github.com:alice-dev:pptx-creator",
+  "displayName": "pptx-creator",
+  "type": "application/agent-skills+md",
+  "url": "https://github.com/alice-dev/pptx-creator",
+  "description": "Create professional PowerPoint presentations following brand guidelines.",
+  "representativeQueries": [
+    "turn these bullet points into a branded slide deck",
+    "make a PowerPoint from this outline"
+  ]
+}
