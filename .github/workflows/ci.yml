@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       # The ubuntu runner image has shellcheck.
-      - run: shellcheck packaging/linux/build-tarball.sh packaging/macos/build-app.sh
+      - run: shellcheck packaging/linux/build-tarball.sh packaging/macos/build-app.sh scripts/*.sh
       - name: Build the tarball
         run: packaging/linux/build-tarball.sh
       - name: Check the systemd unit

@@ -75,6 +75,45 @@ cargo test --workspace
 
 `rust-toolchain.toml` pins the Rust version. rustup installs it on first use.
 
+### Scripts
+
+Two scripts do the usual steps in one go:
+
+```sh
+scripts/check.sh                 # build and test the server: the steps of the `server` job in CI
+scripts/setup.sh                 # start a server on this computer with one profile and its token
+```
+
+`scripts/check.sh` runs `cargo fmt --check`, clippy with `-D warnings`, the tests, the check that
+`bunsin-daemon` does not depend on GPUI, and `cargo build --release -p bunsin-daemon`, and stops
+at the first step that fails. It leaves out the window. `--fix` formats the code instead of only
+checking it, `--with-app` adds the window on macOS, and `--no-build` skips the release build.
+
+`scripts/setup.sh` builds `bunsind`, creates the profile and an access token, and starts
+`bunsind serve` in the background. It keeps everything in `.bunsin/` in the repository, which
+git ignores: the data folder, the log, the PID file and `agent.env` with the address and the
+token. It skips each step that is done already, so you can run it again at any time. It can
+also save the LLM endpoint, connectors and a settings file:
+
+```sh
+scripts/setup.sh --profile kim --owner "Kim"
+BUNSIN_LLM_TOKEN=sk-... scripts/setup.sh --profile kim     # also llm-set and llm-test
+BUNSIN_CONNECTOR_TOKEN_SLACK=... scripts/setup.sh --connector slack=https://mcp.example.com/slack
+scripts/setup.sh --config kim.json                         # config-set
+scripts/setup.sh -- --allow-stdio-connectors               # options after -- go to bunsind serve
+
+eval "$(scripts/setup.sh env)"   # BUNSIN_SERVER and BUNSIN_TOKEN for the command line
+scripts/setup.sh status          # whether the server runs, and the profile's status
+scripts/setup.sh logs            # follow the server log
+scripts/setup.sh stop
+```
+
+It listens on `127.0.0.1:8787` (`--listen`) and keeps the key in the data folder
+(`--key-store file`). It does not approve tools or set permission rules: read the tool list it
+prints, then follow [The setup, step by step](#the-setup-step-by-step). `scripts/setup.sh --help`
+lists every option. For a server that other computers reach, follow
+[Set up the server](#set-up-the-server-operator) instead.
+
 ### Packages
 
 ```sh
