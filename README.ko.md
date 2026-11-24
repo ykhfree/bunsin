@@ -15,6 +15,28 @@ LLM은 제안만 합니다. 무엇을 실행할지는 하네스가 결정합니�
 - 프로필마다 정지 스위치가 있고, 켜면 모든 쓰기가 멈춥니다.
 - 모든 제안, 초안, 결과를 저장합니다. 수정할 수 없는 감사 로그가 각 단계를 기록합니다.
 
+## 빠른 시작
+
+Mac에서는 명령 세 개로 이 컴퓨터에 서버를 띄우고 그 서버에 연결된 창을 엽니다.
+[Rust](https://rustup.rs)가 필요합니다. LLM 키와 MCP 서버는 아직 없어도 됩니다.
+
+```sh
+scripts/setup.sh          # 1. 서버를 빌드해 띄우고, 주소와 토큰을 출력
+scripts/setup.sh app      # 2. 로그인된 상태로 데스크톱 창 열기
+scripts/setup.sh stop     # 3. 다 쓰면 서버 멈추기
+```
+
+- 1단계는 창이 묻는 두 값을 출력합니다: **Server address**와 **Access token**.
+  `scripts/setup.sh app`은 이 두 값을 대신 넣습니다. 직접 붙여 넣으려면
+  `scripts/setup.sh token | pbcopy`로 토큰을 복사하십시오.
+- 그다음 창이 새 agent의 setup을 엽니다. 첫 단계는 LLM endpoint입니다
+  ([단계별 구성](#단계별-구성-setup) 참고).
+- 서버는 `127.0.0.1:8787`에서만 받고, 데이터는 `.bunsin/`에 둡니다.
+  모든 옵션은 `scripts/setup.sh --help`에 있습니다. 다른 컴퓨터가 접속하는 서버는
+  [서버 설정](#서버-설정-운영자)을 따르십시오.
+
+이 아래는 참고 문서입니다.
+
 ## 현재 한계
 
 Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 읽으십시오.
@@ -91,8 +113,10 @@ BUNSIN_CONNECTOR_TOKEN_SLACK=... scripts/setup.sh --connector slack=https://mcp.
 scripts/setup.sh --config kim.json                         # config-set
 scripts/setup.sh -- --allow-stdio-connectors               # -- 뒤의 옵션은 bunsind serve로 전달
 
+scripts/setup.sh app             # 저장된 주소와 토큰으로 데스크톱 창 열기 (macOS)
+scripts/setup.sh token           # access token만 출력
 eval "$(scripts/setup.sh env)"   # 명령줄 도구용 BUNSIN_SERVER, BUNSIN_TOKEN
-scripts/setup.sh status          # 서버가 떠 있는지와 프로필 상태
+scripts/setup.sh status          # 서버가 떠 있는지, 프로필 상태, 주소와 토큰
 scripts/setup.sh logs            # 서버 로그 보기
 scripts/setup.sh stop
 ```

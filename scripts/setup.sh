@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Sets up a Bunsin server and one agent on this computer in one go, and stops it again.
 #
+# Quick start:
+#   scripts/setup.sh          # build, start the server, print the address and the access token
+#   scripts/setup.sh app      # open the desktop window, already signed in (macOS)
+#   scripts/setup.sh stop
+#
 # Usage:
 #   scripts/setup.sh [start] [options] [-- <more options of bunsind serve>]
-#   scripts/setup.sh stop | status | env | logs
+#   scripts/setup.sh app | token | stop | status | env | logs
 #
 # `start` (the default) does these steps. Each one is skipped when it is already done, so the
 # script can run again at any time:
@@ -37,8 +42,11 @@
 #   -h, --help             Show this help.
 #
 # Other commands:
+#   app      Opens the desktop window with the saved address and token, so it does not ask
+#            for them (macOS). It builds the window on first use.
+#   token    Prints only the access token, for example: scripts/setup.sh token | pbcopy
 #   stop     Stops the server (SIGTERM; it waits for running requests).
-#   status   Shows whether the server runs, and the status of the profile.
+#   status   Shows whether the server runs, the status of the profile, the address and the token.
 #   env      Prints the export lines for the command line: eval "$(scripts/setup.sh env)"
 #   logs     Follows the server log.
 #
@@ -54,7 +62,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command=start
 case "${1:-}" in
-    start | stop | status | env | logs) command=$1; shift ;;
+    start | app | token | stop | status | env | logs) command=$1; shift ;;
 esac
 
 default_profile=$(id -un | tr 'A-Z_.' 'a-z--' | tr -cd 'a-z0-9-' | cut -c1-40)
@@ -97,8 +105,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-mkdir -p "$state_dir"
-state_dir=$(cd "$state_dir" && pwd)
+# Only start makes the folder. The other commands read what start left there.
+if [ "$command" = start ]; then
+    mkdir -p "$state_dir"
+fi
+if [ -d "$state_dir" ]; then
+    state_dir=$(cd "$state_dir" && pwd)
+fi
 data_dir="$state_dir/data"
 pid_file="$state_dir/bunsind.pid"
 log_file="$state_dir/bunsind.log"
@@ -131,7 +144,7 @@ running_pid() {
 }
 
 load_env() {
-    [ -f "$env_file" ] || die "no setup in $state_dir yet: run scripts/setup.sh first"
+    [ -f "$env_file" ] || die "no setup in $state_dir yet: run $(me start) first"
     # shellcheck disable=SC1090
     . "$env_file"
 }
@@ -150,6 +163,24 @@ EOF
     )
 }
 
+# The commands of this script as the user types them, with --state-dir if it is not the default.
+state_opt=""
+[ "$state_dir" = "$repo/.bunsin" ] || state_opt=" --state-dir '$state_dir'"
+me() { printf 'scripts/setup.sh %s%s' "$1" "$state_opt"; }
+
+# The two values that the sign-in of the window asks for. Needs load_env first.
+show_connection() {
+    cat <<EOF
+
+The desktop window asks for these two values:
+
+  Server address   $BUNSIN_SERVER
+  Access token     $BUNSIN_TOKEN
+
+The token gives full access to the profile $BUNSIN_PROFILE: keep it to yourself.
+EOF
+}
+
 new_token() {
     say "create an access token for $profile"
     local token
@@ -159,6 +190,21 @@ new_token() {
 }
 
 case "$command" in
+    app)
+        [ "$(uname -s)" = Darwin ] || die "the desktop window needs macOS"
+        load_env
+        running_pid >/dev/null || die "the server is not running: start it with $(me start)"
+        say "open the desktop window for $BUNSIN_PROFILE at $BUNSIN_SERVER"
+        echo "The first start builds the window. This can take some minutes."
+        # The window takes BUNSIN_SERVER and BUNSIN_TOKEN from the environment and skips its sign-in.
+        cd "$repo"
+        exec cargo run --release -p bunsin-app --locked
+        ;;
+    token)
+        load_env
+        printf '%s\n' "$BUNSIN_TOKEN"
+        exit 0
+        ;;
     stop)
         if pid=$(running_pid); then
             say "stop the server (PID $pid)"
@@ -185,6 +231,7 @@ case "$command" in
             load_env
             "$bin" status "$BUNSIN_PROFILE" || true
             "$bin" connections "$BUNSIN_PROFILE" || true
+            show_connection
         else
             echo "server: not running"
         fi
@@ -321,13 +368,11 @@ done
 say "done"
 "$bin" status "$profile" || true
 "$bin" connections "$profile" || true
-cat <<EOF
-
-The server runs in the background at $server (log: $log_file).
-To use the command line in this shell:
-
-  eval "\$(scripts/setup.sh env)"
-  $bin status $profile
-
-Stop it with: scripts/setup.sh stop
-EOF
+show_connection
+printf '\nNext:\n'
+printf '  %-26s %s\n' \
+    "$(me app)" "open the desktop window, already signed in (macOS)" \
+    "$(me token) | pbcopy" "copy the token to paste it into the window" \
+    "$(me stop)" "stop the server"
+printf '\nThe server runs in the background (log: %s).\n' "$log_file"
+printf 'For the command line in this shell: eval "$(%s)"\n' "$(me env)"

@@ -15,6 +15,28 @@ The LLM only proposes. The harness decides what runs:
 - A kill switch per profile stops all writes.
 - Every proposal, draft and result is saved, and an append-only audit log records each step.
 
+## Quick start
+
+On a Mac, three commands start a server on this computer and open the window for it.
+You need [Rust](https://rustup.rs). You need no LLM key and no MCP server yet.
+
+```sh
+scripts/setup.sh          # 1. build and start the server, then print the address and the token
+scripts/setup.sh app      # 2. open the desktop window, already signed in
+scripts/setup.sh stop     # 3. stop the server when you are done
+```
+
+- Step 1 prints the two values that the window asks for: **Server address** and **Access token**.
+  `scripts/setup.sh app` fills them in for you. To paste them by hand, copy the token with
+  `scripts/setup.sh token | pbcopy`.
+- The window then opens the setup of the new agent. It starts with the LLM endpoint (see
+  [The setup, step by step](#the-setup-step-by-step)).
+- The server listens on `127.0.0.1:8787` only, and keeps its data in `.bunsin/`.
+  `scripts/setup.sh --help` lists every option. For a server that other computers reach, see
+  [Set up the server](#set-up-the-server-operator).
+
+The rest of this README is the reference.
+
 ## Current limits
 
 Bunsin is in early development. Read this list before you use it.
@@ -102,8 +124,10 @@ BUNSIN_CONNECTOR_TOKEN_SLACK=... scripts/setup.sh --connector slack=https://mcp.
 scripts/setup.sh --config kim.json                         # config-set
 scripts/setup.sh -- --allow-stdio-connectors               # options after -- go to bunsind serve
 
+scripts/setup.sh app             # open the desktop window with the saved address and token (macOS)
+scripts/setup.sh token           # print only the access token
 eval "$(scripts/setup.sh env)"   # BUNSIN_SERVER and BUNSIN_TOKEN for the command line
-scripts/setup.sh status          # whether the server runs, and the profile's status
+scripts/setup.sh status          # whether the server runs, the profile's status, the address and the token
 scripts/setup.sh logs            # follow the server log
 scripts/setup.sh stop
 ```
