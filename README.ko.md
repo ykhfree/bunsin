@@ -65,6 +65,43 @@ cargo test --workspace
 
 `rust-toolchain.toml`이 Rust 버전을 고정합니다. rustup이 처음 사용할 때 그 버전을 설치합니다.
 
+### 스크립트로 한 번에
+
+자주 하는 단계를 두 스크립트가 한 번에 합니다.
+
+```sh
+scripts/check.sh                 # 서버 빌드와 테스트: CI의 `server` job과 같은 단계
+scripts/setup.sh                 # 이 컴퓨터에서 서버를 띄우고 프로필 하나와 그 토큰을 만듦
+```
+
+`scripts/check.sh`는 `cargo fmt --check`, `-D warnings`로 clippy, 테스트, `bunsin-daemon`이 GPUI에
+의존하지 않는지 확인, `cargo build --release -p bunsin-daemon`을 차례로 하고, 처음 실패한 단계에서
+멈춥니다. 창은 빼고 합니다. `--fix`는 검사 대신 코드를 포맷하고, `--with-app`은 macOS에서 창도
+포함하며, `--no-build`는 release 빌드를 건너뜁니다.
+
+`scripts/setup.sh`는 `bunsind`를 빌드하고, 프로필과 access token을 만들고, `bunsind serve`를
+백그라운드로 띄웁니다. 모든 것을 저장소의 `.bunsin/`에 둡니다(git이 무시합니다): data 폴더, 로그,
+PID 파일, 주소와 토큰이 든 `agent.env`. 이미 된 단계는 건너뛰므로 언제든 다시 실행해도 됩니다.
+LLM endpoint, 커넥터, 설정 파일도 함께 저장할 수 있습니다.
+
+```sh
+scripts/setup.sh --profile kim --owner "Kim"
+BUNSIN_LLM_TOKEN=sk-... scripts/setup.sh --profile kim     # llm-set과 llm-test까지
+BUNSIN_CONNECTOR_TOKEN_SLACK=... scripts/setup.sh --connector slack=https://mcp.example.com/slack
+scripts/setup.sh --config kim.json                         # config-set
+scripts/setup.sh -- --allow-stdio-connectors               # -- 뒤의 옵션은 bunsind serve로 전달
+
+eval "$(scripts/setup.sh env)"   # 명령줄 도구용 BUNSIN_SERVER, BUNSIN_TOKEN
+scripts/setup.sh status          # 서버가 떠 있는지와 프로필 상태
+scripts/setup.sh logs            # 서버 로그 보기
+scripts/setup.sh stop
+```
+
+주소는 `127.0.0.1:8787`(`--listen`)이고, 키는 data 폴더에 둡니다(`--key-store file`). 도구 승인과
+권한 규칙은 하지 않습니다. 스크립트가 보여 주는 도구 목록을 읽은 뒤 [단계별 구성](#단계별-구성-setup)을
+따르십시오. 모든 옵션은 `scripts/setup.sh --help`에 있습니다. 다른 컴퓨터가 접속하는 서버는
+[서버 설정](#서버-설정-운영자)을 따르십시오.
+
 ### 배포 패키지
 
 ```sh
