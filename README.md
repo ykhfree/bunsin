@@ -112,9 +112,10 @@ at the first step that fails. It leaves out the window. `--fix` formats the code
 checking it, `--with-app` adds the window on macOS, and `--no-build` skips the release build.
 
 `scripts/setup.sh` builds `bunsind`, creates the profile and an access token, and starts
-`bunsind serve` in the background. It keeps everything in `.bunsin/` in the repository, which
-git ignores: the data folder, the log, the PID file and `agent.env` with the address and the
-token. It skips each step that is done already, so you can run it again at any time. It can
+`bunsind serve --allow-stdio-connectors` in the background, so the profile can save command
+connectors. With this flag, every profile owner can run any program as your user. It keeps
+everything in `.bunsin/` in the repository, which git ignores: the data folder, the log, the
+PID file and `agent.env` with the address and the token. It skips each step that is done already, so you can run it again at any time. It can
 also save the LLM endpoint, connectors and a settings file:
 
 ```sh
@@ -122,7 +123,7 @@ scripts/setup.sh --profile kim --owner "Kim"
 BUNSIN_LLM_TOKEN=sk-... scripts/setup.sh --profile kim     # also llm-set and llm-test
 BUNSIN_CONNECTOR_TOKEN_SLACK=... scripts/setup.sh --connector slack=https://mcp.example.com/slack
 scripts/setup.sh --config kim.json                         # config-set
-scripts/setup.sh -- --allow-stdio-connectors               # options after -- go to bunsind serve
+scripts/setup.sh -- --allow-upstream-host api.example.com  # options after -- go to bunsind serve
 
 scripts/setup.sh app             # open the desktop window with the saved address and token (macOS)
 scripts/setup.sh token           # print only the access token

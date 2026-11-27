@@ -15,7 +15,7 @@
 #   1. builds bunsind (cargo build --release -p bunsin-daemon)
 #   2. creates the profile in the data folder           (bunsind profile-add)
 #   3. creates an access token and saves it              (bunsind token-add)
-#   4. starts `bunsind serve` in the background and waits for it
+#   4. starts `bunsind serve --allow-stdio-connectors` in the background and waits for it
 #   5. optional: saves the settings file                 (bunsind config-set)
 #   6. optional: saves the LLM endpoint and tests it     (bunsind llm-set, llm-test)
 #   7. optional: saves the connectors and lists tools    (bunsind connector-set, tools)
@@ -40,6 +40,9 @@
 #                          BUNSIN_CONNECTOR_TOKEN_<NAME> (upper case, `-` as `_`), if set.
 #   --no-build             Use the bunsind that is built already.
 #   -h, --help             Show this help.
+#
+# start always passes --allow-stdio-connectors to bunsind serve, so the profile can save
+# command (stdio) connectors. With it, every profile owner can run any program as your user.
 #
 # Other commands:
 #   app      Opens the desktop window with the saved address and token, so it does not ask
@@ -104,6 +107,11 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Allow command (stdio) connectors, unless the options after -- give the flag already.
+if [[ " ${serve_extra[*]+"${serve_extra[*]}"} " != *" --allow-stdio-connectors "* ]]; then
+    serve_extra=(--allow-stdio-connectors "${serve_extra[@]+"${serve_extra[@]}"}")
+fi
 
 # Only start makes the folder. The other commands read what start left there.
 if [ "$command" = start ]; then
@@ -296,6 +304,7 @@ if pid=$(running_pid); then
     fi
 else
     say "start bunsind serve on $listen"
+    echo "warning: --allow-stdio-connectors is on: every profile owner can run any program as $(id -un)" >&2
     nohup "$bin" serve --listen "$listen" --key-store "$key_store" \
         "${serve_extra[@]+"${serve_extra[@]}"}" >>"$log_file" 2>&1 &
     echo $! >"$pid_file"

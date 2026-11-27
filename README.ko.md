@@ -101,9 +101,11 @@ scripts/setup.sh                 # 이 컴퓨터에서 서버를 띄우고 프�
 멈춥니다. 창은 빼고 합니다. `--fix`는 검사 대신 코드를 포맷하고, `--with-app`은 macOS에서 창도
 포함하며, `--no-build`는 release 빌드를 건너뜁니다.
 
-`scripts/setup.sh`는 `bunsind`를 빌드하고, 프로필과 access token을 만들고, `bunsind serve`를
-백그라운드로 띄웁니다. 모든 것을 저장소의 `.bunsin/`에 둡니다(git이 무시합니다): data 폴더, 로그,
-PID 파일, 주소와 토큰이 든 `agent.env`. 이미 된 단계는 건너뛰므로 언제든 다시 실행해도 됩니다.
+`scripts/setup.sh`는 `bunsind`를 빌드하고, 프로필과 access token을 만들고,
+`bunsind serve --allow-stdio-connectors`를 백그라운드로 띄웁니다. 이 옵션이 있어야 프로필에 명령
+커넥터를 저장할 수 있습니다. 대신 모든 프로필 소유자가 내 사용자 권한으로 아무 프로그램이나 실행할 수
+있습니다. 모든 것을 저장소의 `.bunsin/`에 둡니다(git이 무시합니다): data 폴더, 로그, PID 파일,
+주소와 토큰이 든 `agent.env`. 이미 된 단계는 건너뛰므로 언제든 다시 실행해도 됩니다.
 LLM endpoint, 커넥터, 설정 파일도 함께 저장할 수 있습니다.
 
 ```sh
@@ -111,7 +113,7 @@ scripts/setup.sh --profile kim --owner "Kim"
 BUNSIN_LLM_TOKEN=sk-... scripts/setup.sh --profile kim     # llm-set과 llm-test까지
 BUNSIN_CONNECTOR_TOKEN_SLACK=... scripts/setup.sh --connector slack=https://mcp.example.com/slack
 scripts/setup.sh --config kim.json                         # config-set
-scripts/setup.sh -- --allow-stdio-connectors               # -- 뒤의 옵션은 bunsind serve로 전달
+scripts/setup.sh -- --allow-upstream-host api.example.com  # -- 뒤의 옵션은 bunsind serve로 전달
 
 scripts/setup.sh app             # 저장된 주소와 토큰으로 데스크톱 창 열기 (macOS)
 scripts/setup.sh token           # access token만 출력
