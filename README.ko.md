@@ -1334,7 +1334,7 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
 - **endpoint**는 MCP 서버(streamable HTTP, 무상태)이고 주소는 `<리스너 URL>/agents/<프로필>/mcp`입니다. 도구는 둘입니다.
   `ask {question}`은 즉시 `{request_id, pending_approval: true}`를 돌려줍니다.
   `get_request {request_id}`는 `{request_id, status, answer?}`를 돌려줍니다. status는 `working`, `pending_approval`, `answered`, `declined`, `failed`, `canceled`(호출자가 A2A로 취소함) 중 하나입니다.
-  호출자는 소유자의 결정만 봅니다. `declined`는 소유자가 항목을 기각했다는 뜻이고, `failed`는 승인한 답을 전하지 못했다는 뜻입니다.
+  호출자는 소유자의 결정만 봅니다. `declined`는 소유자가 항목을 기각했다는 뜻이고, `failed`는 승인한 답이나 작업이 실패했다는 뜻입니다.
   agent가 답하지 않으면 소유자에게 기각할 항목이 생기고, 호출자는 소유자가 결정할 때까지 `pending_approval`을 봅니다.
   그렇지 않으면 질문이 agent의 선택을 읽은 내용에 따르게 만들어, 호출자가 그 내용을 알아낼 수 있기 때문입니다.
   호출자는 `Authorization: Bearer <호출자 token>`을 보냅니다.
@@ -1432,8 +1432,13 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
     `examples`는 0~10개이고, 각각 한 줄에 1~500자입니다.
   - skill은 endpoint를 설명할 뿐입니다. A2A 메시지에는 skill 필드가 없고 Bunsin은 메시지의 text part만 읽으므로, 모든 메시지가 같은 경로를 탑니다.
     agent는 메시지를 이벤트로 처리하고, agent가 제안한 모든 답, 쓰기, 삭제는 소유자의 승인을 기다립니다.
-  - **한계:** 요청에 답하는 것은 답 도구뿐입니다. agent가 요청에 대해 답 대신 쓰기(예: Jira 댓글)를 제안하고 소유자가 승인하면 쓰기는 실행되지만,
-    호출자는 결과를 받지 못하고, task는 호출자가 취소할 때까지 `TASK_STATE_WORKING`에 남습니다. 그래서 답 대신 일을 하는 skill은 task가 끝나지 않습니다.
+  - **일을 하는 skill.** 요청에 답하는 것은 답 도구뿐입니다. agent는 답 대신 쓰기(예: Jira 댓글)로 요청을 처리할 수 있습니다.
+    소유자가 그 쓰기를 승인해 실행되면, 서버가 답을 만듭니다. 글이 "Done."인 답이고, 승인함에서 기다립니다.
+    쓰기의 결과는 agent가 읽은 자료이므로 서버가 답에 넣지 않습니다. 소유자가 글을 고쳐 결과를 알린 뒤 승인하십시오.
+    그러면 task는 그 글로 `COMPLETED`가 됩니다. 답을 기각하면 `REJECTED`, 쓰기가 실패하면 `FAILED`로 끝납니다.
+  - 이런 답을 고친 것은 교정 기록으로 남지 않습니다. agent가 쓴 초안이 아니기 때문입니다.
+  - 답 도구의 규칙이 답을 기다리게 하지 않으면(예: `observe`), 대신 알림을 받습니다. 기각하면 요청이 거절됩니다.
+  - 결과를 모르는(`unknown`) 호출은 소유자가 "실행됨"으로 정리할 때 답이 만들어집니다. 취소된 요청에는 답을 만들지 않습니다.
 - **SendMessage에는 `"configuration": {"returnImmediately": true}`가 필요합니다.** 이 값을 보내지 않는 client는 `-32004`(UnsupportedOperationError)를 받습니다.
   이 값이 없으면 A2A는 task가 끝날 때까지 호출이 기다려야 한다고 정하고(§3.2.2), 소유자의 승인은 며칠 걸릴 수 있습니다.
   그러니 이 값을 보내고, `GetTask`로 상태를 다시 읽습니다.

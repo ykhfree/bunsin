@@ -1526,7 +1526,7 @@ bunsind caller-revoke kim 1                        # the next request with it is
   `declined`, `failed` or `canceled` (the caller canceled it over A2A). The caller sends
   `Authorization: Bearer <caller token>`.
   The caller sees only your decisions: `declined` means that you dismissed the item, `failed`
-  that an answer you approved could not be delivered. If the agent gives no answer, you get an
+  that an answer or an action you approved failed. If the agent gives no answer, you get an
   item to dismiss, and the caller sees `pending_approval` until you do. Otherwise a question
   could make the agent's choice depend on what it read, and the caller would learn it.
 - Every refusal of the token, the profile or the listener is the same `401`. A `Host` other than
@@ -1651,10 +1651,17 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
   - A skill only describes the endpoint. An A2A message has no skill field, and Bunsin reads only
     its text parts, so every message takes the same path: the agent handles it as an event, and
     every answer and every write or delete it proposes waits for your approval.
-  - **Limit:** only the reply tool answers a request. If the agent proposes a write for a request
-    (for example a Jira comment) instead of a reply and you approve it, the write runs, but the
-    caller gets no result: the task stays `TASK_STATE_WORKING` until the caller cancels it. So a
-    skill that does work instead of answering leaves its tasks open.
+  - **A skill that does work.** Only the reply tool answers a request. The agent may handle a
+    request with a write instead (for example a Jira comment). When you approve it and it runs,
+    the server drafts the answer: a reply with the text "Done.", which waits in the inbox. The
+    result of the write is data that the agent read, so the server does not put it in: edit the
+    text to tell the caller the result, then approve it. The task ends `COMPLETED` with your text,
+    or `REJECTED` if you dismiss the answer. If the write fails, the task ends `FAILED`.
+  - Your edit of such an answer is not stored as a correction: it is no draft of the agent.
+  - If the rule of the reply tool lets no answer wait for you (for example `observe`), you get a
+    note instead. Dismiss it to decline the request.
+  - A call that ends `unknown` gets its answer when you mark it done. A canceled request gets
+    none.
 - **SendMessage needs `"configuration": {"returnImmediately": true}`.** A client that does not
   send it gets `-32004` (UnsupportedOperationError). Without the flag, A2A requires the call to
   wait until the task ends (§3.2.2), and your approval can take days. So send the flag, then poll

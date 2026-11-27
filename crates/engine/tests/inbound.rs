@@ -7,7 +7,7 @@ use bunsin_api::{ApiError, Edit, EngineApi, Expected, PermissionsUpdate, Profile
 use bunsin_core::approval::ApprovalState;
 use bunsin_core::event::InboundEvent;
 use bunsin_core::inbound::{
-    INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS, REPLY_TOOL, RequestState, RequestStatus,
+    FOLLOW_UP_RATIONALE, INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS, REPLY_TOOL, RequestState, RequestStatus,
 };
 use bunsin_core::llm::{CompletionRequest, CompletionResponse, LlmError, StopReason, Usage};
 use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
@@ -652,4 +652,171 @@ async fn a_cancel_during_the_drain_withdraws_new_items() {
         // The question is not handed to the agent again.
         assert!(engine.drain_intake().await.is_empty());
     }
+}
+
+/// A caller's request that the agent handles with a write of `text` to Slack. Returns its ID and the write's item.
+async fn write_request(rig: &Rig, bot: &Caller, text: &str) -> (String, i64) {
+    let asked = rig.engine.ask(bot, &format!("Post '{text}' in C1.")).unwrap();
+    rig.llm.reply(&post(text), 10);
+    assert!(rig.engine.drain_intake().await.is_empty());
+    let (write, state, _) = newest(rig).await;
+    assert_eq!(state, ApprovalState::Pending);
+    (asked.request_id, write)
+}
+
+/// The reply items of a request.
+fn replies(rig: &Rig, request: &str) -> Vec<InboxItem> {
+    request_items(rig, request)
+        .into_iter()
+        .filter(|item| matches!(&item.body, InboxBody::ToolCall { tool, .. } if tool == REPLY_TOOL))
+        .collect()
+}
+
+fn reply_text(item: &InboxItem) -> String {
+    match &item.body {
+        InboxBody::ToolCall { args, .. } => args["text"].as_str().unwrap().to_owned(),
+        other => panic!("no call: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_write_for_a_caller_ends_with_an_answer_that_the_owner_writes() {
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    let (request, write) = write_request(&rig, &bot, "all clear").await;
+    assert!(replies(&rig, &request).is_empty());
+
+    rig.engine.approve("kim", write, None).await.unwrap();
+    assert_eq!(rig.slack.calls().len(), 1);
+    // The write ran, but only an answer ends the request. The server drafts one; it waits for the owner.
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::PendingApproval);
+    let drafted = replies(&rig, &request);
+    assert_eq!(drafted.len(), 1);
+    let reply = &drafted[0];
+    assert_eq!(reply.state, ApprovalState::Pending);
+    assert_eq!(reply.rationale, FOLLOW_UP_RATIONALE);
+    let text = reply_text(reply);
+    assert!(text.starts_with("Done."), "{text}");
+    assert!(text.ends_with("— AI agent (Bunsin) acting for Kim"), "{text}");
+    assert!(audit_kinds(&rig.engine).await.contains(&"inbound_follow_up".to_owned()));
+
+    // The owner tells the result. The caller gets it with the marker, and the edit is no correction.
+    let edit = Edit {
+        args: json!({"text": "Posted 'all clear' in C1."})
+            .as_object()
+            .unwrap()
+            .clone(),
+        reason: "the result".into(),
+    };
+    rig.engine.approve("kim", reply.id, Some(edit)).await.unwrap();
+    let state = status(&rig, &bot, &request);
+    assert_eq!(state.status, RequestStatus::Answered);
+    let answer = state.answer.unwrap();
+    assert!(answer.starts_with("Posted 'all clear' in C1."), "{answer}");
+    assert!(answer.ends_with("— AI agent (Bunsin) acting for Kim"), "{answer}");
+    assert!(rig.engine.corrections("kim").await.unwrap().is_empty());
+    assert_eq!(rig.slack.calls().len(), 1, "the answer calls no connector");
+
+    // Dismissing the drafted answer declines the next request.
+    let (request, write) = write_request(&rig, &bot, "second").await;
+    rig.engine.approve("kim", write, None).await.unwrap();
+    let reply = replies(&rig, &request).remove(0);
+    rig.engine.reject("kim", reply.id, "no answer").await.unwrap();
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::Declined);
+}
+
+#[tokio::test]
+async fn only_a_caller_request_that_ran_a_write_gets_a_drafted_answer() {
+    let rig = inbound_rig().await;
+    // The owner's own event: no caller waits, so no answer is drafted.
+    rig.llm.reply(&post("On it."), 10);
+    let own = rig.engine.ingest("kim", event("e1", "lee", "deploy?")).await.unwrap();
+    let bunsin_api::Outcome::PendingApproval { inbox_id } = own else {
+        panic!("not pending: {own:?}")
+    };
+    rig.engine.approve("kim", inbox_id, None).await.unwrap();
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    assert!(
+        !inbox
+            .iter()
+            .any(|item| matches!(&item.body, InboxBody::ToolCall { tool, .. } if tool == REPLY_TOOL))
+    );
+
+    // A write that fails ends the request as failed, with no drafted answer.
+    let bot = caller(&rig, "bot");
+    let (request, write) = write_request(&rig, &bot, "will fail").await;
+    rig.slack.fail_with("boom");
+    rig.engine.approve("kim", write, None).await.unwrap();
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::Failed);
+    assert!(replies(&rig, &request).is_empty());
+
+    // An agent's own answer that ran gets no second answer.
+    let asked = rig.engine.ask(&bot, "When?").unwrap();
+    rig.llm.reply(&answer("Friday."), 10);
+    rig.engine.drain_intake().await;
+    let (reply, _, _) = newest(&rig).await;
+    rig.engine.approve("kim", reply, None).await.unwrap();
+    assert_eq!(replies(&rig, &asked.request_id).len(), 1);
+}
+
+#[tokio::test]
+async fn a_cut_write_gets_its_answer_when_the_owner_marks_it_done_unless_the_caller_canceled() {
+    use bunsin_api::Resolution;
+    use bunsin_core::ports::ConnectorError;
+    let rig = inbound_rig().await;
+    let bot = caller(&rig, "bot");
+    rig.slack
+        .fail_with_error(ConnectorError::Unanswered("no answer".into()));
+    let (request, write) = write_request(&rig, &bot, "maybe").await;
+    rig.engine.approve("kim", write, None).await.unwrap();
+    assert_eq!(rig.kim_store().inbox_item(write).unwrap().state, ApprovalState::Unknown);
+    assert!(replies(&rig, &request).is_empty(), "the outcome is not known yet");
+    rig.engine
+        .resolve_unknown("kim", write, Resolution::Done)
+        .await
+        .unwrap();
+    let drafted = replies(&rig, &request);
+    assert_eq!((drafted.len(), drafted[0].state), (1, ApprovalState::Pending));
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::PendingApproval);
+
+    // The caller canceled while the outcome was unknown: nobody waits for an answer.
+    let (request, write) = write_request(&rig, &bot, "maybe again").await;
+    rig.engine.approve("kim", write, None).await.unwrap();
+    rig.engine.cancel_request(&bot, &request).unwrap();
+    rig.engine
+        .resolve_unknown("kim", write, Resolution::Done)
+        .await
+        .unwrap();
+    assert!(replies(&rig, &request).is_empty());
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::Canceled);
+}
+
+#[tokio::test]
+async fn a_reply_rule_that_lets_no_answer_wait_gives_the_owner_a_note_to_decline() {
+    let rig = inbound_rig().await;
+    let mut settings = rig.engine.profile_config("kim").await.unwrap();
+    settings
+        .policy
+        .rules
+        .insert(REPLY_TOOL.into(), reply_rule(Tier::Observe));
+    rig.engine.set_profile_config("kim", settings).await.unwrap();
+    let bot = caller(&rig, "bot");
+    let (request, write) = write_request(&rig, &bot, "all clear").await;
+    rig.engine.approve("kim", write, None).await.unwrap();
+    assert!(replies(&rig, &request).is_empty());
+    let (note, state, body) = newest(&rig).await;
+    assert_eq!(state, ApprovalState::Draft);
+    let InboxBody::Escalation { summary } = body else {
+        panic!("no note: {body:?}")
+    };
+    assert!(summary.contains("lets no answer wait"), "{summary}");
+    assert!(
+        audit_kinds(&rig.engine)
+            .await
+            .contains(&"inbound_follow_up_refused".to_owned())
+    );
+    // The caller waits until the owner decides.
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::PendingApproval);
+    rig.engine.reject("kim", note, "no").await.unwrap();
+    assert_eq!(status(&rig, &bot, &request).status, RequestStatus::Declined);
 }

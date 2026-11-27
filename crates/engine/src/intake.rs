@@ -4,6 +4,9 @@
 //! The answer is a call of the built-in tool `bunsin.inbound/reply`. It waits for the owner like any
 //! write, gets the AI marker and keeps the owner's edit. Running it calls no connector: it marks the
 //! request as answered, and `get_request` then returns the text.
+//!
+//! The agent may handle a request with another write instead, such as a ticket. When the owner approved it
+//! and it ran, the server drafts the answer that ends the request (`follow_up_caller`). It waits for the owner too.
 
 use crate::{Ctx, Engine, MAX_EVENT_ATTEMPTS, internal, store_error};
 use bunsin_api::{ApiError, ApiResult, Outcome, ProfileConfig};
@@ -11,15 +14,17 @@ use bunsin_core::approval::ApprovalState;
 use bunsin_core::context::ToolHint;
 use bunsin_core::event::{Channel, InboundEvent};
 use bunsin_core::inbound::{
-    Asked, CallerRequest, INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS, MAX_QUESTION_CHARS, REPLY_TEXT,
-    REPLY_TOOL, RequestState, RequestStatus, is_inbound_tool, reply_description, reply_schema, request_status,
+    Asked, CallerRequest, FOLLOW_UP_RATIONALE, FOLLOW_UP_TEXT, INBOUND_SOURCE, MAX_ASKS_PER_HOUR, MAX_OPEN_REQUESTS,
+    MAX_QUESTION_CHARS, REPLY_TEXT, REPLY_TOOL, RequestState, RequestStatus, is_inbound_tool, reply_description,
+    reply_schema, request_status,
 };
-use bunsin_core::policy::{OutgoingText, Tier, ToolClass, ToolRule};
+use bunsin_core::marker::mark_args;
+use bunsin_core::policy::{Decision, OutgoingText, Tier, ToolClass, ToolRule};
 use bunsin_core::privacy::RedactionCounts;
 use bunsin_core::proposal::Proposal;
 use bunsin_core::records::{Caller, InboxBody, InboxItem};
 use bunsin_store::{IntakeMessage, IntakeRow, ProfileStore};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 /// How many stored events of one profile one drain hands to the agent.
 const DRAIN_BATCH: u32 = 10;
@@ -331,22 +336,83 @@ impl Engine {
                             "The agent gave no answer to a caller's question ({word}). Dismiss this item to \
                              decline the question."
                         );
-                        store
-                            .add_inbox_item(
-                                &row.event_key,
-                                &InboxBody::Escalation { summary },
-                                "a caller waits for your decision",
-                                &[],
-                                ApprovalState::Draft,
-                                self.now(),
-                            )
-                            .map_err(store_error)?;
+                        self.caller_waits(&store, &row.event_key, summary)?;
                     }
                     store.finish_intake(row.id, &word).map_err(store_error)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Gives the owner a note to dismiss, so that a caller who waits gets a decision.
+    fn caller_waits(&self, store: &ProfileStore, event_key: &str, summary: String) -> ApiResult<()> {
+        store
+            .add_inbox_item(
+                event_key,
+                &InboxBody::Escalation { summary },
+                "a caller waits for your decision",
+                &[],
+                ApprovalState::Draft,
+                self.now(),
+            )
+            .map_err(store_error)?;
+        Ok(())
+    }
+
+    /// After `item` ran, drafts the answer that ends its caller's request: a call of the reply tool
+    /// with `FOLLOW_UP_TEXT` that waits for the owner, who edits it to tell the result. If the reply
+    /// rule does not let an answer wait for the owner, the owner gets a note to decline instead.
+    /// Nothing is made for the reply itself, for another event, for a canceled request, or for a
+    /// request that has an answer item already.
+    pub(crate) fn follow_up_caller(
+        &self,
+        store: &ProfileStore,
+        config: &ProfileConfig,
+        item: &InboxItem,
+    ) -> ApiResult<()> {
+        let is_reply = |item: &InboxItem| matches!(&item.body, InboxBody::ToolCall { tool, .. } if tool == REPLY_TOOL);
+        if is_reply(item) || !matches!(item.body, InboxBody::ToolCall { .. }) {
+            return Ok(());
+        }
+        let key = item.event_key.as_str();
+        let row = store.intake_for_event(INBOUND_SOURCE, key).map_err(store_error)?;
+        if row.is_none_or(|row| row.canceled_at.is_some()) {
+            return Ok(());
+        }
+        if store.inbox_for_event(key).map_err(store_error)?.iter().any(is_reply) {
+            return Ok(());
+        }
+        let kill_switch = store.kill_switch().map_err(store_error)?;
+        let held = store.is_held(REPLY_TOOL).map_err(store_error)?;
+        // The reply tool is built in, so its specification cannot change.
+        let decision = config.policy.decide(REPLY_TOOL, true, kill_switch, held);
+        let rule = config.policy.rules.get(REPLY_TOOL);
+        let (Decision::NeedsApproval | Decision::Execute, Some(rule)) = (&decision, rule) else {
+            let detail = json!({"after": item.id, "decision": decision});
+            self.audit(store, "inbound_follow_up_refused", Some(key), detail)?;
+            let summary = "A call for a caller's question ran, but the rule of the reply tool lets no answer wait \
+                           for you. Dismiss this item to decline the question."
+                .to_owned();
+            return self.caller_waits(store, key, summary);
+        };
+        let mut args = Map::new();
+        args.insert(REPLY_TEXT.to_owned(), Value::from(FOLLOW_UP_TEXT));
+        mark_args(&mut args, &rule.outgoing_text, &config.ai_marker).map_err(internal)?;
+        let body = InboxBody::ToolCall {
+            tool: REPLY_TOOL.to_owned(),
+            args,
+        };
+        // It waits for the owner even if the rule said more: an answer always does (ARCHITECTURE 7).
+        let reply = store
+            .add_inbox_item(key, &body, FOLLOW_UP_RATIONALE, &[], ApprovalState::Pending, self.now())
+            .map_err(store_error)?;
+        self.audit(
+            store,
+            "inbound_follow_up",
+            Some(key),
+            json!({"inbox_id": reply.id, "after": item.id}),
+        )
     }
 
     /// Withdraws the items of a question's event if its caller canceled it. Returns true if so.

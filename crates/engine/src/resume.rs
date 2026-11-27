@@ -172,6 +172,9 @@ impl Engine {
         }
         let detail = json!({"inbox_id": inbox_id, "resolution": resolution});
         self.audit(&store, "unknown_resolved", key, detail)?;
+        if to == ApprovalState::Executed {
+            self.follow_up_caller(&store, &Self::config(&store)?, &item)?;
+        }
         Ok(None)
     }
 }

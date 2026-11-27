@@ -41,7 +41,7 @@ const BLOCKING_REFUSED: &str = "send configuration.returnImmediately: true and p
 /// The fixed text of a task that waits for the owner.
 const WORKING_TEXT: &str = "The owner of this agent approves every answer. Poll GetTask.";
 const REJECTED_TEXT: &str = "The owner of this agent declined the question.";
-const FAILED_TEXT: &str = "The approved answer could not be delivered.";
+const FAILED_TEXT: &str = "The approved answer or action failed.";
 /// The output modes that a text answer fits.
 const TEXT_MODES: [&str; 3] = ["text/plain", "text/*", "*/*"];
 /// The longest messageId and contextId. Both are stored, and a messageId is a key of an index.

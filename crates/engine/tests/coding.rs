@@ -264,3 +264,49 @@ async fn coding_rules_and_settings_are_checked() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_job_for_a_caller_ends_with_an_answer_even_if_the_owner_dismisses_the_job_note_first() {
+    use bunsin_core::inbound::{FOLLOW_UP_RATIONALE, REPLY_TOOL, RequestStatus};
+    let rig = rig_with(with_coding(Tier::Approve)).await;
+    // The owner turns the endpoint on with a save, which adds the reply rule.
+    let mut settings = with_coding(Tier::Approve);
+    settings.inbound.enabled = true;
+    settings.inbound.description = "Bug reports.".into();
+    rig.engine.set_profile_config("kim", settings).await.unwrap();
+    let (_, token) = rig.engine.app_store().add_caller_token("kim", "bot", 1).unwrap();
+    let bot = rig.engine.app_store().caller(&token).unwrap().unwrap();
+    let request = rig.engine.ask(&bot, "The login is broken.").unwrap().request_id;
+    rig.llm.reply(&start("app"), 10);
+    assert!(rig.engine.drain_intake().await.is_empty());
+    let job = rig.engine.snapshot("kim").await.unwrap().inbox[0].id;
+    rig.engine.approve("kim", job, None).await.unwrap();
+    rig.coder.finish(CodingReport {
+        profile: "kim".into(),
+        inbox_id: job,
+        outcome: Ok(outcome(Some(0))),
+    });
+    assert!(rig.engine.background_tick().await.is_empty());
+
+    let inbox = rig.engine.snapshot("kim").await.unwrap().inbox;
+    let note = inbox
+        .iter()
+        .find(|item| matches!(item.body, InboxBody::Escalation { .. }))
+        .expect("the note that the job ended");
+    let reply = inbox
+        .iter()
+        .find(|item| item.rationale == FOLLOW_UP_RATIONALE)
+        .expect("the drafted answer");
+    assert!(matches!(&reply.body, InboxBody::ToolCall { tool, .. } if tool == REPLY_TOOL));
+    // The owner dismisses the note after reviewing the branch. The answer still waits.
+    rig.engine.reject("kim", note.id, "merged").await.unwrap();
+    assert_eq!(
+        rig.engine.request(&bot, &request).unwrap().status,
+        RequestStatus::PendingApproval
+    );
+    rig.engine.approve("kim", reply.id, None).await.unwrap();
+    assert_eq!(
+        rig.engine.request(&bot, &request).unwrap().status,
+        RequestStatus::Answered
+    );
+}

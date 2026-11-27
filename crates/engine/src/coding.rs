@@ -79,7 +79,8 @@ impl Engine {
     /// the owner. A report for an item that is no longer `executing` is ignored.
     fn finish_coding_job(&self, report: CodingReport) -> ApiResult<()> {
         let store = self.store(&report.profile)?;
-        let redactor = Self::redactor(&Self::config(&store)?)?;
+        let config = Self::config(&store)?;
+        let redactor = Self::redactor(&config)?;
         let item = store.inbox_item(report.inbox_id).map_err(store_error)?;
         let key = Some(item.event_key.as_str());
         let repo = match &item.body {
@@ -129,7 +130,11 @@ impl Engine {
             .add_inbox_item(&item.event_key, &body, rationale, &[], ApprovalState::Draft, self.now())
             .map_err(store_error)?;
         let detail = json!({"inbox_id": item.id, "state": to.as_str(), "draft": draft.id});
-        self.audit(&store, "coding_finished", key, detail)
+        self.audit(&store, "coding_finished", key, detail)?;
+        if to == ApprovalState::Executed {
+            self.follow_up_caller(&store, &config, &item)?;
+        }
+        Ok(())
     }
 }
 

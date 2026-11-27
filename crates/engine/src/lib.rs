@@ -806,6 +806,7 @@ impl Engine {
                     .move_inbox_state(item.id, ApprovalState::Executing, ApprovalState::Executed, self.now())
                     .map_err(store_error)?;
                 self.audit(store, "executed", key, json!({"inbox_id": item.id, "tool": tool_id}))?;
+                self.follow_up_caller(store, &ctx.config, item)?;
                 Ok(Outcome::Executed { inbox_id: item.id })
             }
             // The call may have reached its tool, so it is not run again. Only the owner resolves it.
@@ -1075,7 +1076,13 @@ impl Engine {
                 mark_args(&mut edited, &rule.outgoing_text, &config.ai_marker)
                     .map_err(|e| ApiError::Invalid(e.to_string()))?;
             }
-            let correction = Self::correction(&ctx, &item, &tool_id, &args, &edited, &reason)?;
+            // The answer that the server drafted after a caller's call ran is no draft of the agent.
+            // The owner's text there tells a result, so it would teach the agent to claim one.
+            let server_made = tool_id == bunsin_core::inbound::REPLY_TOOL
+                && item.rationale == bunsin_core::inbound::FOLLOW_UP_RATIONALE;
+            let correction = (!server_made)
+                .then(|| Self::correction(&ctx, &item, &tool_id, &args, &edited, &reason))
+                .transpose()?;
             let body = InboxBody::ToolCall {
                 tool: tool_id.clone(),
                 args: edited,
@@ -1086,23 +1093,26 @@ impl Engine {
             {
                 return Err(ApiError::NotAllowed("the item was already handled".into()));
             }
-            store
-                .add_correction(inbox_id, &correction, self.now())
-                .map_err(store_error)?;
-            store
-                .put_artifact(
-                    "edited_draft",
-                    correction.edited.as_bytes(),
-                    self.now(),
-                    Some(&key),
-                    Some(inbox_id),
-                )
-                .map_err(store_error)?;
+            if let Some(correction) = &correction {
+                store
+                    .add_correction(inbox_id, correction, self.now())
+                    .map_err(store_error)?;
+                store
+                    .put_artifact(
+                        "edited_draft",
+                        correction.edited.as_bytes(),
+                        self.now(),
+                        Some(&key),
+                        Some(inbox_id),
+                    )
+                    .map_err(store_error)?;
+            }
+            let reason = correction.as_ref().map(|correction| correction.reason.clone());
             self.audit(
                 &store,
                 "edited",
                 Some(&key),
-                json!({"inbox_id": inbox_id, "reason": correction.reason}),
+                json!({"inbox_id": inbox_id, "reason": reason, "correction": correction.is_some()}),
             )?;
             item.body = body;
         }

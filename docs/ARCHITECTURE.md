@@ -472,12 +472,17 @@
     `MAX_EVENT_ATTEMPTS`+1번째 호출은 포기 항목을 넣고 `Failed`를 돌려주므로, 그 뒤 `outcome`을 `failed`로 쓴다. 그 밖의 결과는 `Outcome`의 이름이 `outcome`이 된다.
   - SIGTERM이면 intake task도 폴링 task처럼 진행 중인 주기를 끝내고 멈춘다(`Poller::stop`).
 - **요청 상태**(`request_status(outcome, canceled_at, items)`, 처음 맞는 규칙): `canceled_at`이 있으면 `canceled`. `outcome`이 없으면 `working`. 항목이 failed이고 그 항목의 재시도 사본(`retry_of`)이 없으면 `failed`(사본이 있으면 사본이 정한다).
-  답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). 항목이 rejected이면 `declined`. 그 밖은 `pending_approval`.
+  답 항목이 executed이면 `answered`(답은 그 항목의 `text`, AI 표시와 소유자의 수정 포함). 답 항목이 아직 열려 있으면(pending, approved, executing, unknown) `pending_approval`.
+  항목이 rejected이면 `declined`. 그 밖은 `pending_approval`. 열린 답이 rejected보다 먼저인 까닭: 코딩 작업이 끝났다는 알림을 소유자가 먼저 기각해도 호출자가 `declined`에서 멈추지 않게 한다.
   - 같은 함수가 결정 시각(`decided_at`)도 정한다: 취소 시각, 또는 상태를 정한 항목의 `updated_at`. 결정이 없으면 없다.
     A2A가 이 시각을 보이고, 없으면 질문이 도착한 시각(`received_at`)을 보인다. 그래서 agent가 일을 끝낸 시각은 어디에도 없다.
   - 호출자는 소유자의 결정만 본다. agent의 선택(무시, 거부된 호출, 기록만, 포기)은 `pending_approval`로 보인다.
     질문이 그 선택을 agent가 읽은 내용에 따르게 만들면, 호출자가 승인 없이 1비트씩 알아내기 때문이다.
   - 그래서 agent가 답하지 않은 질문(ignored, denied, recorded)에는 넘김 항목이 생긴다. 소유자가 기각하면 `declined`가 된다.
+  - **답 대신 한 일**(`follow_up_caller`): 요청의 이벤트에서 답이 아닌 호출이 executed가 되면(커넥터 호출 성공, 코딩 작업 성공, unknown을 done으로 정리),
+    서버가 답 항목을 pending으로 만든다. 글은 고정 문구 "Done."이고 rationale은 `FOLLOW_UP_RATIONALE`이다. 호출 결과는 읽은 자료라서 넣지 않고, 소유자가 고쳐서 알린다.
+    취소된 요청, 답 항목이 이미 있는 요청에는 만들지 않는다. 답 규칙이 pending을 허락하지 않으면(observe, draft, 정지 스위치, 규칙 없음) 넘김 항목을 만든다.
+    이 답의 수정은 교정 기록이 아니다(rationale로 구별, 마이그레이션 없음): agent의 초안이 아니고, 결과를 말하는 법을 잘못 가르친다.
   - 한계: 처리에 걸린 시간은 여전히 약한 신호이다. 상태가 바뀌는 시각은 읽기 횟수에 따라 다르다.
   `get_request`는 `(channel, request ID, caller_id)`로 찾는다. 다른 호출자의 ID와 없는 ID는 같은 오류이다.
 - **답 도구 `bunsin.inbound/reply {text}`**

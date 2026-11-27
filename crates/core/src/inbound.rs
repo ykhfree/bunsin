@@ -15,6 +15,12 @@ pub const INBOUND_TOOL_PREFIX: &str = "bunsin.inbound/";
 pub const REPLY_TOOL: &str = "bunsin.inbound/reply";
 /// The argument of the reply tool that holds the answer. It gets the AI marker.
 pub const REPLY_TEXT: &str = "text";
+/// The text of the answer that the server drafts after a call for a caller's request ran.
+/// The owner edits it to tell the result: the result is read data, so the server does not put it in.
+pub const FOLLOW_UP_TEXT: &str = "Done.";
+/// The rationale of that answer. It also marks the item, so that an edit of it is no correction of the agent.
+pub const FOLLOW_UP_RATIONALE: &str =
+    "a call for a caller's request ran; edit this answer to tell the caller the result, or dismiss it to decline";
 /// The longest question, in characters.
 pub const MAX_QUESTION_CHARS: usize = 4_000;
 /// How many questions one caller may ask in an hour.
@@ -398,7 +404,7 @@ pub enum RequestStatus {
     Answered,
     /// The agent or the owner decided not to answer.
     Declined,
-    /// The agent could not handle the question.
+    /// The agent could not handle the question, or an approved answer or action failed.
     Failed,
     /// The caller canceled the question before a decision ended it.
     Canceled,
@@ -455,7 +461,8 @@ pub fn request_status(outcome: Option<&str>, canceled_at: Option<i64>, items: &[
     if outcome.is_none() {
         return found(RequestStatus::Working, None, None);
     }
-    // Only an approved answer can fail in the run, so this state follows the owner's approval.
+    // Only an approved call can fail in the run: the answer, or a write the owner approved for the
+    // request. So this state follows the owner's approval.
     // A failed item with a retry copy (`retry_of`) is not the end: the copy decides.
     let retried = |failed: &InboxItem| items.iter().any(|copy| copy.retry_of == Some(failed.id));
     if let Some(item) = items
@@ -473,6 +480,18 @@ pub fn request_status(outcome: Option<&str>, canceled_at: Option<i64>, items: &[
     });
     if let Some((answer, at)) = answer {
         return found(RequestStatus::Answered, Some(answer), Some(at));
+    }
+    // An answer that still waits for the owner wins over another dismissed item, such as the note
+    // that a coding job ended. Otherwise the caller would stop at `declined` before the answer.
+    let open_answer = items.iter().any(|item| {
+        matches!(&item.body, InboxBody::ToolCall { tool, .. } if tool == REPLY_TOOL)
+            && matches!(
+                item.state,
+                ApprovalState::Pending | ApprovalState::Approved | ApprovalState::Executing | ApprovalState::Unknown
+            )
+    });
+    if open_answer {
+        return found(RequestStatus::PendingApproval, None, None);
     }
     if let Some(item) = items.iter().find(|item| item.state == ApprovalState::Rejected) {
         return found(RequestStatus::Declined, None, Some(item.updated_at));
@@ -566,7 +585,21 @@ mod tests {
             },
             Executed,
         );
-        assert_eq!(status(Some("executed"), &[other]), PendingApproval);
+        assert_eq!(status(Some("executed"), std::slice::from_ref(&other)), PendingApproval);
+        // An answer that waits wins over a dismissed note, such as the end of a coding job.
+        let waiting = [other.clone(), escalation(Rejected), reply("Done.", Pending)];
+        assert_eq!(status(Some("executed"), &waiting), PendingApproval);
+        // A dismissed or a drafted answer does not wait: the dismissal decides.
+        for state in [Rejected, Draft] {
+            assert_eq!(
+                status(
+                    Some("executed"),
+                    &[other.clone(), escalation(Rejected), reply("x", state)]
+                ),
+                Declined,
+                "{state:?}"
+            );
+        }
     }
 
     #[test]
