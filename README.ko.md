@@ -15,6 +15,20 @@ LLM은 제안만 합니다. 무엇을 실행할지는 하네스가 결정합니�
 - 프로필마다 정지 스위치가 있고, 켜면 모든 쓰기가 멈춥니다.
 - 모든 제안, 초안, 결과를 저장합니다. 수정할 수 없는 감사 로그가 각 단계를 기록합니다.
 
+## 목차
+
+| 부분 | 절 |
+|---|---|
+| 시작 | [빠른 시작](#빠른-시작) · [현재 한계](#현재-한계) · [구성 요소](#구성-요소) |
+| 명령 | [명령 한눈에 보기](#명령-한눈에-보기): 스크립트, cargo, 서버 명령, 프로필 명령, 환경 변수 |
+| 설치와 실행 | [빌드와 테스트](#빌드와-테스트) · [한 컴퓨터에서 처음 실행해 보기](#한-컴퓨터에서-처음-실행해-보기) · [서버 설정 (운영자)](#서버-설정-운영자) |
+| agent 설정 | [agent 설정 (프로필 소유자)](#agent-설정-프로필-소유자) · [단계별 구성](#단계별-구성-setup) · [LLM endpoint와 커넥터](#llm-endpoint와-커넥터) |
+| agent가 할 수 있는 일과 보는 것 | [원칙](#원칙) · [권한 규칙](#권한-규칙) · [개인정보 필터](#개인정보-필터) |
+| 이벤트와 승인함 | [이벤트 찾기 (폴링)](#이벤트-찾기-폴링) · [Webhook](#webhook) · [agent와 일하기](#agent와-일하기) |
+| 지식과 학습 | [Notes](#notes) · [지난 사례로 agent 평가하기](#지난-사례로-agent-평가하기) |
+| 다른 agent와 도구 | [ARD로 agent와 도구 찾기](#ard로-agent와-도구-찾기) · [다른 사람이 내 agent에게 묻게 하기](#다른-사람이-내-agent에게-묻게-하기) · [코딩 위임](#코딩-위임) |
+| 창 | [데스크톱 창 (macOS)](#데스크톱-창-macos) |
+
 ## 빠른 시작
 
 Mac에서는 명령 세 개로 이 컴퓨터에 서버를 띄우고 그 서버에 연결된 창을 엽니다.
@@ -76,6 +90,215 @@ Bunsin은 개발 초기 단계입니다. 사용하기 전에 아래 목록을 �
 | `bunsind serve` | 서버. agent를 실행하고 데이터를 저장합니다. | Linux, macOS |
 | `bunsind <명령>` | 운영자와 프로필 소유자가 쓰는 명령줄 도구 | Linux, macOS |
 | `bunsin-app` | 데스크톱 창: 승인함, 감사 로그, 정지 스위치, notes, 권한, agent 설정, 학습, 설정, 구성 마법사 | macOS |
+
+## 명령 한눈에 보기
+
+Bunsin의 명령은 세 종류입니다.
+
+| 종류 | 실행하는 사람 | 실행하는 곳 |
+|---|---|---|
+| `scripts/*.sh`, `cargo`, 배포 패키지 스크립트 | 개발자 | 이 저장소 |
+| `bunsind` 서버 명령 | 서버 운영자 | 서버. `BUNSIN_DATA_DIR`가 필요합니다. |
+| `bunsind` 프로필 명령 | 프로필 소유자 | 아무 컴퓨터. `BUNSIN_SERVER`와 `BUNSIN_TOKEN`이 필요합니다. |
+
+`bunsind --help`는 모든 명령을 보여 줍니다. `bunsind <명령> --help`는 그 명령의 옵션을 보여 줍니다.
+아래 표는 명령마다 한 줄로 설명합니다. 자세한 내용은 링크한 절에 있습니다.
+
+### 스크립트 명령
+
+`scripts/setup.sh`는 이 컴퓨터에서 서버를 실행합니다([스크립트로 한 번에](#스크립트로-한-번에)).
+
+| 명령 | 하는 일 |
+|---|---|
+| `scripts/setup.sh` 또는 `scripts/setup.sh start` | `bunsind`를 빌드하고, 프로필과 접속 token을 만들고, `bunsind serve --allow-stdio-connectors`를 백그라운드로 띄웁니다. |
+| `scripts/setup.sh app` | 저장된 주소와 token으로 데스크톱 창을 엽니다(macOS). |
+| `scripts/setup.sh token` | 접속 token만 출력합니다. |
+| `scripts/setup.sh env` | `BUNSIN_SERVER`, `BUNSIN_TOKEN`, `BUNSIN_PROFILE`의 `export` 줄을 출력합니다. |
+| `scripts/setup.sh status` | 서버가 떠 있는지, 프로필의 상태, 주소와 token을 보여 줍니다. |
+| `scripts/setup.sh logs` | 서버 로그를 따라 읽습니다. |
+| `scripts/setup.sh stop` | 서버를 멈춥니다. 실행 중인 요청을 기다립니다. |
+
+`start`의 옵션(모든 옵션은 `scripts/setup.sh --help`에 있습니다):
+
+| 옵션 | 하는 일 |
+|---|---|
+| `--profile <id>` | 프로필 ID. 기본값: 내 사용자 이름. |
+| `--owner <name>` | 소유자의 표시 이름. 기본값: 프로필 ID. |
+| `--listen <addr>` | 서버 주소. 기본값: `127.0.0.1:8787`. |
+| `--state-dir <dir>` | 데이터 폴더, 로그, PID 파일, token을 두는 폴더. 기본값: `.bunsin`. |
+| `--key-store <store>` | `file` 또는 `keychain`. 기본값: `file`. |
+| `--config <file>` | `config-set`으로 저장할 설정 파일. |
+| `--llm`, `--llm-wire`, `--llm-base-url`, `--llm-model` | LLM endpoint를 저장합니다. token은 `BUNSIN_LLM_TOKEN`에서 읽거나, 스크립트가 묻습니다. |
+| `--skip-llm-test` | LLM endpoint로 테스트 요청을 보내지 않습니다. |
+| `--connector <name>=<url>` | MCP 커넥터를 저장합니다. 여러 번 줄 수 있습니다. |
+| `--no-build` | 이미 빌드한 `bunsind`를 씁니다. |
+| `-- <옵션>` | `--` 뒤의 옵션을 `bunsind serve`에 넘깁니다. |
+
+`scripts/check.sh`는 CI의 `server` job과 같은 단계를 실행합니다([스크립트로 한 번에](#스크립트로-한-번에)).
+
+| 명령 | 하는 일 |
+|---|---|
+| `scripts/check.sh` | 포맷 검사, clippy, 테스트, `bunsin-daemon`이 GPUI에 의존하지 않는지 확인, release 빌드. |
+| `scripts/check.sh --fix` | 검사 대신 코드를 포맷합니다. |
+| `scripts/check.sh --with-app` | 데스크톱 창도 검사합니다(macOS에서만). |
+| `scripts/check.sh --no-build` | release 빌드를 건너뜁니다. |
+
+배포 패키지 스크립트([배포 패키지](#배포-패키지)):
+
+| 명령 | 만드는 것 |
+|---|---|
+| `packaging/linux/build-tarball.sh` | `target/package/bunsin-server-<버전>-<target>.tar.gz`와 `.sha256` |
+| `packaging/macos/build-app.sh` | `target/package/Bunsin.app` (macOS에서만) |
+
+### Cargo
+
+| 명령 | 하는 일 |
+|---|---|
+| `cargo build --release -p bunsin-daemon` | 서버와 명령줄 도구를 빌드합니다: `target/release/bunsind`. |
+| `cargo build --release -p bunsin-app` | 데스크톱 창을 빌드합니다(macOS): `target/release/bunsin-app`. |
+| `cargo run --release -p bunsin-app` | 데스크톱 창을 빌드하고 엽니다. |
+| `cargo test --workspace` | 모든 테스트를 실행합니다. Linux에서는 `--exclude bunsin-app`을 더합니다. |
+| `cargo install --path crates/daemon --locked` | `bunsind`를 `~/.cargo/bin`에 설치합니다([명령줄 도구 설치](#명령줄-도구-설치)). |
+
+### 서버 명령 (운영자)
+
+이 명령들은 데이터 폴더를 직접 읽고 씁니다([서버 설정](#서버-설정-운영자)).
+
+| 명령 | 하는 일 |
+|---|---|
+| `bunsind serve` | SIGTERM이나 Ctrl-C를 받을 때까지 서버를 실행합니다. |
+| `bunsind profile-add` | 프로필을 만듭니다. 설정을 받기 전에는 아무것도 할 수 없습니다. |
+| `bunsind token-add` | 프로필의 접속 token을 만들고 한 번만 출력합니다. |
+| `bunsind token-list` | 접속 token 목록을 보여 줍니다. token 값은 저장하지 않으므로 보여 줄 수 없습니다. |
+| `bunsind token-revoke` | `token-list`가 보여 주는 ID로 접속 token을 지웁니다. |
+| `bunsind registry-status` | ARD registry index의 source를 보여 줍니다([ARD registry](#ard-registry)). |
+
+`bunsind serve`의 옵션(각 옵션의 설명은 `bunsind serve --help`에 있습니다):
+
+| 묶음 | 옵션 | 절 |
+|---|---|---|
+| 주소와 데이터 | `--listen`(기본값 `127.0.0.1:8787`), `--tls-cert`, `--tls-key`, `--data-dir` | [서버 설정](#서버-설정-운영자), [접속 token과 TLS](#접속-token과-tls) |
+| 저장된 token의 키 | `--key-store`, `--master-key-file`, `--accept-new-key` | [저장된 token과 키](#저장된-token과-키) |
+| 프로필이 닿고 실행할 수 있는 것 | `--allow-upstream-host`, `--allow-stdio-connectors` | [프로필이 닿고 실행할 수 있는 것](#프로필이-닿고-실행할-수-있는-것) |
+| 코딩 작업 | `--allow-coding`, `--coding-repo-root`, `--coding-program`, `--allow-coding-commands` | [프로필이 닿고 실행할 수 있는 것](#프로필이-닿고-실행할-수-있는-것) |
+| 호출자용 리스너 | `--internal-listen`, `--internal-url`, `--internal-tls-cert`, `--internal-tls-key`, `--public-listen`, `--public-url`, `--public-tls-cert`, `--public-tls-key` | [리스너, ARD 게시, A2A card](#리스너-ard-게시-a2a-card) |
+| ARD와 A2A | `--ard-publisher-domain`, `--a2a-root-profile` | [리스너, ARD 게시, A2A card](#리스너-ard-게시-a2a-card) |
+| ARD registry | `--ard-registry`, `--ard-registry-source`, `--ard-registry-public-source` | [ARD registry](#ard-registry) |
+
+### 프로필 명령 (프로필 소유자)
+
+이 명령들은 네트워크로 서버에 접속합니다. `profile-list`를 뺀 모든 명령은 첫 인자로 프로필 ID를 받습니다.
+
+**설정** ([agent 설정](#agent-설정-프로필-소유자))
+
+| 명령 | 하는 일 |
+|---|---|
+| `profile-list` | token으로 접근할 수 있는 프로필 목록을 보여 줍니다. |
+| `config-show` | 프로필의 설정을 JSON으로 출력합니다. |
+| `config-set` | 프로필의 설정을 파일의 JSON으로 바꿉니다. |
+
+**LLM endpoint와 커넥터** ([LLM endpoint와 커넥터](#llm-endpoint와-커넥터))
+
+| 명령 | 하는 일 |
+|---|---|
+| `llm-set` | LLM endpoint를 저장합니다. |
+| `llm-test` | 저장된 LLM endpoint로 테스트 요청 1건을 보냅니다. endpoint에서 token 비용이 발생합니다. |
+| `llm-usage` | 지난 90일의 LLM 호출을 UTC 날짜와 용도별로 합쳐 보여 줍니다. |
+| `connector-set` | 커넥터를 저장합니다: MCP 서버, 또는 `--api`를 주면 REST API. |
+| `connector-oauth` | 커넥터의 MCP 서버에 OAuth로 로그인합니다. |
+| `connector-remove` | 커넥터와 그 token을 지웁니다. |
+| `connections` | LLM endpoint와 커넥터, 그리고 각 token의 출처를 보여 줍니다. |
+| `tools` | 커넥터의 도구 목록을 보여 줍니다. `--approve`를 주면 그 목록을 그대로 승인합니다. |
+
+**권한 규칙** ([권한 규칙](#권한-규칙))
+
+| 명령 | 하는 일 |
+|---|---|
+| `rules` | 권한 표를 보여 줍니다: 규칙마다 한 줄. |
+| `rule-set` | 도구 하나의 규칙을 정합니다. 다른 규칙은 그대로입니다. |
+| `rule-remove` | 도구 하나의 규칙을 지웁니다. 그러면 agent는 그 도구를 쓸 수 없습니다. |
+| `autonomy` | write와 delete 도구마다 개수, 보류, 제안을 보여 줍니다. |
+| `report-autonomous` | 묻지 않고 실행된 호출을 신고합니다. 그러면 그 도구가 승인 단계로 보류됩니다. |
+| `clear-autonomy-hold` | 도구의 보류를 풉니다. |
+
+**원칙** ([원칙](#원칙))
+
+| 명령 | 하는 일 |
+|---|---|
+| `extract-principles` | 지난 글에서 원칙 후보를 찾아 달라고 LLM에 묻습니다. |
+| `principle-candidates` | 원칙 후보를 최신순으로 보여 줍니다. |
+| `adopt-principle` | 후보를 원칙 목록 끝에 더합니다. |
+| `dismiss-principle` | 후보를 기각합니다. |
+
+**이벤트** ([이벤트 찾기](#이벤트-찾기-폴링), [Webhook](#webhook))
+
+| 명령 | 하는 일 |
+|---|---|
+| `ingest` | 이벤트 하나를 agent에게 넘깁니다. |
+| `poll-test` | poll 하나를 한 번 실행하고, 넘길 이벤트를 출력합니다. 아무것도 저장하지 않습니다. |
+| `webhook-secret` | webhook의 서명 secret을 표준 입력에서 읽어 저장합니다. |
+
+**승인함과 정지 스위치** ([agent와 일하기](#agent와-일하기))
+
+| 명령 | 하는 일 |
+|---|---|
+| `status` | 정지 스위치, poll 상태, 승인함을 보여 줍니다. |
+| `approve` | 대기 중인 호출을 승인하고 실행합니다. `--args`와 `--reason`을 주면 먼저 고칩니다. |
+| `reject` | 대기 중인 항목이나 초안을 기각합니다. |
+| `resolve-unknown` | 결과를 모르는 항목을 처리합니다: `done`, `drop`, `retry`. |
+| `stop` | 정지 스위치를 켜거나 끕니다. |
+| `corrections` | agent의 초안을 고친 기록을 최신순으로 보여 줍니다. |
+| `retire-correction` | 교정 기록을 남기되 agent에게 더는 주지 않습니다. |
+
+**Notes** ([Notes](#notes))
+
+| 명령 | 하는 일 |
+|---|---|
+| `wiki-list` | notes의 페이지 목록을 보여 줍니다. |
+| `wiki-search` | 낱말로 페이지를 찾고, 잘 맞는 것부터 보여 줍니다. |
+| `wiki-show` | 페이지 하나를 출처와 함께 출력합니다. |
+| `wiki-set` | 페이지를 직접 씁니다. 본문은 파일에서 읽습니다. |
+| `wiki-delete` | 페이지를 지웁니다. |
+| `wiki-history` | 페이지의 revision 목록을 보여 줍니다. `--revision N`은 옛 본문을 출력합니다. |
+| `wiki-export` | notes를 markdown 파일로 폴더에 씁니다. |
+| `preload-notes` | 읽기 도구를 한 번 부르고, 그 결과로 agent가 페이지를 제안하게 합니다. |
+| `lint-notes` | notes를 지금 점검합니다. 점검은 페이지를 고치지 않습니다. |
+| `lint-findings` | 지난 점검의 결과 중 기각하지 않은 것을 보여 줍니다. |
+| `dismiss-finding` | 점검 결과를 기각합니다. |
+
+**평가** ([지난 사례로 agent 평가하기](#지난-사례로-agent-평가하기))
+
+| 명령 | 하는 일 |
+|---|---|
+| `add-replay-cases` | JSON 파일의 재현 사례를 저장합니다. |
+| `replay-cases` | 저장된 재현 사례를 보여 줍니다. |
+| `delete-replay-case` | 재현 사례를 지웁니다. 이전 실행의 결과는 남습니다. |
+| `start-eval` | 저장된 모든 사례를 백그라운드에서 재현합니다. |
+| `eval-report` | 가장 최근 실행을 보여 줍니다: 비율, 통과 기준, 사례마다 한 줄. |
+
+**호출자와 인바운드 endpoint** ([다른 사람이 내 agent에게 묻게 하기](#다른-사람이-내-agent에게-묻게-하기))
+
+| 명령 | 하는 일 |
+|---|---|
+| `caller-add` | 호출자 token을 만들고 한 번만 출력합니다. |
+| `callers` | 호출자 token 목록을 보여 줍니다. |
+| `caller-revoke` | 호출자 token을 폐기합니다. 그 token의 다음 요청부터 거부됩니다. |
+| `inbound` | 인바운드 endpoint와 webhook이 어디서 제공되는지, ARD catalog가 endpoint를 싣는지 보여 줍니다. |
+
+### 환경 변수
+
+| 변수 | 읽는 곳 | 담는 값 |
+|---|---|---|
+| `BUNSIN_DATA_DIR` | 서버 명령 | 데이터 폴더(`--data-dir`). |
+| `BUNSIN_KEY_STORE` | `bunsind serve` | `--key-store`. |
+| `BUNSIN_MASTER_KEY_FILE` | `bunsind serve` | `--master-key-file`. |
+| `BUNSIN_SECRET_<프로필>__<KEY>` | `bunsind serve` | 저장된 token이 없는 프로필에 운영자가 넣는 token([저장된 token과 키](#저장된-token과-키)). |
+| `BUNSIN_SERVER` | 프로필 명령, 창 | 서버 주소. |
+| `BUNSIN_TOKEN` | 프로필 명령, 창 | 접속 token. |
+| `BUNSIN_CA_CERT` | 프로필 명령 | 사설 CA를 쓰는 서버의 CA 인증서 파일. |
+| `BUNSIN_STATE_DIR` | `scripts/setup.sh` | `--state-dir`. |
+| `BUNSIN_LLM_TOKEN` | `scripts/setup.sh` | LLM token. 이 변수가 있으면 `--llm`도 켜집니다. |
+| `BUNSIN_CONNECTOR_TOKEN_<NAME>` | `scripts/setup.sh` | 커넥터 `<name>`의 token(대문자, `-`는 `_`). |
 
 ## 빌드와 테스트
 
@@ -224,11 +447,16 @@ bunsind token-add kim --label "Kim's laptop"   # 접속 token을 한 번만 출�
 bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 ```
 
+### 접속 token과 TLS
+
 - **접속 token.** token 하나는 프로필 하나에만 통합니다. 서버에는 해시만 저장되므로 다시 볼 수 없습니다.
   `bunsind token-list`와 `bunsind token-revoke <id>`로 관리합니다.
   프로필 생성과 token 발급은 서버에서만 할 수 있고, 네트워크로는 할 수 없습니다.
 - **TLS.** 서버는 외부 주소에 TLS 없이 뜨지 않습니다. TLS 프록시 뒤에 둘 때는 `127.0.0.1`에 띄웁니다.
   한 컴퓨터에서 시험할 때는 `bunsind serve --listen 127.0.0.1:8787`로 띄우고 주소로 `http://127.0.0.1:8787`을 씁니다.
+
+### 저장된 token과 키
+
 - **LLM과 MCP 서버의 token.** 프로필 소유자가 창이나 명령줄에서 입력하고, 서버가 암호화해 그 프로필의 DB에 보관합니다.
   이 암호화는 DB만 복사되거나 백업이 유출된 경우를 막습니다. 키를 잃었으면 서버를 한 번 `--accept-new-key`로 띄우십시오.
   notes와 설정은 그대로 남고, 저장된 token은 모두 읽을 수 없게 되어 소유자가 다시 입력해야 합니다.
@@ -249,6 +477,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     그리고 같은 옵션으로 `security delete-generic-password`. 항목을 지우면 저장된 token을 읽을 수 없게 됩니다.
 - **운영자가 넣는 token.** 프로필에 저장된 token이 없으면 서버는 환경 변수 `BUNSIN_SECRET_<프로필>__<KEY>`를 읽습니다
   (예: `BUNSIN_SECRET_KIM__LLM`). 한 프로필은 다른 프로필의 비밀 값을 가리킬 수 없습니다.
+
+### 프로필이 닿고 실행할 수 있는 것
+
 - **접속 대상 주소.** LLM과 MCP 주소는 프로필 소유자가 정하고, 요청은 서버가 보냅니다.
   기본 규칙은 `localhost`와 내부 IP 주소를 뺀 모든 `https://` 주소를 받습니다.
   내부 주소로 풀리는 host 이름은 통과합니다. 여러 사람이 쓰는 서버나 사외에 노출된 서버는
@@ -268,6 +499,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **sandbox 없음.** 코딩 작업은 서버 사용자로 실행됩니다. 코딩 CLI는 자기 권한 설정을 따릅니다.
   Bunsin은 확인 질문이나 sandbox를 끄는 플래그를 넘기지 않고, 자체 sandbox도 두지 않습니다.
   작업의 worktree와 기록 파일은 `<data dir>/coding/<프로필>/`에 남습니다. 서버는 worktree를 지우지 않습니다.
+
+### 리스너, ARD 게시, A2A card
+
 - **다른 호출자를 위한 리스너.** `--internal-listen <주소> --internal-url <주소>`는 사내 호출자를 위한 두 번째 리스너를 엽니다.
   `--public-listen <주소> --public-url <주소>`는 인터넷 호출자를 위한 세 번째 리스너를 엽니다.
   URL은 호출자가 쓰는 주소입니다(예: `https://agents.example.com`). 프록시 뒤에서는 listen 주소와 다를 수 있습니다.
@@ -285,6 +519,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   프로세스마다 data dir과 주소를 따로 둡니다(예: `https://kim.agents.acme.com`).
   card는 그 프로필의 A2A endpoint를 제공하는 리스너에서만 나오고, 다른 곳에서는 404입니다. `bunsind`는 시작할 때 리스너마다 card를 제공하는지 stderr에 씁니다.
   이 옵션은 호출자용 리스너와 data dir 안의 프로필이 필요합니다. card는 ARD 등록이 없어도 리스너에 닿는 누구에게나 프로필 ID를 보여 줍니다.
+
+### ARD registry
+
 - **ARD registry.** `--ard-registry internal`은 내부 리스너를, `--ard-registry public`은 두 리스너를 ARD registry로 만듭니다.
   이 옵션이 없으면 registry 경로가 없습니다(404). registry 리스너는 루트에서 `POST /search`, `POST /explore`, `GET /agents`에 답합니다.
   그래서 base URL은 그 리스너의 `--*-url`입니다. registry에는 token이 필요 없습니다.
@@ -317,6 +554,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     이 줄을 DNS zone에 넣으십시오. 서버는 DNS 레코드를 쓰지 않습니다.
   - **상태.** `bunsind registry-status`는 이 컴퓨터의 `registry.db`를 읽습니다. 서버가 도는 동안에도 됩니다.
     source마다 항목 수, 마지막 성공, 다음 읽기, 실패 수, 마지막 오류, 거부한 항목의 이유별 개수(예: `other_publisher`, `too_large`)를 보입니다.
+
+### 종료
+
 - **종료.** 서버는 SIGTERM을 받으면 새 요청을 받지 않고, 실행 중인 요청을 최대 300초 기다립니다.
 
 ### agent마다 서버 하나 운영하기
@@ -440,6 +680,8 @@ bunsind connector-oauth kim docs                 # OAuth를 쓰는 MCP 서버에
 bunsind connector-remove kim jira                # 커넥터와 그 token을 지웁니다
 ```
 
+#### LLM endpoint
+
 - 옵션이 없으면 `llm-set`은 Claude API를 씁니다: `--wire anthropic-messages`,
   `--base-url https://api.anthropic.com`, `--model claude-opus-5-5`. 창도 같은 값을 미리 채웁니다.
   `--wire`는 `anthropic-messages`, `openai-chat`(Chat Completions), `openai-responses`(Responses) 중 하나입니다.
@@ -450,6 +692,12 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
 - `llm-usage`는 지난 90일의 LLM 호출을 UTC 날짜와 용도(`event`, `replay`, `llm_test`)별로 합칩니다.
   호출 수, 실패한 호출 수, 입력과 출력 token, 평균 시간을 보여 줍니다.
   서버는 모든 호출의 시각, token, 끝난 방식을 기록합니다. 요청과 응답의 글, 오류 문구는 저장하지 않습니다.
+- `--wire openai-chat`이나 `openai-responses`에서는 `llm-set`에 `--base-url`과 `--model`이 필요합니다.
+  기본값은 Claude 형식에만 있습니다.
+- 한 workspace에 묶이지 않은 Claude API key는 workspace ID도 필요합니다. 설정 파일의 `llm` 항목에 `"workspace_id"`를 넣으십시오.
+
+#### 커넥터 주소와 token
+
 - 커넥터에는 token이 없어도 됩니다. token을 빼고 저장하면 됩니다. token은 `Authorization: Bearer <token>`으로 갑니다.
   MCP 서버가 다른 헤더를 읽으면 `--token-header`나 창에서 헤더 이름을 지정합니다. 그 헤더가 token을 그대로 담습니다.
   그 커넥터에 `connector-set`을 실행할 때마다 `--token-header`를 주십시오. 빼면 `Authorization: Bearer`로 돌아갑니다.
@@ -457,6 +705,28 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   더 걸리면 호출을 취소합니다.
   다만 MCP 서버가 그 호출을 이미 실행했을 수 있습니다.
   그래서 시간이 지난 승인된 쓰기나 삭제는 `failed`가 아니라 `unknown`이 됩니다(아래 "멈춤으로 끊기거나 답이 없는 호출" 참고).
+- token은 입력한 주소에 묶입니다. 연결을 다른 host나 port로 옮기면 token을 다시 입력해야 합니다.
+  서버는 그 경우 token 유지를 거부합니다.
+- 커넥터 이름은 a-z, 0-9, `-`로 된 1~32자입니다. 이름은 모든 도구 ID의 앞부분이 됩니다(예: `slack/post_message`).
+- 커넥터 하나가 접속하지 못해도 다른 커넥터는 멈추지 않습니다.
+
+#### 저장된 token과 저장
+
+- 서버는 token을 암호화해 저장하고, 다시 돌려주지 않습니다. `connections`는 "서버에 저장됨",
+  "서버 환경 변수", "없음" 중 하나만 보여 줍니다.
+- `--token-stdin`이 없으면 저장된 token을 유지합니다. `--clear-token`은 token을 지웁니다.
+- 창이 설정을 읽은 뒤에 다른 사람이 같은 설정을 바꿨으면, 창은 덮어쓰기 전에 경고합니다.
+  명령줄과 `config-set`은 이 검사를 하지 않습니다. 권한 규칙 명령(`rule-set`, `rule-remove`)만 검사합니다.
+- 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token이나 주소 커넥터의 token을 읽습니다.
+  항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.
+  token은 서버로 한 번 복사됩니다. 이후 Keychain에서 값을 바꿔도 서버에는 반영되지 않습니다.
+  다른 앱이 만든 항목이면 macOS가 접근 허용 여부를 물을 수 있습니다. macOS가 묻는 동안 창은 반응하지 않습니다.
+  읽을 수 있는 것은 로그인 Keychain의 "응용 프로그램 암호"뿐입니다. "인터넷 암호" 항목, iCloud Keychain, 암호 앱의 항목은 찾지 못합니다.
+  Keychain 입력란은 한 번에 한 곳에만 열리고, 채울 token 칸 아래에 있습니다.
+  읽기가 실패하면 그 token 칸을 비웁니다. 그래서 Save가 앞서 읽은 token을 보내지 않습니다.
+
+#### OAuth
+
 - **OAuth.** 주소로 접속하는 MCP 서버는 token 대신 OAuth 로그인을 쓸 수 있습니다.
   설정 파일에서 켭니다: 커넥터에 `"oauth": {}`를 넣고 token은 빼고 `config-set`을 실행합니다. 예:
   `"docs": {"mcp": {"transport": "http", "url": "https://mcp.example.com/docs"}, "oauth": {}}`.
@@ -476,6 +746,9 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   주소가 다른 origin으로 바뀐 뒤, 인가 서버가 refresh token을 거부한 뒤, 또는 access token이 만료되었고 refresh token이 없을 때는 다시 로그인해야 합니다.
   `oauth`나 커넥터를 지우면 token도 지워집니다. 로그인의 요청은 모두 주소 규칙을 지나고, redirect를 따르지 않으며, 30초 안에 끝나야 합니다.
   로컬 테스트 서버로만 시험했습니다.
+
+#### REST API 커넥터
+
 - `--api slack|jira|confluence`(창에서는 종류 **REST API**)를 주면 서버가 MCP 서버 대신 그 서비스의 REST API를 직접 부릅니다.
   도구는 코드에 고정되어 있습니다: Slack `search_messages`, `get_thread`, `post_message`, Jira `search_issues`, `get_issue`, `add_comment`,
   Confluence `search_pages`, `get_page`, `create_page`. 지우는 도구는 없습니다.
@@ -489,25 +762,9 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
   쓰기가 HTTP 2xx와 JSON이 아닌 본문(예: 로그인 페이지)을 받아도 `unknown`이 됩니다. 서비스가 요청을 받았기 때문입니다.
   읽기가 그런 본문을 받으면 실패합니다.
   연결하지 못한 요청과 HTTP 4xx 같은 분명한 거절은 `failed`가 됩니다.
-- 창의 **Copy the token from the Keychain**은 Mac의 로그인 Keychain에 이미 있는 항목에서 LLM token이나 주소 커넥터의 token을 읽습니다.
-  항목의 서비스(Keychain Access에서는 *Where*로 표시)와 계정을 입력하고, **Read from Keychain**, **Save**를 차례로 누릅니다.
-  token은 서버로 한 번 복사됩니다. 이후 Keychain에서 값을 바꿔도 서버에는 반영되지 않습니다.
-  다른 앱이 만든 항목이면 macOS가 접근 허용 여부를 물을 수 있습니다. macOS가 묻는 동안 창은 반응하지 않습니다.
-  읽을 수 있는 것은 로그인 Keychain의 "응용 프로그램 암호"뿐입니다. "인터넷 암호" 항목, iCloud Keychain, 암호 앱의 항목은 찾지 못합니다.
-  Keychain 입력란은 한 번에 한 곳에만 열리고, 채울 token 칸 아래에 있습니다.
-  읽기가 실패하면 그 token 칸을 비웁니다. 그래서 Save가 앞서 읽은 token을 보내지 않습니다.
-- `--wire openai-chat`이나 `openai-responses`에서는 `llm-set`에 `--base-url`과 `--model`이 필요합니다.
-  기본값은 Claude 형식에만 있습니다.
-- 한 workspace에 묶이지 않은 Claude API key는 workspace ID도 필요합니다. 설정 파일의 `llm` 항목에 `"workspace_id"`를 넣으십시오.
-- 서버는 token을 암호화해 저장하고, 다시 돌려주지 않습니다. `connections`는 "서버에 저장됨",
-  "서버 환경 변수", "없음" 중 하나만 보여 줍니다.
-- `--token-stdin`이 없으면 저장된 token을 유지합니다. `--clear-token`은 token을 지웁니다.
-- 창이 설정을 읽은 뒤에 다른 사람이 같은 설정을 바꿨으면, 창은 덮어쓰기 전에 경고합니다.
-  명령줄과 `config-set`은 이 검사를 하지 않습니다. 권한 규칙 명령(`rule-set`, `rule-remove`)만 검사합니다.
-- token은 입력한 주소에 묶입니다. 연결을 다른 host나 port로 옮기면 token을 다시 입력해야 합니다.
-  서버는 그 경우 token 유지를 거부합니다.
-- 커넥터 이름은 a-z, 0-9, `-`로 된 1~32자입니다. 이름은 모든 도구 ID의 앞부분이 됩니다(예: `slack/post_message`).
-- 커넥터 하나가 접속하지 못해도 다른 커넥터는 멈추지 않습니다.
+
+#### 명령 커넥터 (stdio)
+
 - 커넥터는 서버가 실행하는 프로그램일 수도 있습니다(MCP의 stdio 방식). `npx ...`나 `uvx ...` 같은 명령으로 제공되는 MCP 서버에 씁니다.
   창의 커넥터 입력란에서 **Command on the server**를 고릅니다. 프로그램의 절대 경로만 적고, 인자는 따옴표 없이 한 줄에 하나씩,
   환경 변수는 `이름=값`으로 한 줄에 하나씩 적습니다. 설정 파일에서는 `"transport": "stdio"`와 `command`, `args`, `env`로 같은 내용을 적습니다.
@@ -525,6 +782,8 @@ bunsind connector-remove kim jira                # 커넥터와 그 token을 지
     이미 설정에 평문으로 들어 있는 값은 자동으로 옮겨지지 않습니다. 비밀 변수로 다시 입력하고 평문 줄을 지우십시오.
   - 암호화는 저장된 값을 보호합니다. 프로그램이 실행되는 동안에는 값이 서버에서 그 프로그램의 환경에 있습니다.
   - 이름은 종류를 유지합니다. 주소 커넥터를 명령 커넥터로(또는 반대로) 바꾸려면 먼저 커넥터를 지우십시오.
+
+## agent가 할 수 있는 일과 보는 것
 
 ### 원칙
 
@@ -682,6 +941,37 @@ bunsind rule-remove kim slack/search
   호출에 자리 하나가 없거나, 목록의 항목 하나에 나머지 경로가 없으면 서버는 호출을 만들지 않습니다.
   그래서 위 규칙에서는 divider block이 든 Slack 메시지가 거부됩니다.
 
+### 개인정보 필터
+
+```json
+{
+  "privacy": {
+    "email": true,
+    "phone": true,
+    "resident_number": true,
+    "card_number": true,
+    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }],
+    "terms": ["Park Jiwon", "박지원", "12 Teheran-ro"]
+  }
+}
+```
+
+서버는 이벤트를 저장하기 전에, 그리고 인용하는 글을 LLM에 보내기 전에, 일치하는 부분을
+`[REDACTED:EMAIL]` 같은 자리표시자로 바꿉니다. 지워진 글은 DB, 파일, 로그 어디에도 없습니다. 감사 로그에는 개수만 남습니다.
+
+- 새 프로필은 기본 4종이 모두 켜져 있습니다. `resident_number`는 주민등록번호입니다.
+  카드번호는 검증 숫자가 맞는 것만 지웁니다.
+- `custom` 패턴은 Rust [`regex`](https://docs.rs/regex) crate의 문법을 씁니다.
+  서버는 컴파일되지 않는 패턴과 빈 문자열에 일치하는 패턴을 거부합니다.
+- `terms`는 글자 그대로의 단어입니다. 예를 들어 동료 이름이나 주소를 적습니다. 일치하는 부분은 `[REDACTED:TERM]`이 됩니다.
+  단어는 대소문자를 가리지 않고 글 어디에서나 일치합니다. 그래서 `Kim`은 `Kimball`의 앞부분도 지우고, `박지원`은 `박지원님`에서도 일치합니다.
+  단어 앞뒤의 공백은 무시합니다. 단어는 200개까지, 한 단어는 2자에서 100자까지입니다.
+- 단어 자체는 서버의 프로필 설정에 저장됩니다. 오류 문구는 단어를 내용이 아닌 순서로 가리킵니다.
+- 데스크톱 창에 이 설정을 편집하는 화면이 있습니다.
+- 사용자가 직접 쓴 `principles`와 사용자가 직접 고친 글은 거르지 않습니다.
+
+## 이벤트와 승인함
+
 ### 이벤트 찾기 (폴링)
 
 ```json
@@ -760,34 +1050,40 @@ bunsind inbound kim                          # webhook마다 주소와 secret �
 - 한 커넥터에 poll과 webhook을 함께 둘 수 없습니다. 이벤트 ID가 달라 메시지 하나가 두 번 처리되기 때문입니다. 서버가 그런 설정을 거부합니다.
 - 창에서는 Agent 화면의 **Webhooks** 카드가 설정 파일과 `webhook-secret`과 같은 일을 합니다([데스크톱 창](#데스크톱-창-macos) 참고).
 
-### 개인정보 필터
+### agent와 일하기
 
-```json
-{
-  "privacy": {
-    "email": true,
-    "phone": true,
-    "resident_number": true,
-    "card_number": true,
-    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }],
-    "terms": ["Park Jiwon", "박지원", "12 Teheran-ro"]
-  }
-}
+```sh
+bunsind ingest kim --source slack --event-id 1700000000.000100 \
+    --author lee --text "When do we deploy?"
+bunsind status kim                 # 정지 스위치, poll 상태, 승인함
+bunsind approve kim 1              # 대기 중인 1번 항목을 실행
+bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
+bunsind reject kim 1 --reason "not needed"
+bunsind resolve-unknown kim 1 drop # 멈춤으로 끊긴 항목: done, drop, retry 중 하나
+bunsind corrections kim            # agent의 초안을 고친 기록
+bunsind retire-correction kim 3    # 3번 교정을 남기되 agent에게 더는 주지 않음
+bunsind stop kim on                # 정지 스위치: 이 프로필의 모든 쓰기를 멈춤
 ```
 
-서버는 이벤트를 저장하기 전에, 그리고 인용하는 글을 LLM에 보내기 전에, 일치하는 부분을
-`[REDACTED:EMAIL]` 같은 자리표시자로 바꿉니다. 지워진 글은 DB, 파일, 로그 어디에도 없습니다. 감사 로그에는 개수만 남습니다.
+대기 중인 호출을 고치면 교정 기록이 저장됩니다. 기록은 AI 표시를 뗀 초안과 수정본, 이유, 호출이 답한 메시지를 담습니다.
+모든 글은 저장하기 전에 개인정보 필터를 거칩니다.
+새 메시지가 오면 agent는 비슷한 지난 메시지의 교정 기록을 최대 5개 받습니다.
+서버는 함께 쓰인 낱말로 기록을 찾고, 드문 낱말에 더 큰 무게를 줍니다. 임베딩은 쓰지 않습니다.
+재현 평가는 교정 기록을 받지 않습니다. 기록 하나가 실제 답을 담을 수 있기 때문입니다.
+폐기한 교정 기록은 저장된 채로 남고, 어떤 프롬프트에도 들어가지 않습니다.
 
-- 새 프로필은 기본 4종이 모두 켜져 있습니다. `resident_number`는 주민등록번호입니다.
-  카드번호는 검증 숫자가 맞는 것만 지웁니다.
-- `custom` 패턴은 Rust [`regex`](https://docs.rs/regex) crate의 문법을 씁니다.
-  서버는 컴파일되지 않는 패턴과 빈 문자열에 일치하는 패턴을 거부합니다.
-- `terms`는 글자 그대로의 단어입니다. 예를 들어 동료 이름이나 주소를 적습니다. 일치하는 부분은 `[REDACTED:TERM]`이 됩니다.
-  단어는 대소문자를 가리지 않고 글 어디에서나 일치합니다. 그래서 `Kim`은 `Kimball`의 앞부분도 지우고, `박지원`은 `박지원님`에서도 일치합니다.
-  단어 앞뒤의 공백은 무시합니다. 단어는 200개까지, 한 단어는 2자에서 100자까지입니다.
-- 단어 자체는 서버의 프로필 설정에 저장됩니다. 오류 문구는 단어를 내용이 아닌 순서로 가리킵니다.
-- 데스크톱 창에 이 설정을 편집하는 화면이 있습니다.
-- 사용자가 직접 쓴 `principles`와 사용자가 직접 고친 글은 거르지 않습니다.
+승인된 호출이 실행되는 중에 서버가 멈추면, 다음 시작은 그 호출을 다시 실행하지 않습니다.
+호출이 이미 도구에 닿았을 수 있기 때문입니다. `status`는 그 항목을 `unknown`으로 보여 줍니다.
+승인된 호출이 답을 받지 못해도 같습니다. 커넥터의 시간 한도가 호출을 끝냈거나, 요청을 보낸 뒤에 연결이 끊긴 경우입니다.
+Bunsin은 그런 호출을 스스로 다시 보내지 않습니다.
+읽기는 다릅니다. 실패한 읽기는 오류가 자료로 agent에게 갑니다.
+대상 시스템을 확인한 뒤 `resolve-unknown`이나 창에서 처리합니다.
+호출이 도구에 닿았으면 `done`, 닿지 않았으면 `drop`을 고릅니다. `retry`는 사본을 새 항목으로 지금 실행합니다.
+retry는 권한 규칙을 다시 확인합니다. 첫 호출이 도구에 닿았다면 retry는 같은 호출을 두 번 보냅니다.
+승인되었지만 시작하지 않은 호출은 다음 시작에서 실행됩니다. 단, 권한 규칙과 정지 스위치가 그때도 허용해야 합니다.
+허용하지 않으면 그 항목은 `failed`가 되고, 같은 내용의 대기 사본이 승인을 기다립니다.
+
+## 지식과 학습
 
 ### Notes
 
@@ -892,6 +1188,46 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 
 아직 없는 것: 출처의 열람 권한을 잃었을 때 페이지를 다시 확인하는 기능.
 
+### 지난 사례로 agent 평가하기
+
+지난 메시지와 그때 실제로 한 답을 모읍니다. agent는 실제 답을 보지 않고 그 메시지에 다시 답합니다. 서버가 두 답을 비교합니다.
+재현은 도구를 실행하지 않고, notes와 교정 기록도 받지 않습니다. 그 기록들은 메시지 뒤의 사실을 담고, 교정 기록은 실제 답을 담을 수 있기 때문입니다.
+
+```sh
+bunsind add-replay-cases kim cases.json   # 사례 저장. 개인정보를 먼저 거름
+bunsind replay-cases kim                  # 저장된 사례 목록
+bunsind start-eval kim                    # 모든 사례를 백그라운드에서 재현
+bunsind eval-report kim                   # 비율, 통과 기준, 사례마다 한 줄
+bunsind delete-replay-case kim 3          # 이전 실행의 결과는 남음
+```
+
+`cases.json`은 목록입니다. 사례마다 `event`(`source`, `external_id`, `thread`, `author`, `text`), `actual_reply`, `expect`가 있습니다.
+`expect`는 `reply`(기본값), `escalate`(agent가 사용자에게 넘겨야 함), `ignore` 중 하나입니다.
+
+서버는 LLM 없이 초안마다 점수를 냅니다.
+
+- **종류**: 초안이 사례가 기대하는 일을 했는지. 답은 쓰기 도구의 호출입니다.
+  읽기 도구에서 멈춘 초안은 틀린 것으로 세고, 보고서는 그 비율을 `read`로 따로 보여 줍니다.
+- **겹침**: `reply` 사례에서 초안의 글이 실제 답과 얼마나 겹치는지(문자 3-gram의 Dice 계수, AI 표시 제외). 답이 아닌 초안은 0입니다.
+- **경계**: `escalate` 사례 중 agent가 넘긴 비율.
+- **과잉 넘김**: `reply` 사례 중 agent가 넘긴 비율.
+
+서버는 약 5초마다 사례 3개를 재현합니다. 재현은 아무것도 보내지 않으므로 정지 스위치가 켜져 있어도 진행합니다. 실행은 한 번에 하나입니다.
+통과 기준은 사용자가 설정 파일이나 창의 Settings 화면 **Evaluation** 카드에서 정합니다.
+
+```json
+{ "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
+```
+
+끝난 실행은 모든 비율이 기준 이상이고 실패한 사례가 없을 때만 통과합니다.
+사례가 없는 비율(예: `escalate` 사례가 없음)은 기준을 넘지 못합니다. 통과 기준이 없으면 보고서는 비율만 보여 줍니다.
+
+LLM 심판은 기본으로 꺼져 있습니다. `"eval": {"judge": true}`로 켜면, agent가 답을 낸 `reply` 사례마다 서버가 LLM에 한 번 묻습니다.
+초안이 실제 답과 같은지, 일부만 같은지, 다른지를 묻습니다. 두 글은 개인정보 필터를 거친 뒤 인용 데이터로 LLM에 갑니다.
+보고서는 판정을 점수 옆에 보여 줍니다. 어떤 비율, 통과 기준, Permissions 화면의 제안도 이 판정을 쓰지 않습니다.
+
+## 다른 agent와 도구
+
 ### ARD로 agent와 도구 찾기
 
 agent는 ARD(Agentic Resource Discovery)로 다른 agent와 도구를 찾을 수 있습니다.
@@ -960,39 +1296,6 @@ agent는 다른 도메인이나 주소를 줄 수 없습니다. 소유자가 통
   `score`는 LLM이 읽는 글일 뿐이고, 서버의 어떤 결정에도 쓰이지 않습니다.
 - agent는 찾은 것을 호출할 수 없습니다. 소유자가 커넥터로 더하고, 도구를 승인하고, 규칙을 주어야 합니다.
 - 창에서는 Agent 화면의 **ARD registries** 카드가 registry 목록을 고칩니다. 창은 아직 `ard_domains`를 고치지 않습니다. `bunsind config-set`을 씁니다.
-
-### 코딩 위임
-
-agent는 코드 변경을 코딩 agent CLI(Claude Code, Codex, 사용자가 지정한 명령)에 맡길 수 있습니다.
-agent는 코드를 직접 쓰지 않고, 병합하지 않습니다. 설정 파일에서 켭니다.
-
-```json
-"coding": {
-  "backend": "claude_code",
-  "timeout_secs": 1800,
-  "repos": {"web-app": {"path": "/srv/code/web-app"}}
-},
-"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
-```
-
-- `backend`는 `claude_code`나 `codex`입니다. 각 프로그램은 서버 운영자가 정하고(`--coding-program`), 프로필은 정할 수 없습니다.
-  서버가 `--allow-coding-commands`로 떠 있으면 `"command": ["/절대/프로그램", "인자", ...]`를 쓰는 백엔드 `command`와
-  저장소의 `"test_command": ["/usr/bin/make", "test"]`도 쓸 수 있습니다. 지시문은 stdin으로 프로그램에 갑니다.
-- agent는 이 설정과 규칙이 모두 있을 때만 내장 도구 `bunsin.coding/start`를 봅니다.
-  agent는 고정된 설명과 저장소 이름만 보고, 경로, 프로그램, 테스트 명령은 보지 않습니다.
-  agent는 저장소, base(기본값 `HEAD`), 지시문을 고릅니다.
-- **모든 작업은 사용자를 기다립니다.** delete처럼 단계가 `autonomous`여도 그렇습니다.
-  규칙은 `"outgoing_text": "none"`인 `write`여야 합니다. 승인함 카드는 "Approve and start the job"을 보여 줍니다.
-- 승인하면 서버가 작업을 백그라운드에서 실행합니다. git worktree와 브랜치 `agent/b<항목>-<프로필>`을 만들고,
-  코딩 agent를 실행한 뒤 테스트 명령을 실행합니다. 변경 요약, 테스트 출력, 기록 파일은 개인정보 필터를 거쳐 산출물로 남습니다.
-- 작업이 끝나면 호출은 완료(코딩 agent가 종료 코드 0으로 끝남)나 실패가 됩니다.
-  승인함의 새 항목이 브랜치, 변경, 테스트 결과를 알려 줍니다. **브랜치를 검토하고 직접 병합하세요.**
-- 작업 중에 서버가 멈추면 호출은 다른 끊긴 호출처럼 `unknown`이 됩니다.
-- 한계: 실제 Claude Code나 Codex CLI로 실행한 테스트는 없습니다. 테스트는 `/bin/sh`를 코딩 agent로 씁니다.
-  두 CLI는 기본 모드에서 파일을 고치기 전에 물을 수 있고, 답할 사람이 없으면 아무것도 바꾸지 않습니다. 그러면 작업은 변경 없이 끝납니다.
-  Bunsin은 이를 우회하는 플래그를 넣지 않습니다. 편집을 허용하려면 서버에서 CLI 자체의 설정을 바꾸세요.
-
-![승인함의 코딩 호출과 작업 결과](docs/screens/inbox-coding-light.png)
 
 ### 다른 사람이 내 agent에게 묻게 하기
 
@@ -1155,76 +1458,38 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
 - **거부된 token**은 HTTP `401`과 `WWW-Authenticate: Bearer`, 그리고 JSON-RPC 오류 본문을 받습니다: `id`는 null, 코드 `-32000`, 이유 `UNAUTHENTICATED`.
   A2A는 이 경우의 코드를 정하지 않습니다(§3.3.2). token, 프로필, 리스너의 모든 거부가 이 같은 답입니다.
 
-### agent와 일하기
+### 코딩 위임
 
-```sh
-bunsind ingest kim --source slack --event-id 1700000000.000100 \
-    --author lee --text "When do we deploy?"
-bunsind status kim                 # 정지 스위치, poll 상태, 승인함
-bunsind approve kim 1              # 대기 중인 1번 항목을 실행
-bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
-bunsind reject kim 1 --reason "not needed"
-bunsind resolve-unknown kim 1 drop # 멈춤으로 끊긴 항목: done, drop, retry 중 하나
-bunsind corrections kim            # agent의 초안을 고친 기록
-bunsind retire-correction kim 3    # 3번 교정을 남기되 agent에게 더는 주지 않음
-bunsind stop kim on                # 정지 스위치: 이 프로필의 모든 쓰기를 멈춤
-```
-
-대기 중인 호출을 고치면 교정 기록이 저장됩니다. 기록은 AI 표시를 뗀 초안과 수정본, 이유, 호출이 답한 메시지를 담습니다.
-모든 글은 저장하기 전에 개인정보 필터를 거칩니다.
-새 메시지가 오면 agent는 비슷한 지난 메시지의 교정 기록을 최대 5개 받습니다.
-서버는 함께 쓰인 낱말로 기록을 찾고, 드문 낱말에 더 큰 무게를 줍니다. 임베딩은 쓰지 않습니다.
-재현 평가는 교정 기록을 받지 않습니다. 기록 하나가 실제 답을 담을 수 있기 때문입니다.
-폐기한 교정 기록은 저장된 채로 남고, 어떤 프롬프트에도 들어가지 않습니다.
-
-승인된 호출이 실행되는 중에 서버가 멈추면, 다음 시작은 그 호출을 다시 실행하지 않습니다.
-호출이 이미 도구에 닿았을 수 있기 때문입니다. `status`는 그 항목을 `unknown`으로 보여 줍니다.
-승인된 호출이 답을 받지 못해도 같습니다. 커넥터의 시간 한도가 호출을 끝냈거나, 요청을 보낸 뒤에 연결이 끊긴 경우입니다.
-Bunsin은 그런 호출을 스스로 다시 보내지 않습니다.
-읽기는 다릅니다. 실패한 읽기는 오류가 자료로 agent에게 갑니다.
-대상 시스템을 확인한 뒤 `resolve-unknown`이나 창에서 처리합니다.
-호출이 도구에 닿았으면 `done`, 닿지 않았으면 `drop`을 고릅니다. `retry`는 사본을 새 항목으로 지금 실행합니다.
-retry는 권한 규칙을 다시 확인합니다. 첫 호출이 도구에 닿았다면 retry는 같은 호출을 두 번 보냅니다.
-승인되었지만 시작하지 않은 호출은 다음 시작에서 실행됩니다. 단, 권한 규칙과 정지 스위치가 그때도 허용해야 합니다.
-허용하지 않으면 그 항목은 `failed`가 되고, 같은 내용의 대기 사본이 승인을 기다립니다.
-
-### 지난 사례로 agent 평가하기
-
-지난 메시지와 그때 실제로 한 답을 모읍니다. agent는 실제 답을 보지 않고 그 메시지에 다시 답합니다. 서버가 두 답을 비교합니다.
-재현은 도구를 실행하지 않고, notes와 교정 기록도 받지 않습니다. 그 기록들은 메시지 뒤의 사실을 담고, 교정 기록은 실제 답을 담을 수 있기 때문입니다.
-
-```sh
-bunsind add-replay-cases kim cases.json   # 사례 저장. 개인정보를 먼저 거름
-bunsind replay-cases kim                  # 저장된 사례 목록
-bunsind start-eval kim                    # 모든 사례를 백그라운드에서 재현
-bunsind eval-report kim                   # 비율, 통과 기준, 사례마다 한 줄
-bunsind delete-replay-case kim 3          # 이전 실행의 결과는 남음
-```
-
-`cases.json`은 목록입니다. 사례마다 `event`(`source`, `external_id`, `thread`, `author`, `text`), `actual_reply`, `expect`가 있습니다.
-`expect`는 `reply`(기본값), `escalate`(agent가 사용자에게 넘겨야 함), `ignore` 중 하나입니다.
-
-서버는 LLM 없이 초안마다 점수를 냅니다.
-
-- **종류**: 초안이 사례가 기대하는 일을 했는지. 답은 쓰기 도구의 호출입니다.
-  읽기 도구에서 멈춘 초안은 틀린 것으로 세고, 보고서는 그 비율을 `read`로 따로 보여 줍니다.
-- **겹침**: `reply` 사례에서 초안의 글이 실제 답과 얼마나 겹치는지(문자 3-gram의 Dice 계수, AI 표시 제외). 답이 아닌 초안은 0입니다.
-- **경계**: `escalate` 사례 중 agent가 넘긴 비율.
-- **과잉 넘김**: `reply` 사례 중 agent가 넘긴 비율.
-
-서버는 약 5초마다 사례 3개를 재현합니다. 재현은 아무것도 보내지 않으므로 정지 스위치가 켜져 있어도 진행합니다. 실행은 한 번에 하나입니다.
-통과 기준은 사용자가 설정 파일이나 창의 Settings 화면 **Evaluation** 카드에서 정합니다.
+agent는 코드 변경을 코딩 agent CLI(Claude Code, Codex, 사용자가 지정한 명령)에 맡길 수 있습니다.
+agent는 코드를 직접 쓰지 않고, 병합하지 않습니다. 설정 파일에서 켭니다.
 
 ```json
-{ "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
+"coding": {
+  "backend": "claude_code",
+  "timeout_secs": 1800,
+  "repos": {"web-app": {"path": "/srv/code/web-app"}}
+},
+"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
 ```
 
-끝난 실행은 모든 비율이 기준 이상이고 실패한 사례가 없을 때만 통과합니다.
-사례가 없는 비율(예: `escalate` 사례가 없음)은 기준을 넘지 못합니다. 통과 기준이 없으면 보고서는 비율만 보여 줍니다.
+- `backend`는 `claude_code`나 `codex`입니다. 각 프로그램은 서버 운영자가 정하고(`--coding-program`), 프로필은 정할 수 없습니다.
+  서버가 `--allow-coding-commands`로 떠 있으면 `"command": ["/절대/프로그램", "인자", ...]`를 쓰는 백엔드 `command`와
+  저장소의 `"test_command": ["/usr/bin/make", "test"]`도 쓸 수 있습니다. 지시문은 stdin으로 프로그램에 갑니다.
+- agent는 이 설정과 규칙이 모두 있을 때만 내장 도구 `bunsin.coding/start`를 봅니다.
+  agent는 고정된 설명과 저장소 이름만 보고, 경로, 프로그램, 테스트 명령은 보지 않습니다.
+  agent는 저장소, base(기본값 `HEAD`), 지시문을 고릅니다.
+- **모든 작업은 사용자를 기다립니다.** delete처럼 단계가 `autonomous`여도 그렇습니다.
+  규칙은 `"outgoing_text": "none"`인 `write`여야 합니다. 승인함 카드는 "Approve and start the job"을 보여 줍니다.
+- 승인하면 서버가 작업을 백그라운드에서 실행합니다. git worktree와 브랜치 `agent/b<항목>-<프로필>`을 만들고,
+  코딩 agent를 실행한 뒤 테스트 명령을 실행합니다. 변경 요약, 테스트 출력, 기록 파일은 개인정보 필터를 거쳐 산출물로 남습니다.
+- 작업이 끝나면 호출은 완료(코딩 agent가 종료 코드 0으로 끝남)나 실패가 됩니다.
+  승인함의 새 항목이 브랜치, 변경, 테스트 결과를 알려 줍니다. **브랜치를 검토하고 직접 병합하세요.**
+- 작업 중에 서버가 멈추면 호출은 다른 끊긴 호출처럼 `unknown`이 됩니다.
+- 한계: 실제 Claude Code나 Codex CLI로 실행한 테스트는 없습니다. 테스트는 `/bin/sh`를 코딩 agent로 씁니다.
+  두 CLI는 기본 모드에서 파일을 고치기 전에 물을 수 있고, 답할 사람이 없으면 아무것도 바꾸지 않습니다. 그러면 작업은 변경 없이 끝납니다.
+  Bunsin은 이를 우회하는 플래그를 넣지 않습니다. 편집을 허용하려면 서버에서 CLI 자체의 설정을 바꾸세요.
 
-LLM 심판은 기본으로 꺼져 있습니다. `"eval": {"judge": true}`로 켜면, agent가 답을 낸 `reply` 사례마다 서버가 LLM에 한 번 묻습니다.
-초안이 실제 답과 같은지, 일부만 같은지, 다른지를 묻습니다. 두 글은 개인정보 필터를 거친 뒤 인용 데이터로 LLM에 갑니다.
-보고서는 판정을 점수 옆에 보여 줍니다. 어떤 비율, 통과 기준, Permissions 화면의 제안도 이 판정을 쓰지 않습니다.
+![승인함의 코딩 호출과 작업 결과](docs/screens/inbox-coding-light.png)
 
 ## 데스크톱 창 (macOS)
 

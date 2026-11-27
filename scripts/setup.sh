@@ -54,7 +54,7 @@
 #   logs     Follows the server log.
 #
 # The tools of a connector are not approved and no permission rule is set: read the tool list,
-# then follow "Tools and rules" in the README (bunsind tools <profile> <name> --approve, rule-set).
+# then follow "Permission rules" in the README (bunsind tools <profile> <name> --approve, rule-set).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

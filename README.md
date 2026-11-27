@@ -15,6 +15,20 @@ The LLM only proposes. The harness decides what runs:
 - A kill switch per profile stops all writes.
 - Every proposal, draft and result is saved, and an append-only audit log records each step.
 
+## Contents
+
+| Part | Sections |
+|---|---|
+| Start | [Quick start](#quick-start) · [Current limits](#current-limits) · [Parts](#parts) |
+| Commands | [Commands at a glance](#commands-at-a-glance): scripts, cargo, server commands, profile commands, environment variables |
+| Install and run | [Build and test](#build-and-test) · [Try it on one computer](#try-it-on-one-computer) · [Set up the server (operator)](#set-up-the-server-operator) |
+| Set up an agent | [Set up an agent (profile owner)](#set-up-an-agent-profile-owner) · [The setup, step by step](#the-setup-step-by-step) · [LLM endpoint and connectors](#llm-endpoint-and-connectors) |
+| What the agent may do and see | [Principles](#principles) · [Permission rules](#permission-rules) · [Privacy filter](#privacy-filter) |
+| Events and the inbox | [Find events (polling)](#find-events-polling) · [Webhooks](#webhooks) · [Work with the agent](#work-with-the-agent) |
+| Knowledge and learning | [Notes](#notes) · [Evaluate the agent on past cases](#evaluate-the-agent-on-past-cases) |
+| Other agents and tools | [Find agents and tools with ARD](#find-agents-and-tools-with-ard) · [Let others ask your agent](#let-others-ask-your-agent) · [Delegate coding](#delegate-coding) |
+| Window | [Desktop window (macOS)](#desktop-window-macos) |
+
 ## Quick start
 
 On a Mac, three commands start a server on this computer and open the window for it.
@@ -87,6 +101,216 @@ and [docs/PLAN.md](docs/PLAN.md) has the plan (both in Korean).
 | `bunsind <command>` | The command line of an operator or a profile owner. | Linux or macOS |
 | `bunsin-app` | The desktop window: approval inbox, audit log, kill switch, notes, permissions, agent settings, learning, settings, setup. | macOS |
 
+## Commands at a glance
+
+Bunsin has three kinds of commands:
+
+| Kind | Who runs it | Where |
+|---|---|---|
+| `scripts/*.sh`, `cargo` and the packaging scripts | a developer | in this repository |
+| `bunsind` server commands | the server operator | on the server, with `BUNSIN_DATA_DIR` |
+| `bunsind` profile commands | the profile owner | on any computer, with `BUNSIN_SERVER` and `BUNSIN_TOKEN` |
+
+`bunsind --help` lists every command. `bunsind <command> --help` shows the options of one.
+The tables below give one line for each command. The linked section has the details.
+
+### Script commands
+
+`scripts/setup.sh` runs a server on this computer ([Scripts](#scripts)):
+
+| Command | What it does |
+|---|---|
+| `scripts/setup.sh` or `scripts/setup.sh start` | Builds `bunsind`, creates the profile and an access token, and starts `bunsind serve --allow-stdio-connectors` in the background. |
+| `scripts/setup.sh app` | Opens the desktop window with the saved address and token (macOS). |
+| `scripts/setup.sh token` | Prints only the access token. |
+| `scripts/setup.sh env` | Prints the `export` lines of `BUNSIN_SERVER`, `BUNSIN_TOKEN` and `BUNSIN_PROFILE`. |
+| `scripts/setup.sh status` | Shows whether the server runs, the status of the profile, the address and the token. |
+| `scripts/setup.sh logs` | Follows the server log. |
+| `scripts/setup.sh stop` | Stops the server. It waits for running requests. |
+
+Options of `start` (`scripts/setup.sh --help` lists them all):
+
+| Option | What it does |
+|---|---|
+| `--profile <id>` | The profile ID. Default: your user name. |
+| `--owner <name>` | The owner's display name. Default: the profile ID. |
+| `--listen <addr>` | The server address. Default: `127.0.0.1:8787`. |
+| `--state-dir <dir>` | The folder for the data folder, the log, the PID file and the token. Default: `.bunsin`. |
+| `--key-store <store>` | `file` or `keychain`. Default: `file`. |
+| `--config <file>` | A settings file to save with `config-set`. |
+| `--llm`, `--llm-wire`, `--llm-base-url`, `--llm-model` | Save the LLM endpoint. The token comes from `BUNSIN_LLM_TOKEN`, or the script asks for it. |
+| `--skip-llm-test` | Do not send the test request to the LLM endpoint. |
+| `--connector <name>=<url>` | Save an MCP connector. Repeat it for more. |
+| `--no-build` | Use the `bunsind` that is built already. |
+| `-- <options>` | Pass the options after `--` to `bunsind serve`. |
+
+`scripts/check.sh` runs the steps of the `server` job in CI ([Scripts](#scripts)):
+
+| Command | What it does |
+|---|---|
+| `scripts/check.sh` | Format check, clippy, tests, the check that `bunsin-daemon` does not depend on GPUI, and a release build. |
+| `scripts/check.sh --fix` | Formats the code instead of only checking it. |
+| `scripts/check.sh --with-app` | Also checks the desktop window (macOS only). |
+| `scripts/check.sh --no-build` | Skips the release build. |
+
+The packaging scripts ([Packages](#packages)):
+
+| Command | What it makes |
+|---|---|
+| `packaging/linux/build-tarball.sh` | `target/package/bunsin-server-<version>-<target>.tar.gz` and its `.sha256` |
+| `packaging/macos/build-app.sh` | `target/package/Bunsin.app` (macOS only) |
+
+### Cargo
+
+| Command | What it does |
+|---|---|
+| `cargo build --release -p bunsin-daemon` | Builds the server and the command line: `target/release/bunsind`. |
+| `cargo build --release -p bunsin-app` | Builds the desktop window (macOS): `target/release/bunsin-app`. |
+| `cargo run --release -p bunsin-app` | Builds and opens the desktop window. |
+| `cargo test --workspace` | Runs all tests. On Linux, add `--exclude bunsin-app`. |
+| `cargo install --path crates/daemon --locked` | Installs `bunsind` into `~/.cargo/bin` ([Install the command line](#install-the-command-line)). |
+
+### Server commands (operator)
+
+These commands read and write the data folder directly ([Set up the server](#set-up-the-server-operator)):
+
+| Command | What it does |
+|---|---|
+| `bunsind serve` | Runs the server until it gets SIGTERM or Ctrl-C. |
+| `bunsind profile-add` | Creates a profile. The profile can do nothing until it gets settings. |
+| `bunsind token-add` | Creates an access token for a profile and prints it once. |
+| `bunsind token-list` | Lists the access tokens. Their values are not stored and cannot be shown. |
+| `bunsind token-revoke` | Removes an access token by the ID that `token-list` shows. |
+| `bunsind registry-status` | Shows the sources of the ARD registry index ([ARD registry](#ard-registry)). |
+
+Options of `bunsind serve` (`bunsind serve --help` describes each one):
+
+| Group | Options | Section |
+|---|---|---|
+| Address and data | `--listen` (default `127.0.0.1:8787`), `--tls-cert`, `--tls-key`, `--data-dir` | [Set up the server](#set-up-the-server-operator), [Access tokens and TLS](#access-tokens-and-tls) |
+| Key of the stored tokens | `--key-store`, `--master-key-file`, `--accept-new-key` | [Stored tokens and the key](#stored-tokens-and-the-key) |
+| What profiles may reach and run | `--allow-upstream-host`, `--allow-stdio-connectors` | [What profiles may reach and run](#what-profiles-may-reach-and-run) |
+| Coding jobs | `--allow-coding`, `--coding-repo-root`, `--coding-program`, `--allow-coding-commands` | [What profiles may reach and run](#what-profiles-may-reach-and-run) |
+| Listeners for callers | `--internal-listen`, `--internal-url`, `--internal-tls-cert`, `--internal-tls-key`, `--public-listen`, `--public-url`, `--public-tls-cert`, `--public-tls-key` | [Listeners, ARD publishing and the A2A card](#listeners-ard-publishing-and-the-a2a-card) |
+| ARD and A2A | `--ard-publisher-domain`, `--a2a-root-profile` | [Listeners, ARD publishing and the A2A card](#listeners-ard-publishing-and-the-a2a-card) |
+| ARD registry | `--ard-registry`, `--ard-registry-source`, `--ard-registry-public-source` | [ARD registry](#ard-registry) |
+
+### Profile commands (profile owner)
+
+These commands talk to the server over the network. Each one takes the profile ID first,
+except `profile-list`.
+
+**Settings** ([Set up an agent](#set-up-an-agent-profile-owner))
+
+| Command | What it does |
+|---|---|
+| `profile-list` | Lists the profiles that the token gives access to. |
+| `config-show` | Prints the settings of a profile as JSON. |
+| `config-set` | Replaces the settings of a profile with the JSON in a file. |
+
+**LLM endpoint and connectors** ([LLM endpoint and connectors](#llm-endpoint-and-connectors))
+
+| Command | What it does |
+|---|---|
+| `llm-set` | Saves the LLM endpoint. |
+| `llm-test` | Sends one test request to the saved LLM endpoint. It costs tokens at the endpoint. |
+| `llm-usage` | Shows the LLM calls of the last 90 days, added up by UTC day and purpose. |
+| `connector-set` | Saves a connector: an MCP server, or with `--api` a REST API. |
+| `connector-oauth` | Signs in to the MCP server of a connector with OAuth. |
+| `connector-remove` | Removes a connector and its stored token. |
+| `connections` | Shows the LLM endpoint and the connectors, and where each token comes from. |
+| `tools` | Lists the tools of a connector. With `--approve`, approves exactly that list. |
+
+**Permission rules** ([Permission rules](#permission-rules))
+
+| Command | What it does |
+|---|---|
+| `rules` | Shows the permission table: one line for each rule. |
+| `rule-set` | Sets the rule of one tool. The other rules stay. |
+| `rule-remove` | Removes the rule of one tool. The agent cannot use the tool then. |
+| `autonomy` | Shows the counts, the holds and the suggestions of each write or delete tool. |
+| `report-autonomous` | Reports a problem with a call that ran without asking. Its tool is then held at approval. |
+| `clear-autonomy-hold` | Clears the hold of a tool. |
+
+**Principles** ([Principles](#principles))
+
+| Command | What it does |
+|---|---|
+| `extract-principles` | Asks the LLM for principle candidates in your past texts. |
+| `principle-candidates` | Shows the principle candidates, newest first. |
+| `adopt-principle` | Adds a candidate to the end of your principles. |
+| `dismiss-principle` | Dismisses a candidate. |
+
+**Events** ([Find events](#find-events-polling), [Webhooks](#webhooks))
+
+| Command | What it does |
+|---|---|
+| `ingest` | Hands one event to the agent. |
+| `poll-test` | Runs one poll once and prints the events it would hand over. It stores nothing. |
+| `webhook-secret` | Stores the signing secret of a webhook, read from standard input. |
+
+**Inbox and kill switch** ([Work with the agent](#work-with-the-agent))
+
+| Command | What it does |
+|---|---|
+| `status` | Shows the kill switch, the polls and the inbox. |
+| `approve` | Approves a pending call and runs it. `--args` with `--reason` edits it first. |
+| `reject` | Dismisses a pending item or a draft. |
+| `resolve-unknown` | Resolves an item whose outcome is unknown: `done`, `drop` or `retry`. |
+| `stop` | Turns the kill switch on or off. |
+| `corrections` | Shows your stored edits of the agent's drafts, newest first. |
+| `retire-correction` | Keeps a correction, but stops giving it to the agent. |
+
+**Notes** ([Notes](#notes))
+
+| Command | What it does |
+|---|---|
+| `wiki-list` | Lists the pages of the notes. |
+| `wiki-search` | Finds pages by words, best first. |
+| `wiki-show` | Prints one page with its sources. |
+| `wiki-set` | Writes a page yourself. The body is read from a file. |
+| `wiki-delete` | Deletes a page. |
+| `wiki-history` | Lists the revisions of a page. `--revision N` prints an old text. |
+| `wiki-export` | Writes the notes as markdown files into a folder. |
+| `preload-notes` | Calls one read tool and lets the agent propose pages from the result. |
+| `lint-notes` | Checks the notes now. A check changes no page. |
+| `lint-findings` | Shows the findings of the last check that you have not dismissed. |
+| `dismiss-finding` | Dismisses a finding. |
+
+**Evaluation** ([Evaluate the agent on past cases](#evaluate-the-agent-on-past-cases))
+
+| Command | What it does |
+|---|---|
+| `add-replay-cases` | Stores replay cases from a JSON file. |
+| `replay-cases` | Shows the stored replay cases. |
+| `delete-replay-case` | Deletes a replay case. The results of earlier runs stay. |
+| `start-eval` | Replays every stored case in the background. |
+| `eval-report` | Shows the newest run: the rates, the pass mark and one line for each case. |
+
+**Callers and the inbound endpoint** ([Let others ask your agent](#let-others-ask-your-agent))
+
+| Command | What it does |
+|---|---|
+| `caller-add` | Creates a caller token and prints it once. |
+| `callers` | Lists the caller tokens. |
+| `caller-revoke` | Revokes a caller token. The next request with it is refused. |
+| `inbound` | Shows where the inbound endpoint and the webhooks are served, and whether the ARD catalogs list the endpoint. |
+
+### Environment variables
+
+| Variable | Read by | What it holds |
+|---|---|---|
+| `BUNSIN_DATA_DIR` | server commands | The data folder (`--data-dir`). |
+| `BUNSIN_KEY_STORE` | `bunsind serve` | `--key-store`. |
+| `BUNSIN_MASTER_KEY_FILE` | `bunsind serve` | `--master-key-file`. |
+| `BUNSIN_SECRET_<PROFILE>__<KEY>` | `bunsind serve` | A token from the operator for a profile that has none stored ([Stored tokens and the key](#stored-tokens-and-the-key)). |
+| `BUNSIN_SERVER` | profile commands, the window | The server address. |
+| `BUNSIN_TOKEN` | profile commands, the window | The access token. |
+| `BUNSIN_CA_CERT` | profile commands | The CA certificate file of a server with a private CA. |
+| `BUNSIN_STATE_DIR` | `scripts/setup.sh` | `--state-dir`. |
+| `BUNSIN_LLM_TOKEN` | `scripts/setup.sh` | The LLM token. Setting it also turns on `--llm`. |
+| `BUNSIN_CONNECTOR_TOKEN_<NAME>` | `scripts/setup.sh` | The token of the connector `<name>` (upper case, `-` as `_`). |
+
 ## Build and test
 
 ```sh
@@ -115,8 +339,9 @@ checking it, `--with-app` adds the window on macOS, and `--no-build` skips the r
 `bunsind serve --allow-stdio-connectors` in the background, so the profile can save command
 connectors. With this flag, every profile owner can run any program as your user. It keeps
 everything in `.bunsin/` in the repository, which git ignores: the data folder, the log, the
-PID file and `agent.env` with the address and the token. It skips each step that is done already, so you can run it again at any time. It can
-also save the LLM endpoint, connectors and a settings file:
+PID file and `agent.env` with the address and the token. It skips each step that is done
+already, so you can run it again at any time. It can also save the LLM endpoint, connectors
+and a settings file:
 
 ```sh
 scripts/setup.sh --profile kim --owner "Kim"
@@ -238,12 +463,17 @@ bunsind token-add kim --label "Kim's laptop"   # prints the access token once
 bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 ```
 
+### Access tokens and TLS
+
 - **Access tokens.** A token gives access to one profile. Only its hash is stored, so it
   cannot be shown again. `bunsind token-list` and `bunsind token-revoke <id>` manage tokens.
   Profiles and tokens are created on the server only, never over the network.
 - **TLS.** The server refuses to listen on a public address without TLS. Behind a TLS
   proxy, listen on `127.0.0.1`. To try Bunsin on one machine, run
   `bunsind serve --listen 127.0.0.1:8787` and use `http://127.0.0.1:8787` as the address.
+
+### Stored tokens and the key
+
 - **Tokens of the LLM and of MCP servers.** Each profile owner enters them in the window
   or on the command line, and the server keeps them encrypted in that profile's database.
   This protects a copied database or backup. If the key is lost, start the server once
@@ -279,6 +509,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
 - **Tokens from the operator.** If a profile has no stored token, the server reads the
   environment variable `BUNSIN_SECRET_<PROFILE>__<KEY>`, for example
   `BUNSIN_SECRET_KIM__LLM`. A profile cannot name another profile's secret.
+
+### What profiles may reach and run
+
 - **Upstream addresses.** Profile owners choose the LLM and MCP addresses, and the server
   sends the requests. By default the server accepts any `https://` address except
   `localhost` and internal IP addresses. A host name that resolves to an internal address
@@ -306,6 +539,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   permission settings: Bunsin passes no flag that turns off its prompts or its sandbox, and
   adds no sandbox of its own. A job keeps its worktree and transcript in
   `<data dir>/coding/<profile>/`; the server does not remove the worktrees.
+
+### Listeners, ARD publishing and the A2A card
+
 - **Listeners for other callers.** `--internal-listen <addr> --internal-url <address>` opens
   a second listener for callers in your own network, and `--public-listen <addr> --public-url
   <address>` a third one for callers on the internet. The URL is the address that callers use,
@@ -329,6 +565,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
   endpoint is served; elsewhere the address is 404. At start, `bunsind` says on stderr whether each
   listener serves it. The flag needs a listener for callers and a profile in the data directory.
   The card shows the profile ID to anyone who reaches the listener, also without an ARD listing.
+
+### ARD registry
+
 - **ARD registry.** `--ard-registry internal` makes the internal listener an ARD registry,
   and `--ard-registry public` makes both listeners one. Without the flag the registry routes
   do not exist (404). A registry listener answers `POST /search`, `POST /explore` and
@@ -372,6 +611,9 @@ bunsind serve --listen 0.0.0.0:8787 --tls-cert cert.pem --tls-key key.pem
     server runs. For each source it shows the entry count, the last successful read, the next
     read, the failures, the last error, and the refused entries by reason, such as
     `other_publisher` or `too_large`.
+
+### Stopping
+
 - **Stopping.** On SIGTERM the server takes no new request and waits up to 300 seconds
   for running ones.
 
@@ -509,6 +751,8 @@ bunsind connector-oauth kim docs                 # signs in to an MCP server tha
 bunsind connector-remove kim jira                # removes the connector and its token
 ```
 
+#### LLM endpoint
+
 - Without options, `llm-set` uses the Claude API: `--wire anthropic-messages`,
   `--base-url https://api.anthropic.com` and `--model claude-opus-5-5`. The window
   prefills the same values. `--wire` is `anthropic-messages`, `openai-chat`
@@ -522,6 +766,13 @@ bunsind connector-remove kim jira                # removes the connector and its
   `replay`, `llm_test`): calls, failed calls, input and output tokens, and the average time.
   The server records every call with its time, tokens and how it ended. It stores no text
   of the request or the reply, and no error message.
+- With `--wire openai-chat` or `openai-responses`, `llm-set` needs `--base-url` and `--model`.
+  Only the Claude format has defaults.
+- A Claude API key that is not scoped to one workspace also needs a workspace ID. Set
+  `"workspace_id"` in the `llm` section of the settings file.
+
+#### Connector addresses and tokens
+
 - A connector needs no token: leave the token out. A token goes as `Authorization: Bearer
   <token>`. If the MCP server reads another header, name it with `--token-header`, or in the
   window. That header then carries the token as it is. Give `--token-header` with every
@@ -530,6 +781,32 @@ bunsind connector-remove kim jira                # removes the connector and its
   that the server asks for before each call. A call that runs longer is cancelled, but the
   MCP server may have done it anyway. So an approved write or delete that runs out of time
   becomes `unknown`, not `failed` (see "A call cut by a stop or without an answer" below).
+- A token belongs to the address it was entered for. If you move a connection to another
+  host or port, enter the token again; the server refuses to keep it.
+- A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
+  for example `slack/post_message`.
+- One connector that cannot connect does not stop the others.
+
+#### Stored tokens and saving
+
+- The server stores each token encrypted and never sends it back. `connections` shows
+  only "token stored on the server", "token from the server's environment" or "no token".
+- Without `--token-stdin` the stored token is kept. `--clear-token` removes it.
+- If someone else changed the same settings after the window loaded them, the window
+  warns before it overwrites. The command line and `config-set` do not check, except
+  the rule commands (`rule-set`, `rule-remove`).
+- In the window, **Copy the token from the Keychain** reads the LLM token or the token of
+  an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
+  Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
+  The token is copied once to the server: a later change in the Keychain does not reach
+  it. macOS can ask you to allow the access if another app made the item. The window
+  does not respond while macOS asks. The read finds application passwords of the login
+  Keychain only: not "Internet password" items, and not items of iCloud Keychain or the
+  Passwords app. One set of Keychain fields is open at a time, under the token it fills.
+  A read that fails empties that token field, so Save does not send an earlier token.
+
+#### OAuth
+
 - **OAuth.** An MCP server at an address can take a sign-in with OAuth instead of a token.
   Turn it on in the settings file: give the connector `"oauth": {}` and no token, then
   `config-set`. For example:
@@ -557,6 +834,9 @@ bunsind connector-remove kim jira                # removes the connector and its
   `oauth` or the connector deletes the tokens. Each request of the sign-in passes the address
   rules, follows no redirect and must end in 30 seconds. The sign-in ran only against a
   local test server.
+
+#### REST API connectors
+
 - With `--api slack|jira|confluence` (in the window: the kind **REST API**), the server calls
   the service's REST API itself instead of an MCP server. The tools are fixed in the code:
   Slack `search_messages`, `get_thread`, `post_message`; Jira `search_issues`, `get_issue`,
@@ -573,30 +853,9 @@ bunsind connector-remove kim jira                # removes the connector and its
   `unknown`. A write that gets HTTP 2xx with a body that is not JSON (for example a login
   page) also becomes `unknown`: the service accepted it. A read with such a body fails.
   A request that never connected, and a clean refusal such as HTTP 4xx, fail.
-- In the window, **Copy the token from the Keychain** reads the LLM token or the token of
-  an address connector from an item that exists in the login Keychain of your Mac. Enter the service of the item (Keychain
-  Access shows it as *Where*) and its account, then **Read from Keychain** and **Save**.
-  The token is copied once to the server: a later change in the Keychain does not reach
-  it. macOS can ask you to allow the access if another app made the item. The window
-  does not respond while macOS asks. The read finds application passwords of the login
-  Keychain only: not "Internet password" items, and not items of iCloud Keychain or the
-  Passwords app. One set of Keychain fields is open at a time, under the token it fills.
-  A read that fails empties that token field, so Save does not send an earlier token.
-- With `--wire openai-chat` or `openai-responses`, `llm-set` needs `--base-url` and `--model`.
-  Only the Claude format has defaults.
-- A Claude API key that is not scoped to one workspace also needs a workspace ID. Set
-  `"workspace_id"` in the `llm` section of the settings file.
-- The server stores each token encrypted and never sends it back. `connections` shows
-  only "token stored on the server", "token from the server's environment" or "no token".
-- Without `--token-stdin` the stored token is kept. `--clear-token` removes it.
-- If someone else changed the same settings after the window loaded them, the window
-  warns before it overwrites. The command line and `config-set` do not check, except
-  the rule commands (`rule-set`, `rule-remove`).
-- A token belongs to the address it was entered for. If you move a connection to another
-  host or port, enter the token again; the server refuses to keep it.
-- A connector name is 1 to 32 of a-z, 0-9 and `-`. It is the first part of every tool ID,
-  for example `slack/post_message`.
-- One connector that cannot connect does not stop the others.
+
+#### Command connectors (stdio)
+
 - A connector can also be a program that the server starts (the MCP stdio transport), for
   an MCP server that is given as a command such as `npx ...` or `uvx ...`. In the window,
   choose **Command on the server** in the connector form. Enter the absolute path of the
@@ -627,6 +886,8 @@ bunsind connector-remove kim jira                # removes the connector and its
     environment of that program on the server.
   - A name keeps its kind. To turn an address into a command or back, remove the
     connector first.
+
+## What the agent may do and see
 
 ### Principles
 
@@ -800,6 +1061,39 @@ The same rules as a settings file:
   the server does not make the call. So a Slack message with a divider block is refused
   by the rule above.
 
+### Privacy filter
+
+```json
+{
+  "privacy": {
+    "email": true,
+    "phone": true,
+    "resident_number": true,
+    "card_number": true,
+    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }],
+    "terms": ["Park Jiwon", "박지원", "12 Teheran-ro"]
+  }
+}
+```
+
+Before the server stores an event or sends any quoted text to the LLM, it replaces each
+match with a placeholder such as `[REDACTED:EMAIL]`. The removed text is in no database,
+file or log; the audit log holds counts only.
+
+- The four built-in kinds are on in a new profile. `resident_number` is the Korean
+  resident registration number. A card number counts only if its check digit is right.
+- `custom` patterns use the syntax of the Rust [`regex`](https://docs.rs/regex) crate.
+  The server refuses a pattern that does not compile or that matches empty text.
+- `terms` are literal texts, for example names of colleagues or addresses. Each match
+  becomes `[REDACTED:TERM]`. A term matches anywhere and in any case, so `Kim` also removes
+  the start of `Kimball`, and `박지원` also matches in `박지원님`. Spaces around a term do not count.
+  At most 200 terms of 2 to 100 characters. The terms themselves are stored in the profile
+  settings on the server; an error names a term by its position only.
+- The desktop window has a form for these settings.
+- Your own `principles` and your own edits are not filtered.
+
+## Events and the inbox
+
 ### Find events (polling)
 
 ```json
@@ -891,36 +1185,43 @@ bunsind inbound kim                          # the address of each webhook, and 
 - In the window, the **Webhooks** card of the Agent view does the same as the settings file and
   `webhook-secret` (see [Desktop window](#desktop-window-macos)).
 
-### Privacy filter
+### Work with the agent
 
-```json
-{
-  "privacy": {
-    "email": true,
-    "phone": true,
-    "resident_number": true,
-    "card_number": true,
-    "custom": [{ "label": "employee id", "pattern": "\\bEMP-\\d{6}\\b" }],
-    "terms": ["Park Jiwon", "박지원", "12 Teheran-ro"]
-  }
-}
+```sh
+bunsind ingest kim --source slack --event-id 1700000000.000100 \
+    --author lee --text "When do we deploy?"
+bunsind status kim                 # the kill switch, the polls and the inbox
+bunsind approve kim 1              # run pending item 1
+bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
+bunsind reject kim 1 --reason "not needed"
+bunsind resolve-unknown kim 1 drop # an item cut by a stop: done, drop or retry
+bunsind corrections kim            # your stored edits of the agent's drafts
+bunsind retire-correction kim 3    # keep correction 3, but stop giving it to the agent
+bunsind stop kim on                # the kill switch: stops all writes of this profile
 ```
 
-Before the server stores an event or sends any quoted text to the LLM, it replaces each
-match with a placeholder such as `[REDACTED:EMAIL]`. The removed text is in no database,
-file or log; the audit log holds counts only.
+An edit of a pending call is stored as a correction: the text of the draft and of your
+edit without the AI marker, your reason, and the message the call answered. All of it
+passes the privacy filter before it is stored. When a new message comes in, the agent gets
+up to five corrections of similar past messages. The server finds them by the words they
+share, and a rare word counts more than a common one. It uses no embeddings. A replay gets
+no corrections: one of them can hold the real reply. A retired correction stays stored
+and reaches no prompt.
 
-- The four built-in kinds are on in a new profile. `resident_number` is the Korean
-  resident registration number. A card number counts only if its check digit is right.
-- `custom` patterns use the syntax of the Rust [`regex`](https://docs.rs/regex) crate.
-  The server refuses a pattern that does not compile or that matches empty text.
-- `terms` are literal texts, for example names of colleagues or addresses. Each match
-  becomes `[REDACTED:TERM]`. A term matches anywhere and in any case, so `Kim` also removes
-  the start of `Kimball`, and `박지원` also matches in `박지원님`. Spaces around a term do not count.
-  At most 200 terms of 2 to 100 characters. The terms themselves are stored in the profile
-  settings on the server; an error names a term by its position only.
-- The desktop window has a form for these settings.
-- Your own `principles` and your own edits are not filtered.
+If the server stops while it runs an approved call, the next start does not run that call
+again: it may have reached its tool already. `status` shows it as `unknown`. The same
+happens when an approved call gets no answer: the connector's time limit ended it, or the
+connection broke after the request was sent. Bunsin never sends such a call again by
+itself. A failed read is different: the agent gets the error as data. Check the
+target system, then resolve it with `resolve-unknown` or in the window: `done` if the call
+reached its tool, `drop` if it did not, or `retry` to run a copy now as a new item.
+A retry checks the permission rules again. If the first call reached its tool, a retry
+sends it twice. A call that
+was approved but had not started runs at the next start, but only if the permission rules
+and the kill switch still allow it. Otherwise it is marked `failed`, and a pending copy
+waits for your approval.
+
+## Knowledge and learning
 
 ### Notes
 
@@ -1038,6 +1339,54 @@ bunsind preload-notes kim --tool confluence/search --args '{"cql": "space = OPS"
 
 Not built yet: a check of a page when you lose access to its source.
 
+### Evaluate the agent on past cases
+
+Collect past messages together with the reply you really gave. The agent answers them
+again without seeing your reply, and the server compares the two. A replay runs no tool
+and gets no notes and no corrections: they hold facts from after the message, and a
+correction can hold your real reply.
+
+```sh
+bunsind add-replay-cases kim cases.json   # store cases; personal data is filtered first
+bunsind replay-cases kim                  # list the stored cases
+bunsind start-eval kim                    # replay every case in the background
+bunsind eval-report kim                   # the rates, your pass mark, one line per case
+bunsind delete-replay-case kim 3          # the results of earlier runs stay
+```
+
+`cases.json` is a list. Each case has `event` (`source`, `external_id`, `thread`, `author`,
+`text`), `actual_reply`, and `expect`: `reply` (the default), `escalate` (the agent must
+hand the message to you) or `ignore`.
+
+The server scores each draft without an LLM:
+
+- **kind**: the draft does what the case expects. A reply is a call of a write tool.
+  A draft that stops at a tool that reads counts as wrong, and the report shows its share as `read`.
+- **overlap**: for a `reply` case, how much the draft's text shares with your reply
+  (the Dice coefficient of character 3-grams, without the AI marker). A draft that is no reply shares nothing.
+- **boundary**: of the `escalate` cases, the share that the agent escalated.
+- **over-escalation**: of the `reply` cases, the share that the agent escalated.
+
+The server replays three cases about every five seconds. It also does this while the kill
+switch is on, because a replay sends nothing. One run runs at a time. The pass mark is
+yours to set in the settings file or in the **Evaluation** card of the window's Settings view:
+
+```json
+{ "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
+```
+
+A finished run passes only if every rate meets its mark and no case failed. A rate without
+cases, for example with no `escalate` case, does not meet its mark. Without a pass mark,
+the report shows the rates only.
+
+An LLM judge is off by default. With `"eval": {"judge": true}` the server asks the LLM once
+for each `reply` case that the agent answered with a reply: is the draft the same as your
+reply, part of it, or different? Both texts reach the LLM as quoted data after the privacy
+filter. The report shows the verdict next to the scores. No rate, no pass mark and no
+suggestion of the Permissions view takes it.
+
+## Other agents and tools
+
 ### Find agents and tools with ARD
 
 The agent can look for other agents and tools with ARD (Agentic Resource Discovery). It asks
@@ -1127,44 +1476,6 @@ address you do not control can carry read text out of the server.
   its tools and give each a rule.
 - In the window, the **ARD registries** card of the Agent view edits the registries. The window
   does not edit `ard_domains` yet: use `bunsind config-set`.
-
-### Delegate coding
-
-The agent can hand a code change to a coding agent CLI (Claude Code, Codex, or a command you
-name). It never writes code itself and never merges. Set it up in the settings file:
-
-```json
-"coding": {
-  "backend": "claude_code",
-  "timeout_secs": 1800,
-  "repos": {"web-app": {"path": "/srv/code/web-app"}}
-},
-"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
-```
-
-- `backend` is `claude_code` or `codex`; the server operator names the program of each
-  (`--coding-program`), and a profile cannot. On a server with `--allow-coding-commands`, the
-  backend `command` with `"command": ["/abs/program", "arg", ...]` and a repository's
-  `"test_command": ["/usr/bin/make", "test"]` are allowed too. The instructions go to the
-  program on stdin.
-- The agent sees the built-in tool `bunsin.coding/start` only with these settings and the rule.
-  It sees a fixed description and the repository names, never a path, the program or the test
-  command. It chooses the repository, a base (default `HEAD`) and the instructions.
-- **Every job waits for you**, also with the tier `autonomous`, like a delete. The rule must be
-  a `write` with `"outgoing_text": "none"`. The inbox card says "Approve and start the job".
-- After approval the server runs the job in the background. It makes a git worktree and the
-  branch `agent/b<item>-<profile>`, runs the coding agent and then the test command, and keeps
-  the diff summary, the test output and the transcript as artifacts, after the privacy filter.
-- When the job ends, the call becomes done (the coding agent ended with exit code 0) or failed,
-  and a new item in the inbox names the branch, the changes and the test result. **Review the
-  branch and merge it yourself.**
-- If the server stops while a job runs, the call becomes `unknown`, like any cut call.
-- Limits: no test runs a real Claude Code or Codex CLI; the tests use `/bin/sh` as the coding
-  agent. In their default modes both CLIs may ask before they edit a file and, with no one to
-  answer, change nothing: the job then ends with no change. Bunsin adds no flag to bypass that;
-  set the CLI's own configuration on the server if you want it to edit.
-
-![A coding call and the result of a job in the inbox](docs/screens/inbox-coding-light.png)
 
 ### Let others ask your agent
 
@@ -1373,87 +1684,43 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
   `id` null, code `-32000`, reason `UNAUTHENTICATED`. A2A names no code for this (§3.3.2). Every
   refusal of the token, the profile or the listener is this same answer.
 
-### Work with the agent
+### Delegate coding
 
-```sh
-bunsind ingest kim --source slack --event-id 1700000000.000100 \
-    --author lee --text "When do we deploy?"
-bunsind status kim                 # the kill switch, the polls and the inbox
-bunsind approve kim 1              # run pending item 1
-bunsind approve kim 1 --args '{"channel":"C1","text":"At 3 pm."}' --reason "shorter"
-bunsind reject kim 1 --reason "not needed"
-bunsind resolve-unknown kim 1 drop # an item cut by a stop: done, drop or retry
-bunsind corrections kim            # your stored edits of the agent's drafts
-bunsind retire-correction kim 3    # keep correction 3, but stop giving it to the agent
-bunsind stop kim on                # the kill switch: stops all writes of this profile
-```
-
-An edit of a pending call is stored as a correction: the text of the draft and of your
-edit without the AI marker, your reason, and the message the call answered. All of it
-passes the privacy filter before it is stored. When a new message comes in, the agent gets
-up to five corrections of similar past messages. The server finds them by the words they
-share, and a rare word counts more than a common one. It uses no embeddings. A replay gets
-no corrections: one of them can hold the real reply. A retired correction stays stored
-and reaches no prompt.
-
-If the server stops while it runs an approved call, the next start does not run that call
-again: it may have reached its tool already. `status` shows it as `unknown`. The same
-happens when an approved call gets no answer: the connector's time limit ended it, or the
-connection broke after the request was sent. Bunsin never sends such a call again by
-itself. A failed read is different: the agent gets the error as data. Check the
-target system, then resolve it with `resolve-unknown` or in the window: `done` if the call
-reached its tool, `drop` if it did not, or `retry` to run a copy now as a new item.
-A retry checks the permission rules again. If the first call reached its tool, a retry
-sends it twice. A call that
-was approved but had not started runs at the next start, but only if the permission rules
-and the kill switch still allow it. Otherwise it is marked `failed`, and a pending copy
-waits for your approval.
-
-### Evaluate the agent on past cases
-
-Collect past messages together with the reply you really gave. The agent answers them
-again without seeing your reply, and the server compares the two. A replay runs no tool
-and gets no notes and no corrections: they hold facts from after the message, and a
-correction can hold your real reply.
-
-```sh
-bunsind add-replay-cases kim cases.json   # store cases; personal data is filtered first
-bunsind replay-cases kim                  # list the stored cases
-bunsind start-eval kim                    # replay every case in the background
-bunsind eval-report kim                   # the rates, your pass mark, one line per case
-bunsind delete-replay-case kim 3          # the results of earlier runs stay
-```
-
-`cases.json` is a list. Each case has `event` (`source`, `external_id`, `thread`, `author`,
-`text`), `actual_reply`, and `expect`: `reply` (the default), `escalate` (the agent must
-hand the message to you) or `ignore`.
-
-The server scores each draft without an LLM:
-
-- **kind**: the draft does what the case expects. A reply is a call of a write tool.
-  A draft that stops at a tool that reads counts as wrong, and the report shows its share as `read`.
-- **overlap**: for a `reply` case, how much the draft's text shares with your reply
-  (the Dice coefficient of character 3-grams, without the AI marker). A draft that is no reply shares nothing.
-- **boundary**: of the `escalate` cases, the share that the agent escalated.
-- **over-escalation**: of the `reply` cases, the share that the agent escalated.
-
-The server replays three cases about every five seconds. It also does this while the kill
-switch is on, because a replay sends nothing. One run runs at a time. The pass mark is
-yours to set in the settings file or in the **Evaluation** card of the window's Settings view:
+The agent can hand a code change to a coding agent CLI (Claude Code, Codex, or a command you
+name). It never writes code itself and never merges. Set it up in the settings file:
 
 ```json
-{ "eval": { "pass": { "kind_percent": 80, "overlap_percent": 40, "boundary_percent": 90 } } }
+"coding": {
+  "backend": "claude_code",
+  "timeout_secs": 1800,
+  "repos": {"web-app": {"path": "/srv/code/web-app"}}
+},
+"policy": {"rules": {"bunsin.coding/start": {"class": "write", "tier": "approve", "outgoing_text": "none"}}}
 ```
 
-A finished run passes only if every rate meets its mark and no case failed. A rate without
-cases, for example with no `escalate` case, does not meet its mark. Without a pass mark,
-the report shows the rates only.
+- `backend` is `claude_code` or `codex`; the server operator names the program of each
+  (`--coding-program`), and a profile cannot. On a server with `--allow-coding-commands`, the
+  backend `command` with `"command": ["/abs/program", "arg", ...]` and a repository's
+  `"test_command": ["/usr/bin/make", "test"]` are allowed too. The instructions go to the
+  program on stdin.
+- The agent sees the built-in tool `bunsin.coding/start` only with these settings and the rule.
+  It sees a fixed description and the repository names, never a path, the program or the test
+  command. It chooses the repository, a base (default `HEAD`) and the instructions.
+- **Every job waits for you**, also with the tier `autonomous`, like a delete. The rule must be
+  a `write` with `"outgoing_text": "none"`. The inbox card says "Approve and start the job".
+- After approval the server runs the job in the background. It makes a git worktree and the
+  branch `agent/b<item>-<profile>`, runs the coding agent and then the test command, and keeps
+  the diff summary, the test output and the transcript as artifacts, after the privacy filter.
+- When the job ends, the call becomes done (the coding agent ended with exit code 0) or failed,
+  and a new item in the inbox names the branch, the changes and the test result. **Review the
+  branch and merge it yourself.**
+- If the server stops while a job runs, the call becomes `unknown`, like any cut call.
+- Limits: no test runs a real Claude Code or Codex CLI; the tests use `/bin/sh` as the coding
+  agent. In their default modes both CLIs may ask before they edit a file and, with no one to
+  answer, change nothing: the job then ends with no change. Bunsin adds no flag to bypass that;
+  set the CLI's own configuration on the server if you want it to edit.
 
-An LLM judge is off by default. With `"eval": {"judge": true}` the server asks the LLM once
-for each `reply` case that the agent answered with a reply: is the draft the same as your
-reply, part of it, or different? Both texts reach the LLM as quoted data after the privacy
-filter. The report shows the verdict next to the scores. No rate, no pass mark and no
-suggestion of the Permissions view takes it.
+![A coding call and the result of a job in the inbox](docs/screens/inbox-coding-light.png)
 
 ## Desktop window (macOS)
 
