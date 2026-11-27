@@ -3,7 +3,7 @@
 
 use bunsin_api::{EngineApi, ProfileConfig};
 use bunsin_connectors::{McpConfig, McpConnector, TokenAuth};
-use bunsin_core::inbound::{ArdListing, InboundScope};
+use bunsin_core::inbound::{ArdListing, InboundScope, InboundSkill};
 use bunsin_core::ports::{BoxFuture, Connector, LlmClient};
 use bunsin_daemon::server::{OuterConfig, Reach, Running, serve_outer};
 use bunsin_engine::{Backends, Engine, Runtime};
@@ -1162,6 +1162,61 @@ async fn the_card_is_served_only_where_a2a_is_served() {
     .await;
     let card: Value = get(&rig.internal, "kim").await.unwrap().json().await.unwrap();
     assert_eq!(card["name"], "kim");
+}
+
+#[tokio::test]
+async fn the_card_shows_the_owners_skills_in_order_and_ask_without_them() {
+    let rig = rig().await;
+    let card_url = format!("{}/agents/kim/a2a/agent-card.json", rig.internal.url());
+    let card = || async {
+        reqwest::get(card_url.clone())
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    rig.change("kim", |config| {
+        config.inbound.skills = vec![
+            InboundSkill {
+                id: "file-ticket".into(),
+                name: " File a ticket ".into(),
+                description: "Opens a Jira ticket.\nThe owner approves it first.".into(),
+                tags: vec![" jira ".into(), "tickets".into()],
+                examples: vec!["Open a ticket for the login bug".into()],
+            },
+            InboundSkill {
+                id: "ask".into(),
+                name: "Ask a question".into(),
+                description: "Questions about the deploy schedule.".into(),
+                tags: vec!["questions".into()],
+                examples: Vec::new(),
+            },
+        ];
+    })
+    .await;
+    let shown = card().await;
+    assert_eq!(schema_errors("Agent Card", &shown), Vec::<String>::new(), "{shown}");
+    serde_json::from_value::<a2a::AgentCard>(shown.clone()).unwrap();
+    // The texts are trimmed, a skill without examples has none, and the order is the owner's.
+    assert_eq!(
+        shown["skills"],
+        json!([
+            {"id": "file-ticket", "name": "File a ticket",
+             "description": "Opens a Jira ticket.\nThe owner approves it first.",
+             "tags": ["jira", "tickets"], "examples": ["Open a ticket for the login bug"]},
+            {"id": "ask", "name": "Ask a question", "description": "Questions about the deploy schedule.",
+             "tags": ["questions"]}
+        ])
+    );
+    // Without skills of the owner, the card has the built-in `ask` again.
+    rig.change("kim", |config| config.inbound.skills.clear()).await;
+    let skills = card().await["skills"].clone();
+    assert_eq!(skills.as_array().unwrap().len(), 1);
+    assert_eq!(
+        (&skills[0]["id"], &skills[0]["tags"]),
+        (&json!("ask"), &json!(["questions"]))
+    );
 }
 
 #[tokio::test]

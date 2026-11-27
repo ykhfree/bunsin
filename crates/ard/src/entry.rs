@@ -30,7 +30,7 @@ impl Protocol {
         }
     }
 
-    /// The `capabilities` of the entry: the MCP tools or the A2A skills that a caller uses.
+    /// The built-in `capabilities` of the entry: the MCP tools or the A2A skill that a caller uses.
     fn capabilities(self) -> &'static [&'static str] {
         match self {
             Protocol::Mcp => &["ask", "get_request"],
@@ -178,6 +178,8 @@ pub struct AgentListing {
     pub endpoint_url: String,
     /// Keywords for filtering. The entry has no `tags` if this is empty.
     pub tags: Vec<String>,
+    /// The `capabilities`, such as the IDs of the A2A skills. Empty: the built-in ones of the protocol.
+    pub capabilities: Vec<String>,
     /// The version of the server that serves the card.
     pub version: Option<String>,
     /// RFC 3339 time of the last change of the listing.
@@ -237,14 +239,16 @@ pub fn build_entry(listing: &AgentListing) -> Result<Built, Vec<Violation>> {
         url: Some(listing.endpoint_url.clone()),
         description: listing.description.clone(),
         representative_queries: (!queries.is_empty()).then(|| queries.clone()),
-        capabilities: Some(
+        capabilities: Some(if listing.capabilities.is_empty() {
             listing
                 .protocol
                 .capabilities()
                 .iter()
                 .map(|c| (*c).to_owned())
-                .collect(),
-        ),
+                .collect()
+        } else {
+            listing.capabilities.clone()
+        }),
         trust_manifest: listing.trust_manifest.clone(),
         data: None,
         other,
@@ -499,6 +503,14 @@ mod tests {
         assert_eq!(entry.display_name, "Kim's helper (A2A)");
         assert_eq!(entry.capabilities, Some(vec!["ask".to_owned()]));
         assert_eq!(entry.url.as_deref(), Some(input.endpoint_url.as_str()));
+        // Named capabilities, such as the skill IDs of the card, take the place of the built-in one, in order.
+        input.capabilities = vec!["file-ticket".into(), "ask".into()];
+        let named = build_entry(&input).unwrap().entry;
+        assert_eq!(
+            named.capabilities,
+            Some(vec!["file-ticket".to_owned(), "ask".to_owned()])
+        );
+        input.capabilities = Vec::new();
         // The terminal segment stays the agent name, without a namespace too.
         input.namespace = None;
         let entry = build_entry(&input).unwrap().entry;

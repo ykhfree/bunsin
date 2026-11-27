@@ -927,6 +927,7 @@ fn draw(
                 "principles-count",
                 "callers-help",
                 "inbound-help",
+                "skill-count",
                 "connections-help",
                 "llm-token-state",
                 "privacy-help",
@@ -937,6 +938,8 @@ fn draw(
     };
     to_top(&mut cx, "tab-agent", "inbound-help");
     shot(&mut cx, window, dir, &name("agent-publishing"));
+    to_top(&mut cx, "tab-agent", "skill-count");
+    shot(&mut cx, window, dir, &name("agent-skills"));
     to_top(&mut cx, "tab-agent", "webhooks-help");
     shot(&mut cx, window, dir, &name("agent-webhooks"));
     to_top(&mut cx, "tab-settings", "auto-apply-help");
@@ -951,7 +954,7 @@ async fn publishing_state(rig: &common::Rig) -> UiState {
     };
     use bunsin_core::ard::ArdRegistry;
     use bunsin_core::eval::{EvalConfig, EvalPass};
-    use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope};
+    use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope, InboundSkill};
     use bunsin_core::settings::{ApiAuthMethod, ApiConfig, ApiService};
     use bunsin_core::webhook::WebhookConfig;
     use bunsin_core::wiki::NotesConfig;
@@ -973,6 +976,13 @@ async fn publishing_state(rig: &common::Rig) -> UiState {
             ..ArdListing::default()
         }),
         a2a: false,
+        skills: vec![InboundSkill {
+            id: "release-date".into(),
+            name: "Find a release date".into(),
+            description: "Looks up the date of a release in the calendar.".into(),
+            tags: vec!["releases".into()],
+            examples: vec!["When does 2.4 ship?".into()],
+        }],
     };
     let update = InboundUpdate {
         inbound,

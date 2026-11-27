@@ -10,7 +10,7 @@ use crate::shell::{CONFLICT, Shell, labelled, labelled_as};
 use crate::theme::{card, code_block, field, palette, quiet};
 use bunsin_api::{ArdRegistriesUpdate, InboundStatus, InboundUpdate, WebhooksUpdate};
 use bunsin_core::ard::ArdRegistry;
-use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope};
+use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope, InboundSkill};
 use bunsin_core::webhook::WebhookConfig;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -31,6 +31,9 @@ const WEBHOOKS_HELP: &str = "Slack or Jira Cloud send events to a webhook of a R
     service can steer such an event, so its changes always wait for you.";
 const DNS_HELP: &str = "Optional: publish this DNS text in your zone, so that crawlers find the catalog. \
     A line that starts with ; says why a listener has no record.";
+const SKILLS_HELP: &str = "The Agent Card lists these skills, in this order, so that callers know what to ask for. \
+    They only describe the endpoint: every request takes the same path, and every answer and every write \
+    waits for your approval.";
 const SECRET_HELP: &str = "The server keeps the signing secret encrypted and never shows it again.";
 
 /// The scope word that the window shows.
@@ -71,6 +74,26 @@ pub struct InboundForm {
     queries: Entity<TextareaState>,
     /// The tags, separated by commas.
     tags: Entity<InputState>,
+    /// The skills of the Agent Card, edited with Add, Edit and Remove.
+    skills: Vec<InboundSkill>,
+    /// The skill fields: `None` while closed, `Some(None)` for a new skill, `Some(Some(i))` to change skill `i`.
+    skill_edit: Option<Option<usize>>,
+    skill_id: Entity<InputState>,
+    skill_name: Entity<InputState>,
+    skill_description: Entity<TextareaState>,
+    /// The tags of the skill, separated by commas.
+    skill_tags: Entity<InputState>,
+    /// The examples of the skill, one per line.
+    skill_examples: Entity<TextareaState>,
+}
+
+/// The items of a list typed with `separator`, without the space around them and without empty items.
+fn items(text: &str, separator: char) -> Vec<String> {
+    text.split(separator)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl InboundForm {
@@ -91,6 +114,13 @@ impl InboundForm {
             agent: input("For example kim", window, cx),
             queries: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5)),
             tags: input("Optional, for example payments, refunds", window, cx),
+            skills: Vec::new(),
+            skill_edit: None,
+            skill_id: input("For example file-ticket", window, cx),
+            skill_name: input("For example File a ticket", window, cx),
+            skill_description: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 4)),
+            skill_tags: input("At least one, for example jira, tickets", window, cx),
+            skill_examples: cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 4)),
         }
     }
 
@@ -98,12 +128,7 @@ impl InboundForm {
     /// listing keeps the one that the card loaded.
     fn value(&self, cx: &App) -> InboundConfig {
         let queries = self.queries.read(cx).value().to_string();
-        let tags = text(&self.tags, cx)
-            .split(',')
-            .map(str::trim)
-            .filter(|tag| !tag.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let tags = items(&text(&self.tags, cx), ',');
         let base = self.track.base.as_ref();
         InboundConfig {
             enabled: self.enabled,
@@ -125,7 +150,51 @@ impl InboundForm {
                     .and_then(|ard| ard.trust_manifest.clone()),
             }),
             a2a: self.a2a,
+            skills: self.skills.clone(),
         }
+    }
+
+    /// Opens the skill fields: empty for a new skill, or with skill `index` to change it.
+    fn open_skill(&mut self, index: Option<usize>, window: &mut Window, cx: &mut App) {
+        let skill = index.and_then(|i| self.skills.get(i)).cloned().unwrap_or_default();
+        self.skill_edit = Some(index);
+        set(&self.skill_id, &skill.id, window, cx);
+        set(&self.skill_name, &skill.name, window, cx);
+        set(&self.skill_tags, &skill.tags.join(", "), window, cx);
+        let (description, examples) = (skill.description, skill.examples.join("\n"));
+        self.skill_description
+            .update(cx, |area, cx| area.set_value(description, window, cx));
+        self.skill_examples
+            .update(cx, |area, cx| area.set_value(examples, window, cx));
+    }
+
+    fn close_skill(&mut self, window: &mut Window, cx: &mut App) {
+        self.open_skill(None, window, cx);
+        self.skill_edit = None;
+    }
+
+    /// The skill that the open fields describe, or why it cannot be kept. The server checks the limits on save.
+    fn typed_skill(&self, cx: &App) -> Result<InboundSkill, &'static str> {
+        let skill = InboundSkill {
+            id: text(&self.skill_id, cx).trim().to_owned(),
+            name: text(&self.skill_name, cx).trim().to_owned(),
+            description: self.skill_description.read(cx).value().trim().to_owned(),
+            tags: items(&text(&self.skill_tags, cx), ','),
+            examples: items(&self.skill_examples.read(cx).value(), '\n'),
+        };
+        if skill.id.is_empty() || skill.name.is_empty() || skill.description.is_empty() || skill.tags.is_empty() {
+            return Err("Enter an ID, a name, a description and at least one tag.");
+        }
+        let editing = self.skill_edit.flatten();
+        let taken = self
+            .skills
+            .iter()
+            .enumerate()
+            .any(|(i, other)| other.id == skill.id && Some(i) != editing);
+        if taken {
+            return Err("A skill with this ID is in the list.");
+        }
+        Ok(skill)
     }
 
     fn fill(&mut self, config: &InboundConfig, window: &mut Window, cx: &mut App) {
@@ -147,6 +216,8 @@ impl InboundForm {
         let queries = ard.representative_queries.join("\n");
         self.queries.update(cx, |area, cx| area.set_value(queries, window, cx));
         set(&self.tags, &ard.tags.join(", "), window, cx);
+        self.skills = config.skills.clone();
+        self.close_skill(window, cx);
     }
 
     fn changed(&self, cx: &App) -> bool {
@@ -242,13 +313,17 @@ impl PublishingForm {
 impl Shell {
     fn save_inbound(&mut self, anyway: bool, cx: &mut Context<Self>) {
         let form = &mut self.publishing.inbound;
+        form.track.message = form.skill_edit.is_some().then_some("Keep the skill or cancel it first");
+        if form.track.message.is_some() {
+            return;
+        }
         let inbound = form.value(cx);
         let Some((profile, expected)) = form.track.save_target(anyway) else {
             return;
         };
         self.send(UiCommand::SaveInbound {
             profile,
-            update: InboundUpdate { inbound, expected },
+            update: Box::new(InboundUpdate { inbound, expected }),
         });
     }
 
@@ -257,6 +332,137 @@ impl Shell {
             self.publishing.inbound.track.load(&server);
             self.publishing.inbound.fill(&server, window, cx);
         }
+    }
+
+    /// Puts the typed skill into the list: at the end, or in the place of the skill it changes.
+    fn keep_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let form = &mut self.publishing.inbound;
+        let skill = match form.typed_skill(cx) {
+            Ok(skill) => skill,
+            Err(why) => {
+                form.track.message = Some(why);
+                return;
+            }
+        };
+        match form.skill_edit.flatten() {
+            Some(i) => form.skills[i] = skill,
+            None => form.skills.push(skill),
+        }
+        form.track.message = None;
+        form.close_skill(window, cx);
+    }
+
+    /// The skills of the Agent Card: one line for each, and the fields of the one that is open.
+    fn skills_section(&self, cx: &Context<Self>) -> Div {
+        let form = &self.publishing.inbound;
+        let count = match form.skills.len() {
+            0 => "Skills of the Agent Card: none, so the card has the built-in skill ask".to_owned(),
+            n => format!("Skills of the Agent Card: {n}"),
+        };
+        let rows = form.skills.iter().enumerate().map(|(i, skill)| {
+            let line = format!("{} · {} · {}", skill.id, skill.name, skill.tags.join(", "));
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(div().flex_1().min_w(px(0.)).child(labelled(format!("skill-{i}"), line)))
+                .child(
+                    Button::new(SharedString::from(format!("edit-skill-{i}")))
+                        .small()
+                        .ghost()
+                        .label("Edit")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.publishing.inbound.open_skill(Some(i), window, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("remove-skill-{i}")))
+                        .small()
+                        .ghost()
+                        .label("Remove")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let form = &mut this.publishing.inbound;
+                            form.skills.remove(i);
+                            // The open fields may belong to a skill that moved or went.
+                            if form.skill_edit.is_some_and(|edit| edit.is_some()) {
+                                form.close_skill(window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+        });
+        let input = |name: &'static str, id: &'static str, state: &Entity<InputState>| {
+            field(name, Input::new(state).id(id).aria_label(name), cx)
+        };
+        let area = |name: &'static str, id: &'static str, state: &Entity<TextareaState>| {
+            field(name, div().id(id).child(Textarea::new(state).aria_label(name)), cx)
+        };
+        let fields = form.skill_edit.map(|edit| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(input("Skill ID", "skill-id", &form.skill_id))
+                .child(input("Skill name", "skill-name", &form.skill_name))
+                .child(area(
+                    "What the skill does",
+                    "skill-description",
+                    &form.skill_description,
+                ))
+                .child(input("Skill tags, with commas", "skill-tags", &form.skill_tags))
+                .child(area(
+                    "Example requests, one per line",
+                    "skill-examples",
+                    &form.skill_examples,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            Button::new("keep-skill")
+                                .outline()
+                                .label(if edit.is_some() {
+                                    "Change the skill"
+                                } else {
+                                    "Add the skill"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.keep_skill(window, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-skill")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.publishing.inbound.close_skill(window, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
+        let add = form.skill_edit.is_none().then(|| {
+            Button::new("add-skill")
+                .self_start()
+                .outline()
+                .label("Add a skill")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.publishing.inbound.open_skill(None, window, cx);
+                    cx.notify();
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(labelled("skill-count", count))
+            .child(labelled_as("skills-help", SKILLS_HELP, quiet(SKILLS_HELP, cx)))
+            .children(rows)
+            .children(add)
+            .children(fields)
     }
 
     fn save_registries(&mut self, anyway: bool, cx: &mut Context<Self>) {
@@ -333,12 +539,7 @@ impl Shell {
             form.track.message = Some("A webhook with this name is in the list.");
             return;
         }
-        let skip_authors = text(&form.skip, cx)
-            .split(',')
-            .map(str::trim)
-            .filter(|author| !author.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let skip_authors = items(&text(&form.skip, cx), ',');
         let scope = if form.public {
             InboundScope::Public
         } else {
@@ -536,6 +737,7 @@ impl Shell {
                         cx,
                     ))
             }))
+            .child(self.skills_section(cx))
             .child(self.save_bar("inbound", &form.track, changed, Self::save_inbound, cx))
             .children(form.track.conflict.then(|| {
                 Self::conflict_warning(

@@ -453,3 +453,186 @@ fn a_webhook_is_added_gets_its_secret_masked_and_is_removed_with_it(cx: &mut Tes
     let status = rt.block_on(rig.engine.inbound_status("kim")).unwrap();
     assert!(!status.webhooks[0].secret_stored);
 }
+
+/// Types one skill into the open skill fields and keeps it. The fields must be open.
+fn type_skill(window: &mut Window, cx: &mut App, id: &str, name: &str, tags: &str, examples: &str) {
+    retype(window, cx, "skill-id", id);
+    retype(window, cx, "skill-name", name);
+    window.within("skill-description").click("input-state", cx);
+    window.press("cmd-a", cx);
+    window.input(&format!("{name}. The owner approves it first."), cx);
+    retype(window, cx, "skill-tags", tags);
+    window.within("skill-examples").click("input-state", cx);
+    window.press("cmd-a", cx);
+    window.input(examples, cx);
+}
+
+#[gpui_kit::test]
+fn the_owner_adds_changes_and_removes_skills_and_the_card_keeps_their_order(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_agent(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "skill-count"),
+            "Skills of the Agent Card: none, so the card has the built-in skill ask"
+        );
+        assert!(label(window, "skills-help").contains("every write waits for your approval"));
+        assert!(window.try_find("skill-id").is_none());
+        window.click("inbound-on", cx);
+        retype(window, cx, "inbound-description", "Questions and tickets.");
+        window.click("inbound-a2a", cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("add-skill", cx));
+    on_screen(cx, window, |window, cx| {
+        // A skill without a tag is not kept, and the fields stay open.
+        type_skill(window, cx, "file-ticket", "File a ticket", "", "");
+        window.click("keep-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(
+            label(window, "inbound-message"),
+            "Enter an ID, a name, a description and at least one tag."
+        );
+        // Save is refused while the fields are open, so a skill half typed is never lost.
+        window.click("save-inbound", cx);
+        assert_eq!(label(window, "inbound-message"), "Keep the skill or cancel it first");
+        type_skill(
+            window,
+            cx,
+            "file-ticket",
+            "File a ticket",
+            " jira,, tickets ",
+            "Open a ticket for the login bug\n\nFile the crash report",
+        );
+        window.click("keep-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbound-message"), "");
+        assert_eq!(label(window, "skill-0"), "file-ticket · File a ticket · jira, tickets");
+        window.click("add-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        // An ID that the list has already is not kept.
+        type_skill(window, cx, "file-ticket", "Ask", "questions", "");
+        window.click("keep-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbound-message"), "A skill with this ID is in the list.");
+        retype(window, cx, "skill-id", "ask");
+        window.click("keep-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "skill-count"), "Skills of the Agent Card: 2");
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    let stored = rt.block_on(rig.engine.inbound_settings("kim")).unwrap();
+    let ids: Vec<&str> = stored.skills.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, ["file-ticket", "ask"]);
+    let ticket = &stored.skills[0];
+    assert_eq!(ticket.tags, ["jira", "tickets"]);
+    assert_eq!(
+        ticket.examples,
+        ["Open a ticket for the login bug", "File the crash report"]
+    );
+    assert_eq!(ticket.description, "File a ticket. The owner approves it first.");
+
+    on_screen(cx, window, |window, cx| {
+        // The loaded skills read back as the stored ones, so nothing waits to be saved.
+        assert_eq!(label(window, "inbound-result"), "Saved");
+        assert_eq!(label(window, "inbound-changes"), "");
+        window.click("edit-skill-0", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        // The fields hold the skill. A change keeps its place in the list.
+        assert_eq!(value(window, "skill-id"), "file-ticket");
+        assert_eq!(value(window, "skill-tags"), "jira, tickets");
+        retype(window, cx, "skill-name", "Open a ticket");
+        window.click("keep-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "skill-0"), "file-ticket · Open a ticket · jira, tickets");
+        assert_eq!(label(window, "skill-1"), "ask · Ask · questions");
+        window.click("remove-skill-1", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "inbound-changes"), "Not saved");
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 2);
+    let stored = rt.block_on(rig.engine.inbound_settings("kim")).unwrap();
+    assert_eq!(stored.skills.len(), 1);
+    assert_eq!(
+        (stored.skills[0].id.as_str(), stored.skills[0].name.as_str()),
+        ("file-ticket", "Open a ticket")
+    );
+}
+
+#[gpui_kit::test]
+fn the_server_refuses_a_skill_that_breaks_a_rule_and_the_form_keeps_it(cx: &mut TestAppContext) {
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let (window, shell) = open_agent(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        window.click("inbound-on", cx);
+        retype(window, cx, "inbound-description", "Questions and tickets.");
+        window.click("add-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| {
+        // The window keeps the skill; the server checks the ID on save.
+        type_skill(window, cx, "file a ticket", "File a ticket", "jira", "");
+        window.click("keep-skill", cx);
+    });
+    on_screen(cx, window, |window, cx| window.click("save-inbound", cx));
+    wait_for_saves(cx, &shell, 1);
+    on_screen(cx, window, |window, _| {
+        let result = label(window, "inbound-result");
+        assert!(result.contains("inbound.skills[0].id"), "{result}");
+        assert_eq!(label(window, "inbound-changes"), "Not saved");
+        assert_eq!(label(window, "skill-0"), "file a ticket · File a ticket · jira");
+    });
+    assert!(
+        rt.block_on(rig.engine.inbound_settings("kim"))
+            .unwrap()
+            .skills
+            .is_empty()
+    );
+}
+
+#[gpui_kit::test]
+fn a_save_that_does_not_touch_the_skills_keeps_them_also_with_a2a_off(cx: &mut TestAppContext) {
+    use bunsin_core::inbound::InboundSkill;
+    let rt = runtime();
+    let rig = rt.block_on(common::rig());
+    let skill = InboundSkill {
+        id: "file-ticket".into(),
+        name: "File a ticket".into(),
+        description: "Opens a Jira ticket.".into(),
+        tags: vec!["jira".into()],
+        examples: vec!["Open a ticket for the login bug".into()],
+    };
+    let inbound = InboundConfig {
+        enabled: true,
+        description: "Questions about the release calendar.".into(),
+        skills: vec![skill],
+        ..InboundConfig::default()
+    };
+    let update = InboundUpdate {
+        inbound: inbound.clone(),
+        expected: Expected::Unchecked,
+    };
+    rt.block_on(rig.engine.set_inbound_settings("kim", update)).unwrap();
+    let (window, shell) = open_agent(cx, &rt, &rig);
+    on_screen(cx, window, |window, cx| {
+        assert_eq!(label(window, "skill-0"), "file-ticket · File a ticket · jira");
+        assert_eq!(label(window, "inbound-changes"), "");
+        retype(window, cx, "inbound-description", "Questions about releases.");
+        window.click("save-inbound", cx);
+    });
+    wait_for_saves(cx, &shell, 1);
+    let stored = rt.block_on(rig.engine.inbound_settings("kim")).unwrap();
+    assert_eq!(stored.description, "Questions about releases.");
+    assert!(!stored.a2a);
+    assert_eq!(stored.skills, inbound.skills);
+}

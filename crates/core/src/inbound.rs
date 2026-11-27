@@ -65,6 +65,98 @@ pub struct InboundConfig {
     /// True if the listeners that serve the endpoint also serve it over A2A (JSON-RPC) with an Agent Card.
     #[serde(default)]
     pub a2a: bool,
+    /// The skills of the Agent Card, in this order. Empty: the card has the built-in skill `ask`.
+    /// They describe the endpoint only: every message takes the same path, whatever skill it names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<InboundSkill>,
+}
+
+/// One skill of the Agent Card (A2A §4.4.5, `AgentSkill`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboundSkill {
+    /// 1 to `MAX_SKILL_ID_CHARS` of a-z, A-Z, 0-9, `.`, `_` and `-`. Unique in the card.
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// 1 to `MAX_ARD_TAGS` tags, each 1 to `MAX_ARD_TAG_CHARS` characters on one line. A2A requires one.
+    pub tags: Vec<String>,
+    /// Example requests: 0 to `MAX_SKILL_EXAMPLES`, each 1 to `MAX_SKILL_EXAMPLE_CHARS` characters on one line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+}
+
+/// The most skills of a card.
+pub const MAX_SKILLS: usize = 10;
+pub const MAX_SKILL_ID_CHARS: usize = 64;
+pub const MAX_SKILL_NAME_CHARS: usize = 100;
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1_000;
+pub const MAX_SKILL_EXAMPLES: usize = 10;
+pub const MAX_SKILL_EXAMPLE_CHARS: usize = 500;
+
+/// True if `text`, without the space around it, has `min..=max` characters on one line.
+fn one_line(text: &str, min: usize, max: usize) -> bool {
+    (min..=max).contains(&text.trim().chars().count()) && !text.contains(['\n', '\r'])
+}
+
+/// Refuses tags outside the limits. `field` names the list in the error.
+fn check_tags(tags: &[String], min: usize, field: &str) -> Result<(), String> {
+    if tags.len() > MAX_ARD_TAGS {
+        return Err(format!("`{field}` has at most {MAX_ARD_TAGS} tags"));
+    }
+    if tags.len() < min {
+        return Err(format!("`{field}` needs at least {min} tag"));
+    }
+    match tags.iter().find(|tag| !one_line(tag, 1, MAX_ARD_TAG_CHARS)) {
+        Some(tag) => Err(format!(
+            "the tag `{tag}` of `{field}` needs 1 to {MAX_ARD_TAG_CHARS} characters on one line"
+        )),
+        None => Ok(()),
+    }
+}
+
+impl InboundSkill {
+    /// Refuses a skill that breaks a limit. `n` is its position in `inbound.skills`.
+    fn check(&self, n: usize) -> Result<(), String> {
+        let field = |name: &str| format!("`inbound.skills[{n}].{name}`");
+        let id_fits = (1..=MAX_SKILL_ID_CHARS).contains(&self.id.len())
+            && self
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if !id_fits {
+            return Err(format!(
+                "{} needs 1 to {MAX_SKILL_ID_CHARS} of a-z, A-Z, 0-9, `.`, `_` and `-`",
+                field("id")
+            ));
+        }
+        if !one_line(&self.name, 1, MAX_SKILL_NAME_CHARS) {
+            return Err(format!(
+                "{} needs 1 to {MAX_SKILL_NAME_CHARS} characters on one line",
+                field("name")
+            ));
+        }
+        if !(1..=MAX_SKILL_DESCRIPTION_CHARS).contains(&self.description.trim().chars().count()) {
+            return Err(format!(
+                "{} needs 1 to {MAX_SKILL_DESCRIPTION_CHARS} characters",
+                field("description")
+            ));
+        }
+        check_tags(&self.tags, 1, &format!("inbound.skills[{n}].tags"))?;
+        if self.examples.len() > MAX_SKILL_EXAMPLES {
+            return Err(format!(
+                "{} has at most {MAX_SKILL_EXAMPLES} examples",
+                field("examples")
+            ));
+        }
+        match self.examples.iter().find(|e| !one_line(e, 1, MAX_SKILL_EXAMPLE_CHARS)) {
+            Some(example) => Err(format!(
+                "the example `{example}` of {} needs 1 to {MAX_SKILL_EXAMPLE_CHARS} characters on one line",
+                field("examples")
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 /// How the endpoint is listed in `/.well-known/ard.json`. The identifier is
@@ -98,17 +190,7 @@ pub const MAX_TRUST_MANIFEST_BYTES: usize = 16 * 1024;
 impl ArdListing {
     /// Refuses tags outside the limits and a trust manifest that does not have the ARD shapes.
     pub fn check(&self) -> Result<(), String> {
-        if self.tags.len() > MAX_ARD_TAGS {
-            return Err(format!("`inbound.ard.tags` has at most {MAX_ARD_TAGS} tags"));
-        }
-        for tag in &self.tags {
-            let fits = (1..=MAX_ARD_TAG_CHARS).contains(&tag.trim().chars().count());
-            if !fits || tag.contains(['\n', '\r']) {
-                return Err(format!(
-                    "the tag `{tag}` of `inbound.ard.tags` needs 1 to {MAX_ARD_TAG_CHARS} characters on one line"
-                ));
-            }
-        }
+        check_tags(&self.tags, 0, "inbound.ard.tags")?;
         match &self.trust_manifest {
             Some(manifest) => check_trust_manifest(manifest)
                 .map_err(|why| format!("`inbound.ard.trust_manifest` is not an ARD trust manifest: {why}")),
@@ -246,7 +328,8 @@ impl InboundConfig {
     }
 
     /// Refuses a title or a description that the server card cannot hold, an ARD listing of an
-    /// endpoint that is off, and an ARD listing that `ArdListing::check` refuses.
+    /// endpoint that is off, an ARD listing that `ArdListing::check` refuses, and skills that break
+    /// a limit or share an ID.
     pub fn check(&self) -> Result<(), String> {
         if let Some(ard) = &self.ard {
             if !self.enabled {
@@ -264,6 +347,15 @@ impl InboundConfig {
             && !fits(title)
         {
             return Err(format!("`inbound.title` has 1 to {MAX_CARD_TEXT_CHARS} characters"));
+        }
+        if self.skills.len() > MAX_SKILLS {
+            return Err(format!("`inbound.skills` has at most {MAX_SKILLS} skills"));
+        }
+        for (n, skill) in self.skills.iter().enumerate() {
+            skill.check(n)?;
+            if self.skills[..n].iter().any(|earlier| earlier.id == skill.id) {
+                return Err(format!("two skills of `inbound.skills` have the ID `{}`", skill.id));
+            }
         }
         Ok(())
     }
@@ -769,6 +861,114 @@ mod tests {
         assert_eq!((old.tags.len(), &old.trust_manifest), (0, &None));
         let text = serde_json::to_string(&old).unwrap();
         assert!(!text.contains("tags") && !text.contains("trust_manifest"), "{text}");
+    }
+
+    fn skill(id: &str) -> InboundSkill {
+        InboundSkill {
+            id: id.into(),
+            name: "File a ticket".into(),
+            description: "Opens a Jira ticket. The owner approves it first.".into(),
+            tags: vec!["jira".into()],
+            examples: vec!["Open a ticket for the login bug".into()],
+        }
+    }
+
+    fn with_skills(skills: Vec<InboundSkill>) -> InboundConfig {
+        InboundConfig {
+            skills,
+            ..InboundConfig::default()
+        }
+    }
+
+    /// One change to a valid skill.
+    type Change = fn(&mut InboundSkill);
+
+    #[test]
+    fn skills_are_checked_at_each_limit() {
+        let ten: Vec<InboundSkill> = (0..MAX_SKILLS).map(|i| skill(&format!("s{i}"))).collect();
+        assert_eq!(with_skills(ten.clone()).check(), Ok(()));
+        let mut eleven = ten;
+        eleven.push(skill("one-more"));
+        assert!(with_skills(eleven).check().unwrap_err().contains("at most 10 skills"));
+
+        // Each change is made to one valid skill; the error names the field.
+        let edge = |change: Change| {
+            let mut one = skill("a.b_c-D9");
+            change(&mut one);
+            with_skills(vec![one]).check()
+        };
+        let fits: [Change; 6] = [
+            |s| s.id = "x".repeat(MAX_SKILL_ID_CHARS),
+            |s| s.name = "n".repeat(MAX_SKILL_NAME_CHARS),
+            |s| s.description = "two\nlines are fine".into(),
+            |s| s.tags = (0..MAX_ARD_TAGS).map(|i| format!("t{i}")).collect(),
+            |s| s.examples = (0..MAX_SKILL_EXAMPLES).map(|i| format!("e{i}")).collect(),
+            |s| s.examples = Vec::new(),
+        ];
+        for change in fits {
+            assert_eq!(edge(change), Ok(()));
+        }
+        let refused: [(Change, &str); 13] = [
+            (|s| s.id = String::new(), "skills[0].id"),
+            (|s| s.id = "x".repeat(MAX_SKILL_ID_CHARS + 1), "skills[0].id"),
+            (|s| s.id = "has space".into(), "skills[0].id"),
+            (|s| s.id = "슬랙".into(), "skills[0].id"),
+            (|s| s.name = "  ".into(), "skills[0].name"),
+            (|s| s.name = "n".repeat(MAX_SKILL_NAME_CHARS + 1), "skills[0].name"),
+            (|s| s.name = "two\nlines".into(), "skills[0].name"),
+            (|s| s.description = String::new(), "skills[0].description"),
+            (
+                |s| s.description = "d".repeat(MAX_SKILL_DESCRIPTION_CHARS + 1),
+                "skills[0].description",
+            ),
+            // A2A requires a tag.
+            (|s| s.tags = Vec::new(), "at least 1 tag"),
+            (|s| s.tags = vec!["two\nlines".into()], "skills[0].tags"),
+            (
+                |s| s.examples = (0..=MAX_SKILL_EXAMPLES).map(|i| format!("e{i}")).collect(),
+                "skills[0].examples",
+            ),
+            (
+                |s| s.examples = vec!["e".repeat(MAX_SKILL_EXAMPLE_CHARS + 1)],
+                "skills[0].examples",
+            ),
+        ];
+        for (change, field) in refused {
+            let error = edge(change).unwrap_err();
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn two_skills_may_not_share_an_id_and_the_error_names_the_later_one() {
+        assert_eq!(with_skills(vec![skill("a"), skill("b")]).check(), Ok(()));
+        let error = with_skills(vec![skill("a"), skill("b"), skill("a")])
+            .check()
+            .unwrap_err();
+        assert!(error.contains("the ID `a`"), "{error}");
+        // A bad second skill names its own position.
+        let mut bad = skill("b");
+        bad.name = String::new();
+        assert!(
+            with_skills(vec![skill("a"), bad])
+                .check()
+                .unwrap_err()
+                .contains("skills[1].name")
+        );
+    }
+
+    #[test]
+    fn settings_without_skills_load_and_write_no_skills_back() {
+        let old: InboundConfig = serde_json::from_str(r#"{"enabled": true, "description": "x", "a2a": true}"#).unwrap();
+        assert!(old.skills.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("skills"));
+        // A skill with an unknown field is refused, and examples may be left out.
+        let unknown = r#"{"id": "a", "name": "A", "description": "d", "tags": ["t"], "input_modes": []}"#;
+        assert!(serde_json::from_str::<InboundSkill>(unknown).is_err());
+        let short: InboundSkill =
+            serde_json::from_str(r#"{"id": "a", "name": "A", "description": "d", "tags": ["t"]}"#).unwrap();
+        assert!(short.examples.is_empty());
+        assert!(!serde_json::to_string(&short).unwrap().contains("examples"));
     }
 
     #[test]

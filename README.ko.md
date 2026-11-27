@@ -1361,7 +1361,7 @@ bunsind caller-revoke kim 1                        # 그 token의 다음 요청�
   `tags`는 선택입니다. 0~10개이고, 각각 한 줄에 1~40자입니다.
 - **A2A 항목.** `inbound`에 `"a2a": true`를 넣으면 endpoint를 싣는 catalog마다 A2A 항목도 싣습니다.
   identifier는 `urn:air:acme.com:team:a2a:kim`, type은 `application/a2a-agent-card+json`, `url`은 같은 리스너의 Agent Card입니다.
-  표시 이름 뒤에는 ` (A2A)`가 붙고, `capabilities`는 `["ask"]`입니다.
+  표시 이름 뒤에는 ` (A2A)`가 붙습니다. `capabilities`는 card의 skill ID들이고, 직접 정한 skill이 없으면 `["ask"]`입니다.
 - **trust manifest.** `ard`에 `trust_manifest`를 넣으면 두 항목 모두에 ARD `trustManifest`(§4.5)가 실립니다. ARD의 멤버 이름 그대로 씁니다.
 
   ```json
@@ -1412,13 +1412,28 @@ endpoint는 A2A v1.0(JSON-RPC binding)도 말할 수 있습니다. 기본은 꺼
 
 - **주소:** `POST <리스너 URL>/agents/<프로필>/a2a`. 호출자는 같은 호출자 token을 보냅니다: `Authorization: Bearer <호출자 token>`.
 - **Agent Card:** `GET <리스너 URL>/agents/<프로필>/a2a/agent-card.json`(`application/json`, token 불필요).
-  제목(없으면 프로필 ID), 설명, endpoint URL, 보안 방식 `callerToken`(HTTP Bearer), skill `ask` 하나를 담습니다.
-  skill의 예는 ARD 항목의 대표 질문입니다. token과 소유자 이름은 담지 않습니다.
+  제목(없으면 프로필 ID), 설명, endpoint URL, 보안 방식 `callerToken`(HTTP Bearer), skill을 담습니다. token과 소유자 이름은 담지 않습니다.
+  직접 정한 skill이 없으면 card에는 skill `ask` 하나가 있고, 그 tags와 예는 ARD 항목의 tags와 대표 질문입니다.
   `/.well-known/agent-card.json`은 운영자가 `--a2a-root-profile`로 이 프로필을 지정했을 때만 card를 담습니다(서버 프로세스마다 agent 하나).
   지정하지 않았으면 ARD 항목의 `url`이나 소유자가 알려 준 주소로 card를 받아 client에 넘깁니다.
   card 응답에는 `ETag`가 있고, 같은 값을 `If-None-Match`로 보내면 `304 Not Modified`를 받습니다.
 - **버전:** 헤더 `A2A-Version: 1.0` 또는 query parameter `A2A-Version=1.0`을 보냅니다. 1.0만 받습니다. `1.0.2` 같은 patch 번호는 보지 않습니다.
   버전이 없으면 0.3으로 봅니다(A2A §3.6.2). 그래서 버전 없는 호출은 `-32009`를 받습니다.
+- **skill.** `inbound`의 `skills`가 card의 skill을 이 순서대로 정합니다. Agent 화면의 **Inbound endpoint and ARD listing** 카드나 설정 파일에서 정합니다.
+
+  ```json
+  "skills": [{"id": "file-ticket", "name": "File a ticket",
+              "description": "Opens a Jira ticket. The owner approves it first.",
+              "tags": ["jira"], "examples": ["Open a ticket for the login bug"]}]
+  ```
+
+  - skill은 10개까지입니다. `id`는 a-z, A-Z, 0-9, `.`, `_`, `-`로 된 1~64자이고, skill마다 달라야 합니다.
+    `name`은 한 줄에 1~100자, `description`은 1~1,000자입니다. `tags`는 1~10개이고(A2A가 하나 이상을 요구합니다), 각각 한 줄에 1~40자입니다.
+    `examples`는 0~10개이고, 각각 한 줄에 1~500자입니다.
+  - skill은 endpoint를 설명할 뿐입니다. A2A 메시지에는 skill 필드가 없고 Bunsin은 메시지의 text part만 읽으므로, 모든 메시지가 같은 경로를 탑니다.
+    agent는 메시지를 이벤트로 처리하고, agent가 제안한 모든 답, 쓰기, 삭제는 소유자의 승인을 기다립니다.
+  - **한계:** 요청에 답하는 것은 답 도구뿐입니다. agent가 요청에 대해 답 대신 쓰기(예: Jira 댓글)를 제안하고 소유자가 승인하면 쓰기는 실행되지만,
+    호출자는 결과를 받지 못하고, task는 호출자가 취소할 때까지 `TASK_STATE_WORKING`에 남습니다. 그래서 답 대신 일을 하는 skill은 task가 끝나지 않습니다.
 - **SendMessage에는 `"configuration": {"returnImmediately": true}`가 필요합니다.** 이 값을 보내지 않는 client는 `-32004`(UnsupportedOperationError)를 받습니다.
   이 값이 없으면 A2A는 task가 끝날 때까지 호출이 기다려야 한다고 정하고(§3.2.2), 소유자의 승인은 며칠 걸릴 수 있습니다.
   그러니 이 값을 보내고, `GetTask`로 상태를 다시 읽습니다.
@@ -1520,6 +1535,7 @@ notes 설정과 평가 설정도 Settings에 있습니다.
 설정 파일과 이 카드들은 같은 설정을 바꿉니다.
 
 - **Inbound endpoint and ARD listing**(Agent 화면): 켜고 끄기, 공개 listener, A2A, server card의 설명과 제목, ARD 등록(publisher 도메인, namespace, agent 이름, 잘 답하는 질문을 한 줄에 하나씩, 쉼표로 나눈 tags)을 정합니다.
+  Agent Card의 skill도 **Add a skill**, **Edit**, **Remove**로 정합니다. skill 입력란이 열려 있는 동안 Save는 기다립니다.
   양식 위에는 listener마다 endpoint 주소, 항목마다 identifier, 등록한 catalog, catalog가 빼는 이유, 그리고 DNS 글을 보여 줍니다(`bunsind inbound`와 같습니다).
   카드는 설정 파일의 trust manifest를 그대로 둡니다.
 - **Webhooks**(Agent 화면): webhook을 더하고 지웁니다. 각 webhook의 주소와 서명 secret 저장 여부를 보여 줍니다.
@@ -1531,6 +1547,8 @@ notes 설정과 평가 설정도 Settings에 있습니다.
 - **Evaluation**(Settings 화면): 통과 기준(입력란 세 개, 셋 다 비우면 기준 없음)과 LLM 심판을 정합니다.
 
 ![인바운드 endpoint 카드](docs/screens/agent-publishing-light.png)
+
+![Agent Card의 skill](docs/screens/agent-skills-light.png)
 
 ![webhook과 ARD registry 카드](docs/screens/agent-webhooks-light.png)
 

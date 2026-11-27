@@ -83,14 +83,17 @@ fn listings(
         representative_queries: ard.representative_queries.clone(),
         endpoint_url: card(Protocol::Mcp),
         tags: ard.tags.clone(),
+        capabilities: Vec::new(),
         // The same version as the server card: all crates share the workspace version.
         version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         updated_at,
         trust_manifest: trust_manifest(ard),
     };
+    // The A2A entry names the skills of the card. Without skills of its own, the card has `ask`.
     let a2a = inbound.a2a.then(|| AgentListing {
         protocol: Protocol::A2a,
         endpoint_url: card(Protocol::A2a),
+        capabilities: inbound.skills.iter().map(|skill| skill.id.clone()).collect(),
         ..mcp.clone()
     });
     std::iter::once(mcp).chain(a2a).collect()

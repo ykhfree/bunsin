@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bunsin_api::http::inbound_a2a_path;
 use bunsin_api::{ApiError, EngineApi, ProfileConfig};
-use bunsin_core::inbound::{CallerRequest, RequestStatus};
+use bunsin_core::inbound::{CallerRequest, InboundConfig, InboundSkill, RequestStatus};
 use bunsin_core::records::Caller;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -111,29 +111,10 @@ async fn card_of(state: &Inbound, profile: &str, request: &HeaderMap) -> Respons
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let inbound = &config.inbound;
-    let examples = inbound
-        .ard
-        .as_ref()
-        .map(|ard| ard.representative_queries.clone())
-        .filter(|queries| !queries.is_empty());
-    // A skill needs at least one tag (§5.7). Without ARD tags the card names the kind of skill.
-    let tags = inbound
-        .ard
-        .as_ref()
-        .map(|ard| ard.tags.iter().map(|tag| tag.trim().to_owned()).collect::<Vec<_>>())
-        .filter(|tags| !tags.is_empty())
-        .unwrap_or_else(|| vec!["questions".into()]);
-    let skill = AgentSkill {
-        id: "ask".into(),
-        name: "Ask a question".into(),
-        description: "Ask a question in plain text. The answer comes later as the artifact `answer` of the task. \
-                      The owner approves every answer."
-            .into(),
-        tags,
-        examples,
-        input_modes: None,
-        output_modes: None,
-        security_requirements: None,
+    let skills = if inbound.skills.is_empty() {
+        vec![built_in_skill(inbound)]
+    } else {
+        inbound.skills.iter().map(owner_skill).collect()
     };
     let scheme = SecurityScheme::HttpAuth(HttpAuthSecurityScheme {
         scheme: "Bearer".into(),
@@ -156,7 +137,7 @@ async fn card_of(state: &Inbound, profile: &str, request: &HeaderMap) -> Respons
         },
         default_input_modes: vec!["text/plain".into()],
         default_output_modes: vec!["text/plain".into()],
-        skills: vec![skill],
+        skills,
         provider: None,
         documentation_url: None,
         icon_url: None,
@@ -166,6 +147,49 @@ async fn card_of(state: &Inbound, profile: &str, request: &HeaderMap) -> Respons
     };
     let body = serde_json::to_string(&card).expect("a card is JSON");
     card_response(body, "application/json", request)
+}
+
+/// The skill of a card without skills of the owner: `ask`, with the ARD tags and queries.
+fn built_in_skill(inbound: &InboundConfig) -> AgentSkill {
+    let examples = inbound
+        .ard
+        .as_ref()
+        .map(|ard| ard.representative_queries.clone())
+        .filter(|queries| !queries.is_empty());
+    // A skill needs at least one tag (§5.7). Without ARD tags the card names the kind of skill.
+    let tags = inbound
+        .ard
+        .as_ref()
+        .map(|ard| ard.tags.iter().map(|tag| tag.trim().to_owned()).collect::<Vec<_>>())
+        .filter(|tags| !tags.is_empty())
+        .unwrap_or_else(|| vec!["questions".into()]);
+    AgentSkill {
+        id: "ask".into(),
+        name: "Ask a question".into(),
+        description: "Ask a question in plain text. The answer comes later as the artifact `answer` of the task. \
+                      The owner approves every answer."
+            .into(),
+        tags,
+        examples,
+        input_modes: None,
+        output_modes: None,
+        security_requirements: None,
+    }
+}
+
+/// A skill that the owner wrote, trimmed. The settings check made sure that it has a tag.
+fn owner_skill(skill: &InboundSkill) -> AgentSkill {
+    let trimmed = |texts: &[String]| texts.iter().map(|text| text.trim().to_owned()).collect::<Vec<_>>();
+    AgentSkill {
+        id: skill.id.clone(),
+        name: skill.name.trim().to_owned(),
+        description: skill.description.trim().to_owned(),
+        tags: trimmed(&skill.tags),
+        examples: Some(trimmed(&skill.examples)).filter(|examples| !examples.is_empty()),
+        input_modes: None,
+        output_modes: None,
+        security_requirements: None,
+    }
 }
 
 /// One JSON-RPC call. The middleware let the caller in. Then come the host, the body, the

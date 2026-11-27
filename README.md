@@ -1562,7 +1562,8 @@ bunsind caller-revoke kim 1                        # the next request with it is
 - **The A2A entry.** With `"a2a": true` in `inbound`, each catalog that lists the endpoint also
   lists an A2A entry: the identifier `urn:air:acme.com:team:a2a:kim`, the type
   `application/a2a-agent-card+json`, the Agent Card on the same listener as `url`, and the
-  display name with ` (A2A)` after it. Its `capabilities` are `["ask"]`.
+  display name with ` (A2A)` after it. Its `capabilities` are the IDs of the card's skills, or
+  `["ask"]` without skills of your own.
 - **Trust manifest.** Add `trust_manifest` to `ard` to put an ARD `trustManifest` (§4.5) on
   both entries. Write it with the member names of ARD:
 
@@ -1624,8 +1625,9 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
   token: `Authorization: Bearer <caller token>`.
 - **Agent Card:** `GET <listener URL>/agents/<profile>/a2a/agent-card.json` (`application/json`,
   no token needed). It holds the title (or the profile ID), the description, the endpoint URL,
-  the security scheme `callerToken` (HTTP Bearer) and one skill `ask`. The skill's examples are
-  the representative queries of the ARD listing. It never holds a token or the owner's name.
+  the security scheme `callerToken` (HTTP Bearer) and the skills. It never holds a token or the
+  owner's name. Without skills of your own, the card has one skill `ask`, with the tags and the
+  representative queries of the ARD listing as its examples.
   `/.well-known/agent-card.json` holds the card only when the operator names this profile with
   `--a2a-root-profile` (one agent per server process). Without it, find the card through the ARD
   entry's `url` or the address the owner gives you, and pass the card to your client. A card answer
@@ -1633,6 +1635,26 @@ with `"a2a": true` in `inbound`. The listeners that serve the MCP endpoint then 
 - **Version:** send the header `A2A-Version: 1.0`, or the query parameter `A2A-Version=1.0`.
   Only 1.0 is accepted; a patch number such as `1.0.2` does not count. No version means 0.3
   (A2A §3.6.2), so a call without it gets `-32009`.
+- **Skills.** `skills` in `inbound` lists the skills of the card, in this order. Set them in the
+  **Inbound endpoint and ARD listing** card of the Agent view, or in the settings file:
+
+  ```json
+  "skills": [{"id": "file-ticket", "name": "File a ticket",
+              "description": "Opens a Jira ticket. The owner approves it first.",
+              "tags": ["jira"], "examples": ["Open a ticket for the login bug"]}]
+  ```
+
+  - At most 10 skills. `id` has 1 to 64 of a-z, A-Z, 0-9, `.`, `_` and `-`, and each skill has
+    its own. `name` has 1 to 100 characters on one line, and `description` 1 to 1,000 characters.
+    `tags` has 1 to 10 tags (A2A requires one), each 1 to 40 characters on one line. `examples`
+    has 0 to 10 examples, each 1 to 500 characters on one line.
+  - A skill only describes the endpoint. An A2A message has no skill field, and Bunsin reads only
+    its text parts, so every message takes the same path: the agent handles it as an event, and
+    every answer and every write or delete it proposes waits for your approval.
+  - **Limit:** only the reply tool answers a request. If the agent proposes a write for a request
+    (for example a Jira comment) instead of a reply and you approve it, the write runs, but the
+    caller gets no result: the task stays `TASK_STATE_WORKING` until the caller cancels it. So a
+    skill that does work instead of answering leaves its tasks open.
 - **SendMessage needs `"configuration": {"returnImmediately": true}`.** A client that does not
   send it gets `-32004` (UnsupportedOperationError). Without the flag, A2A requires the call to
   wait until the task ends (§3.2.2), and your approval can take days. So send the flag, then poll
@@ -1754,7 +1776,9 @@ address rules. The settings file and these cards change the same settings.
 
 - **Inbound endpoint and ARD listing** (Agent view): on or off, the public listener, A2A, the
   description and title of the server card, and the ARD listing (publisher domain, namespace,
-  agent name, the questions it answers well, one per line, and the tags, with commas). Above the
+  agent name, the questions it answers well, one per line, and the tags, with commas), and the
+  skills of the Agent Card: **Add a skill**, **Edit** and **Remove**. Save waits while the fields
+  of a skill are open. Above the
   form the card shows the addresses of the endpoint on each listener, for each entry the
   identifier, the catalogs that list it, and each reason why a catalog leaves it out, and the DNS
   text (the same as `bunsind inbound`). The card keeps the trust manifest of the settings file.
@@ -1769,6 +1793,8 @@ address rules. The settings file and these cards change the same settings.
 - **Evaluation** (Settings view): the pass mark (three fields, or three empty fields for none) and the LLM judge.
 
 ![The inbound endpoint card](docs/screens/agent-publishing-light.png)
+
+![The skills of the Agent Card](docs/screens/agent-skills-light.png)
 
 ![The webhooks and the ARD registries](docs/screens/agent-webhooks-light.png)
 

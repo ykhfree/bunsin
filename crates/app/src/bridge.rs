@@ -221,10 +221,11 @@ pub enum UiCommand {
         profile: String,
         id: i64,
     },
-    /// Replaces the settings of the inbound endpoint and its ARD listing.
+    /// Replaces the settings of the inbound endpoint and its ARD listing. Boxed: the settings are
+    /// the largest of all commands.
     SaveInbound {
         profile: String,
-        update: InboundUpdate,
+        update: Box<InboundUpdate>,
     },
     /// Replaces the ARD registries.
     SaveArdRegistries {
@@ -733,7 +734,7 @@ pub async fn apply(api: &dyn EngineApi, state: &mut UiState, command: UiCommand)
             for_profile(selected, &profile, api.revoke_caller_token(&profile, id)).await
         }
         (UiCommand::SaveInbound { profile, update }, _) => {
-            let result = save_for(selected, &profile, api.set_inbound_settings(&profile, update)).await;
+            let result = save_for(selected, &profile, api.set_inbound_settings(&profile, *update)).await;
             state.part_result = Some((Part::Inbound, result));
             Ok(())
         }

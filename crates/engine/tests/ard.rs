@@ -2,7 +2,7 @@
 //! A real engine on a temporary directory. The operator allows the publisher domain `acme.com`.
 
 use bunsin_api::{ApiError, EngineApi, Expected, InboundUpdate, NotesSettingsUpdate, ProfileConfig};
-use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope};
+use bunsin_core::inbound::{ArdListing, InboundConfig, InboundScope, InboundSkill};
 use bunsin_core::ports::BoxFuture;
 use bunsin_core::time::utc_text;
 use bunsin_engine::{Backends, Engine, OuterListener, Runtime};
@@ -149,6 +149,34 @@ async fn a2a_on_lists_two_entries_and_a_duplicate_a2a_identifier_refuses_both() 
     let lee = &entries(&rig)[1];
     assert_eq!(lee["type"], "application/mcp-server-card+json");
     assert_eq!(lee["url"], "https://agents.acme.com/agents/lee/mcp/server-card");
+}
+
+#[tokio::test]
+async fn the_a2a_entry_names_the_skills_of_the_card_and_the_mcp_entry_keeps_its_tools() {
+    let rig = rig().await;
+    save(&rig, inbound("kim", None, true)).await.unwrap();
+    let capabilities = |rig: &Rig| -> Vec<Value> { entries(rig).iter().map(|e| e["capabilities"].clone()).collect() };
+    // Without skills of its own, the card has `ask`.
+    assert_eq!(capabilities(&rig), [json!(["ask", "get_request"]), json!(["ask"])]);
+    let skill = |id: &str| InboundSkill {
+        id: id.into(),
+        name: format!("Skill {id}"),
+        description: "Does one thing. The owner approves it first.".into(),
+        tags: vec!["work".into()],
+        examples: Vec::new(),
+    };
+    let mut config = inbound("kim", None, true);
+    config.skills = vec![skill("file-ticket"), skill("ask")];
+    save(&rig, config.clone()).await.unwrap();
+    assert_eq!(
+        capabilities(&rig),
+        [json!(["ask", "get_request"]), json!(["file-ticket", "ask"])]
+    );
+    // A skill that breaks a rule is refused on save, and the stored skills stay.
+    config.skills.push(skill("file-ticket"));
+    let error = save(&rig, config).await.unwrap_err();
+    assert!(error.to_string().contains("the ID `file-ticket`"), "{error}");
+    assert_eq!(rig.engine.inbound_settings("kim").await.unwrap().skills.len(), 2);
 }
 
 #[tokio::test]

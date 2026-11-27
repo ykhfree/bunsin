@@ -535,7 +535,7 @@
     `SendMessage`도 세는 이유: 같은 `messageId`의 재전송은 `GetTask`처럼 task를 돌려준다. 새 질문은 그 위에 `ask`와 같은 intake 한도를 센다.
     한도 초과는 -32000과 ErrorInfo `RATE_LIMIT_EXCEEDED`이다. `ApiError`는 `Invalid`→-32602, `NotFound`→-32001, `NotAllowed`→-32000, 그 밖→-32603(고정 문구)이다.
   - **Agent Card**(인증 없음, `a2a_served_on`이 아니면 404): `application/json`, CORS `*`, `max-age=300`, `ETag`(server card와 같은 `card_response`).
-    `name`은 title 또는 프로필 ID, `supportedInterfaces`는 JSONRPC 1.0 하나, `capabilities`는 셋 다 false, 보안은 `callerToken`(HTTP Bearer), skill은 `ask` 하나(tags `["questions"]`, examples는 ARD 대표 질문). token과 소유자 이름은 없다.
+    `name`은 title 또는 프로필 ID, `supportedInterfaces`는 JSONRPC 1.0 하나, `capabilities`는 셋 다 false, 보안은 `callerToken`(HTTP Bearer), skill은 `inbound.skills`(소유자가 정한 순서, 10개까지). 없으면 `ask` 하나(tags는 ARD tags 또는 `["questions"]`, examples는 ARD 대표 질문). skill은 설명일 뿐이고 메시지의 처리 경로를 바꾸지 않는다. token과 소유자 이름은 없다.
   - 적합성: `crates/daemon/tests/a2a.rs`가 §6·§8.5·§9의 JSON 예를 crate 자료형으로 왕복하고, 실제로 내는 Agent Card와 Task를 A2A v1.0.0 JSON schema 사본(`tests/fixtures/a2a-v1.0.0.schema.json`)으로 검사한다.
     이 schema는 A2A 저장소가 커밋하지 않는 비규범 빌드 산출물이고(`specification/json/README.md`), `required`가 없다. 그래서 필수 필드와 빈 배열은 테스트가 따로 본다.
 - **MCP endpoint** `POST /agents/{p}/mcp`(daemon `inbound.rs`): rmcp `StreamableHttpService`, 세션 없음(`NeverSessionManager`, legacy session mode off, JSON 응답).
@@ -559,7 +559,7 @@
     `RealBackends::validate`가 저장할 때, `Backends::ard_publishers`로 catalog가 쓸 때 검사한다. 기각: 소유자가 고르기(운영자 host에서 남의 도메인을 주장한다).
   - `check_config`의 `check_ard`가 자리표시 URL로 프로필의 모든 항목에 `build_entry`를 돌려 MUST 위반을 거부한다. `ard`는 endpoint가 켜져 있어야 한다.
     대표 질문 수가 2~5 밖이면 SHOULD 위반이라 경고와 함께 싣는다(설계 결정).
-  - **항목의 용어**: 모든 항목에 `@context: "https://agenticresourcediscovery.org/context/v1"`(§4.1 SHOULD), `capabilities`(MCP `["ask", "get_request"]`, A2A `["ask"]`: 호출자가 부를 도구와 skill),
+  - **항목의 용어**: 모든 항목에 `@context: "https://agenticresourcediscovery.org/context/v1"`(§4.1 SHOULD), `capabilities`(MCP `["ask", "get_request"]`, A2A는 card의 skill ID, skill이 없으면 `["ask"]`: 호출자가 부를 도구와 skill),
     `version`(bunsind 버전, server card와 같다), `updatedAt`, `tags`, `trustManifest`가 있다. 뒤의 셋은 값이 있을 때만 있다. `metadata`는 채울 값이 없어 쓰지 않는다.
     - `tags`: 0~10개, 각 1~40자 한 줄(core `ArdListing::check`). 어기면 저장을 거부한다. CDDL이 `tags: [+ tstr]`이므로 비면 뺀다.
     - `updatedAt`: 프로필 settings 키 `ard_updated_at`(RFC 3339 UTC, core `time::utc_text`). `set_profile_config`와 `replace_part`가 `inbound`가 바뀐 저장 뒤에 쓴다.
